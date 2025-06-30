@@ -1,3 +1,7 @@
+//! Core ECS‐to‐Arango bridge: defines `ArangoSession` and the abstract
+//! `DatabaseConnection` trait. Handles local cache, change tracking,
+//! and commit logic (create/update/delete) against any backend.
+
 use bevy::prelude::{Entity, World};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
@@ -24,7 +28,7 @@ impl std::error::Error for ArangoError {}
 /// Abstracts database operations via async returns but remains object-safe.
 #[cfg_attr(test, automock)]
 pub trait DatabaseConnection: Send + Sync {
-    /// Create a new document (entity).
+    /// Create a new document (entity) with the given key.
     fn create_document(
         &self,
         entity_key: &str,
@@ -43,6 +47,13 @@ pub trait DatabaseConnection: Send + Sync {
         &self,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<(), ArangoError>>;
+
+    /// Execute a raw AQL query returning document keys.
+    fn query_arango(
+        &self,
+        aql: String,
+        bind_vars: std::collections::HashMap<String, Value>,
+    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>>;
 }
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
@@ -100,16 +111,15 @@ impl ArangoSession {
                 .expect("delete_document failed");
         }
 
-        // Then process creates/updates, but skip any that were just deleted
-        let entities: Vec<Entity> = self
+        // Then process creates/updates
+        let to_update = self
             .dirty_entities
             .drain()
             .filter(|e| !deleted_set.contains(e))
-            .collect();
-        for entity in entities {
+            .collect::<Vec<_>>();
+        for entity in to_update {
             let key = entity.index().to_string();
-            // TODO: serialize actual components; using empty object for now
-            let data = json!({});
+            let data = json!({}); // TODO: actual component data
             if self.loaded_entities.contains(&entity) {
                 self.runtime
                     .block_on(self.db.update_document(&key, data))
@@ -127,6 +137,7 @@ impl ArangoSession {
 mod tests {
     use super::*;
     use serde_json::json;
+
     #[allow(dead_code)]
     #[derive(bevy::prelude::Component)]
     struct Foo(i32);
@@ -138,10 +149,7 @@ mod tests {
             .expect_create_document()
             .withf(|key, data| key == "0" && data == &json!({}))
             .times(1)
-            .returning(|_, _| {
-                // Return a boxed future yielding Ok(())
-                Box::pin(async move { Ok(()) })
-            });
+            .returning(|_, _| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Box::new(mock_db));
         let id = session.local_world.spawn(()).id();
@@ -214,8 +222,12 @@ mod tests {
     fn commit_clears_tracking_sets() {
         // Setup a mock that will accept one delete and one create
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db.expect_delete_document().returning(|_| Box::pin(async { Ok(()) }));
-        mock_db.expect_create_document().returning(|_, _| Box::pin(async { Ok(()) }));
+        mock_db
+            .expect_delete_document()
+            .returning(|_| Box::pin(async { Ok(()) }));
+        mock_db
+            .expect_create_document()
+            .returning(|_, _| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Box::new(mock_db));
         let id_new = session.local_world.spawn(()).id();
@@ -235,7 +247,6 @@ mod tests {
     #[test]
     fn commit_handles_multiple_entities() {
         let mut mock_db = MockDatabaseConnection::new();
-        // Expect one create for entity index 0 and one update for entity index 1
         mock_db
             .expect_create_document()
             .withf(|key, _| key == "0")
@@ -248,8 +259,8 @@ mod tests {
             .returning(|_, _| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Box::new(mock_db));
-        let id0 = session.local_world.spawn(()).id(); // index 0
-        let id1 = session.local_world.spawn(()).id(); // index 1
+        let id0 = session.local_world.spawn(()).id();
+        let id1 = session.local_world.spawn(()).id();
 
         session.mark_loaded(id1);
         session.mark_dirty(id0);
@@ -258,3 +269,9 @@ mod tests {
         session.commit();
     }
 }
+
+// Include the query builder and real‐DB connection modules:
+mod arango_query;
+mod arango_connection;
+pub use arango_query::ArangoQuery;
+pub use arango_connection::ArangoDbConnection;
