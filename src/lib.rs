@@ -1,6 +1,11 @@
 use bevy::prelude::{Entity, World};
+use futures::future::BoxFuture;
 use serde_json::Value;
 use std::{collections::HashSet, fmt};
+use tokio::runtime::Runtime;
+
+#[cfg(test)]
+use tokio::runtime::Builder;
 
 #[cfg(test)]
 use mockall::automock;
@@ -16,25 +21,38 @@ impl fmt::Display for ArangoError {
 
 impl std::error::Error for ArangoError {}
 
-/// Abstracts database operations. Object-safe (no async).
+/// Abstracts database operations via async returns but remains object-safe.
 #[cfg_attr(test, automock)]
 pub trait DatabaseConnection: Send + Sync {
     /// Create a new document (entity).
-    fn create_document(&self, entity_key: &str, data: Value) -> Result<(), ArangoError>;
+    fn create_document(
+        &self,
+        entity_key: &str,
+        data: Value,
+    ) -> BoxFuture<'static, Result<(), ArangoError>>;
 
     /// Update an existing document.
-    fn update_document(&self, entity_key: &str, patch: Value) -> Result<(), ArangoError>;
+    fn update_document(
+        &self,
+        entity_key: &str,
+        patch: Value,
+    ) -> BoxFuture<'static, Result<(), ArangoError>>;
 
     /// Delete a document (entity).
-    fn delete_document(&self, entity_key: &str) -> Result<(), ArangoError>;
+    fn delete_document(
+        &self,
+        entity_key: &str,
+    ) -> BoxFuture<'static, Result<(), ArangoError>>;
 }
 
-/// Manages a “unit of work”: a local Bevy World cache + change tracking.
+/// Manages a “unit of work”: local World cache + change tracking + async runtime.
 pub struct ArangoSession {
     pub local_world: World,
     pub db: Box<dyn DatabaseConnection>,
     pub dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
+    /// Async runtime for driving database futures.
+    pub runtime: Runtime,
 }
 
 impl ArangoSession {
@@ -46,6 +64,10 @@ impl ArangoSession {
             db,
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
+            runtime: Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create Tokio runtime"),
         }
     }
 }
