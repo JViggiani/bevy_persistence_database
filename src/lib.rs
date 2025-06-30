@@ -56,6 +56,16 @@ pub struct ArangoSession {
 }
 
 impl ArangoSession {
+    /// Manually mark an entity as needing persistence.
+    pub fn mark_dirty(&mut self, entity: Entity) {
+        self.dirty_entities.insert(entity);
+    }
+
+    /// Manually mark an entity as having been removed.
+    pub fn mark_despawned(&mut self, entity: Entity) {
+        self.despawned_entities.insert(entity);
+    }
+
     /// Testing constructor w/ mock DB.
     #[cfg(test)]
     pub fn new_mocked(db: Box<dyn DatabaseConnection>) -> Self {
@@ -75,6 +85,31 @@ impl ArangoSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(test)] use bevy::prelude::Component;
+
+    #[allow(dead_code)]
+    #[derive(Component)]
+    struct Foo(i32);
+
+    #[test]
+    fn mark_dirty_tracks_entity() {
+        // Setup
+        let mock_db = Box::new(MockDatabaseConnection::new());
+        let mut session = ArangoSession::new_mocked(mock_db);
+
+        // 1) spawn a component in local_world
+        let e = session.local_world.spawn(Foo(42));  // removed `mut`
+        let id = e.id();
+
+        // 2) mark it dirty
+        session.mark_dirty(id);
+
+        // 3) assert tracking
+        assert!(
+            session.dirty_entities.contains(&id),
+            "Entity should be marked dirty"
+        );
+    }
 
     #[test]
     fn new_session_is_empty() {
