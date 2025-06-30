@@ -92,6 +92,7 @@ impl ArangoSession {
     pub fn commit(&mut self) {
         // First process deletions
         let to_delete: Vec<Entity> = self.despawned_entities.drain().collect();
+        let deleted_set: std::collections::HashSet<Entity> = to_delete.iter().cloned().collect();
         for entity in to_delete {
             let key = entity.index().to_string();
             self.runtime
@@ -99,8 +100,12 @@ impl ArangoSession {
                 .expect("delete_document failed");
         }
 
-        // Then process creates/updates
-        let entities: Vec<Entity> = self.dirty_entities.drain().collect();
+        // Then process creates/updates, but skip any that were just deleted
+        let entities: Vec<Entity> = self
+            .dirty_entities
+            .drain()
+            .filter(|e| !deleted_set.contains(e))
+            .collect();
         for entity in entities {
             let key = entity.index().to_string();
             // TODO: serialize actual components; using empty object for now
@@ -122,7 +127,6 @@ impl ArangoSession {
 mod tests {
     use super::*;
     use serde_json::json;
-
     #[allow(dead_code)]
     #[derive(bevy::prelude::Component)]
     struct Foo(i32);
@@ -204,5 +208,53 @@ mod tests {
         assert_eq!(session.local_world.entities().len(), 0);
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
+    }
+
+    #[test]
+    fn commit_clears_tracking_sets() {
+        // Setup a mock that will accept one delete and one create
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db.expect_delete_document().returning(|_| Box::pin(async { Ok(()) }));
+        mock_db.expect_create_document().returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let id_new = session.local_world.spawn(()).id();
+        let id_old = session.local_world.spawn(()).id();
+        session.mark_loaded(id_old);
+        session.mark_dirty(id_new);
+        session.mark_dirty(id_old);
+        session.mark_despawned(id_old);
+
+        session.commit();
+
+        // After commit, both sets should be empty
+        assert!(session.dirty_entities.is_empty(), "dirty_entities should be drained");
+        assert!(session.despawned_entities.is_empty(), "despawned_entities should be drained");
+    }
+
+    #[test]
+    fn commit_handles_multiple_entities() {
+        let mut mock_db = MockDatabaseConnection::new();
+        // Expect one create for entity index 0 and one update for entity index 1
+        mock_db
+            .expect_create_document()
+            .withf(|key, _| key == "0")
+            .times(1)
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+        mock_db
+            .expect_update_document()
+            .withf(|key, _| key == "1")
+            .times(1)
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let id0 = session.local_world.spawn(()).id(); // index 0
+        let id1 = session.local_world.spawn(()).id(); // index 1
+
+        session.mark_loaded(id1);
+        session.mark_dirty(id0);
+        session.mark_dirty(id1);
+
+        session.commit();
     }
 }
