@@ -1,6 +1,6 @@
 use bevy::prelude::{Entity, World};
 use futures::future::BoxFuture;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{collections::HashSet, fmt};
 use tokio::runtime::Runtime;
 
@@ -51,6 +51,7 @@ pub struct ArangoSession {
     pub db: Box<dyn DatabaseConnection>,
     pub dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
+    pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     /// Async runtime for driving database futures.
     pub runtime: Runtime,
 }
@@ -66,6 +67,11 @@ impl ArangoSession {
         self.despawned_entities.insert(entity);
     }
 
+    /// Mark an entity as already present in the database.
+    pub fn mark_loaded(&mut self, entity: Entity) {
+        self.loaded_entities.insert(entity);
+    }
+
     /// Testing constructor w/ mock DB.
     #[cfg(test)]
     pub fn new_mocked(db: Box<dyn DatabaseConnection>) -> Self {
@@ -74,10 +80,40 @@ impl ArangoSession {
             db,
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
+            loaded_entities: HashSet::new(),
             runtime: Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("Failed to create Tokio runtime"),
+        }
+    }
+
+    /// Persist new, changed, or despawned entities to the database.
+    pub fn commit(&mut self) {
+        // First process deletions
+        let to_delete: Vec<Entity> = self.despawned_entities.drain().collect();
+        for entity in to_delete {
+            let key = entity.index().to_string();
+            self.runtime
+                .block_on(self.db.delete_document(&key))
+                .expect("delete_document failed");
+        }
+
+        // Then process creates/updates
+        let entities: Vec<Entity> = self.dirty_entities.drain().collect();
+        for entity in entities {
+            let key = entity.index().to_string();
+            // TODO: serialize actual components; using empty object for now
+            let data = json!({});
+            if self.loaded_entities.contains(&entity) {
+                self.runtime
+                    .block_on(self.db.update_document(&key, data))
+                    .expect("update_document failed");
+            } else {
+                self.runtime
+                    .block_on(self.db.create_document(&key, data))
+                    .expect("create_document failed");
+            }
         }
     }
 }
@@ -85,11 +121,61 @@ impl ArangoSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(test)] use bevy::prelude::Component;
+    use serde_json::json;
 
     #[allow(dead_code)]
-    #[derive(Component)]
+    #[derive(bevy::prelude::Component)]
     struct Foo(i32);
+
+    #[test]
+    fn commit_creates_new_entity() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db
+            .expect_create_document()
+            .withf(|key, data| key == "0" && data == &json!({}))
+            .times(1)
+            .returning(|_, _| {
+                // Return a boxed future yielding Ok(())
+                Box::pin(async move { Ok(()) })
+            });
+
+        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let id = session.local_world.spawn(()).id();
+        session.mark_dirty(id);
+        session.commit();
+    }
+
+    #[test]
+    fn commit_updates_existing_entity() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db
+            .expect_update_document()
+            .withf(|key, data| key == "0" && data == &json!({}))
+            .times(1)
+            .returning(|_, _| Box::pin(async move { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let id = session.local_world.spawn(()).id();
+        session.mark_loaded(id);      // simulate entity already in DB
+        session.mark_dirty(id);
+        session.commit();
+    }
+
+    #[test]
+    fn commit_deletes_entity() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db
+            .expect_delete_document()
+            .withf(|key| key == "0")
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let id = session.local_world.spawn(()).id();
+        session.mark_loaded(id);
+        session.mark_despawned(id);
+        session.commit();
+    }
 
     #[test]
     fn mark_dirty_tracks_entity() {
