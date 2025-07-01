@@ -5,7 +5,7 @@
 use bevy::prelude::{Entity, World};
 use futures::future::BoxFuture;
 use serde_json::{json, Value};
-use std::{collections::HashSet, fmt};
+use std::{collections::HashSet, fmt, sync::Arc};
 use tokio::runtime::Runtime;
 
 #[cfg(test)]
@@ -54,12 +54,19 @@ pub trait DatabaseConnection: Send + Sync {
         aql: String,
         bind_vars: std::collections::HashMap<String, Value>,
     ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>>;
+
+    /// Fetch a single component’s JSON blob (or `None` if missing).
+    fn fetch_component(
+        &self,
+        entity_key: &str,
+        comp_name: &str,
+    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
 }
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
 pub struct ArangoSession {
     pub local_world: World,
-    pub db: Box<dyn DatabaseConnection>,
+    pub db: Arc<dyn DatabaseConnection>,
     pub dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
@@ -85,7 +92,7 @@ impl ArangoSession {
 
     /// Testing constructor w/ mock DB.
     #[cfg(test)]
-    pub fn new_mocked(db: Box<dyn DatabaseConnection>) -> Self {
+    pub fn new_mocked(db: Arc<dyn DatabaseConnection>) -> Self {
         Self {
             local_world: World::new(),
             db,
@@ -137,6 +144,7 @@ impl ArangoSession {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[allow(dead_code)]
     #[derive(bevy::prelude::Component)]
@@ -151,7 +159,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Box::pin(async { Ok(()) }));
 
-        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id = session.local_world.spawn(()).id();
         session.mark_dirty(id);
         session.commit();
@@ -166,7 +174,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Box::pin(async move { Ok(()) }));
 
-        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id = session.local_world.spawn(()).id();
         session.mark_loaded(id);      // simulate entity already in DB
         session.mark_dirty(id);
@@ -182,7 +190,7 @@ mod tests {
             .times(1)
             .returning(|_| Box::pin(async { Ok(()) }));
 
-        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id = session.local_world.spawn(()).id();
         session.mark_loaded(id);
         session.mark_despawned(id);
@@ -191,18 +199,12 @@ mod tests {
 
     #[test]
     fn mark_dirty_tracks_entity() {
-        // Setup
-        let mock_db = Box::new(MockDatabaseConnection::new());
-        let mut session = ArangoSession::new_mocked(mock_db);
+        let mock_db = MockDatabaseConnection::new();
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
 
-        // 1) spawn a component in local_world
-        let e = session.local_world.spawn(Foo(42));  // removed `mut`
+        let e = session.local_world.spawn(Foo(42));
         let id = e.id();
-
-        // 2) mark it dirty
         session.mark_dirty(id);
-
-        // 3) assert tracking
         assert!(
             session.dirty_entities.contains(&id),
             "Entity should be marked dirty"
@@ -211,8 +213,8 @@ mod tests {
 
     #[test]
     fn new_session_is_empty() {
-        let mock_db = Box::new(MockDatabaseConnection::new());
-        let session = ArangoSession::new_mocked(mock_db);
+        let mock_db = MockDatabaseConnection::new();
+        let session = ArangoSession::new_mocked(Arc::new(mock_db));
         assert_eq!(session.local_world.entities().len(), 0);
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
@@ -220,16 +222,12 @@ mod tests {
 
     #[test]
     fn commit_clears_tracking_sets() {
-        // Setup a mock that will accept one delete and one create
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db
-            .expect_delete_document()
-            .returning(|_| Box::pin(async { Ok(()) }));
-        mock_db
-            .expect_create_document()
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+        mock_db.expect_delete_document().returning(|_| Box::pin(async { Ok(()) }));
+        mock_db.expect_create_document().returning(|_, _| Box::pin(async { Ok(()) }));
 
-        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+
         let id_new = session.local_world.spawn(()).id();
         let id_old = session.local_world.spawn(()).id();
         session.mark_loaded(id_old);
@@ -239,9 +237,8 @@ mod tests {
 
         session.commit();
 
-        // After commit, both sets should be empty
-        assert!(session.dirty_entities.is_empty(), "dirty_entities should be drained");
-        assert!(session.despawned_entities.is_empty(), "despawned_entities should be drained");
+        assert!(session.dirty_entities.is_empty());
+        assert!(session.despawned_entities.is_empty());
     }
 
     #[test]
@@ -258,7 +255,7 @@ mod tests {
             .times(1)
             .returning(|_, _| Box::pin(async { Ok(()) }));
 
-        let mut session = ArangoSession::new_mocked(Box::new(mock_db));
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id0 = session.local_world.spawn(()).id();
         let id1 = session.local_world.spawn(()).id();
 

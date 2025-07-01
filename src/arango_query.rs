@@ -72,18 +72,49 @@ impl ArangoQuery {
             .expect("AQL query failed");
         result
     }
+
+    /// Load matching entities into `session.local_world`.
+    /// Returns all matching (old + new) entities.
+    pub fn fetch_into(&self, session: &mut crate::ArangoSession) -> Vec<bevy::prelude::Entity> {
+        // 1) run AQL to get keys
+        let keys = self.fetch_ids();
+        let mut result = Vec::new();
+        for key in keys.iter() {
+            // skip already loaded
+            if session.loaded_entities.iter().any(|e| e.index().to_string() == *key) {
+                continue;
+            }
+            // spawn in local cache
+            let e = session.local_world.spawn(()).id();
+            // for each requested component name, fetch and insert
+            for &comp in &self.component_names {
+                let jsonv = futures::executor::block_on(
+                    self.db.fetch_component(key, comp)
+                ).expect("fetch_component failed");
+                if let Some(_val) = jsonv {
+                    // deserialize into T and insert; omitted here
+                    // TODO: deserialze & insert into `e`
+                }
+            }
+            session.mark_loaded(e);
+            result.push(e);
+        }
+        // return all loaded entities
+        session.loaded_entities.iter().cloned().collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{ArangoSession, DatabaseConnection, MockDatabaseConnection};
+    use serde_json::json;
     use std::sync::Arc;
-    use crate::MockDatabaseConnection;
 
-    /// Dummy components for testing
+    // Dummy components for skeleton tests
     struct A; struct B;
-    impl QueryComponent for A { fn name() -> &'static str { "A" }}
-    impl QueryComponent for B { fn name() -> &'static str { "B" }}
+    impl QueryComponent for A { fn name() -> &'static str { "A" } }
+    impl QueryComponent for B { fn name() -> &'static str { "B" } }
 
     #[test]
     fn build_query_skeleton() {
@@ -117,11 +148,45 @@ mod tests {
             });
 
         let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
-        let q = ArangoQuery::new(db_arc)
+        let q = ArangoQuery::new(db_arc.clone())
             .with::<A>()
             .with::<B>()
             .filter("doc.value > 5");
         let ids = q.fetch_ids();
         assert_eq!(ids, vec!["e1".to_string(), "e2".to_string()]);
+    }
+
+    // Real component types for fetch_into
+    #[allow(dead_code)]
+    #[derive(bevy::prelude::Component, serde::Deserialize)]
+    struct Health { value: i32 }
+    #[allow(dead_code)]
+    #[derive(bevy::prelude::Component, serde::Deserialize)]
+    struct Position { x: f32, y: f32, z: f32 }
+
+    impl QueryComponent for Health { fn name() -> &'static str { "Health" } }
+    impl QueryComponent for Position { fn name() -> &'static str { "Position" } }
+
+    #[test]
+    fn fetch_into_loads_new_entities() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db.expect_query_arango()
+            .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
+        mock_db.expect_fetch_component()
+            .withf(|k, comp| (k == "k1" || k == "k2") && comp=="Health")
+            .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
+        mock_db.expect_fetch_component()
+            .withf(|k, comp| (k == "k1" || k == "k2") && comp=="Position")
+            .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0,"z":3.0}))) }));
+
+        let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
+        let mut session = ArangoSession::new_mocked(db_arc.clone());
+        let query = ArangoQuery::new(db_arc)
+            .with::<Health>()
+            .with::<Position>();
+        let loaded = query.fetch_into(&mut session);
+
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(session.loaded_entities.len(), 2);
     }
 }

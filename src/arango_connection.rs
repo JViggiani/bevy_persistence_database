@@ -6,6 +6,7 @@ use arangors::{
     client::reqwest::ReqwestClient,
     AqlQuery,
 };
+use arangors::document::Document;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
@@ -136,6 +137,32 @@ impl DatabaseConnection for ArangoDbConnection {
                 .filter_map(|v| v.as_str().map(ToOwned::to_owned))
                 .collect();
             Ok(keys)
+        }
+        .boxed()
+    }
+
+    fn fetch_component(
+        &self,
+        entity_key: &str,
+        comp_name: &str,
+    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+        let db = self.db.clone();
+        let key = entity_key.to_string();
+        let comp = comp_name.to_string();
+        async move {
+            let col = db
+                .collection("entities")
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            let doc: Document<Value> = col
+                .document(&key)
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            // pick out the field if present
+            Ok(doc
+                .document
+                .get(&comp)
+                .cloned())
         }
         .boxed()
     }
