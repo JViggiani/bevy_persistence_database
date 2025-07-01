@@ -76,6 +76,10 @@ impl ArangoQuery {
     /// Load matching entities into `session.local_world`.
     /// Returns all matching (old + new) entities.
     pub fn fetch_into(&self, session: &mut crate::ArangoSession) -> Vec<bevy::prelude::Entity> {
+        // if we've loaded before, return cached entities without re-querying
+        if !session.loaded_entities.is_empty() {
+            return session.loaded_entities.iter().cloned().collect();
+        }
         // 1) run AQL to get keys
         let keys = self.fetch_ids();
         let mut result = Vec::new();
@@ -188,5 +192,34 @@ mod tests {
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(session.loaded_entities.len(), 2);
+    }
+
+    #[test]
+    fn fetch_into_caches_results() {
+        let mut mock_db = MockDatabaseConnection::new();
+        // only expect one AQL + component fetch sequence
+        mock_db.expect_query_arango()
+            .times(1)
+            .returning(|_, _| Box::pin(async { Ok(vec!["k".into()]) }));
+        mock_db.expect_fetch_component()
+            .times(2) // Health and Position once each
+            .returning(|_, comp| {
+                let v = if comp=="Health" {
+                    json!({"value":42})
+                } else {
+                    json!({"x":1.0,"y":2.0,"z":3.0})
+                };
+                Box::pin(async move { Ok(Some(v)) })
+            });
+
+        let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
+        let mut session = ArangoSession::new_mocked(db_arc.clone());
+        let query = ArangoQuery::new(db_arc)
+            .with::<Health>()
+            .with::<Position>();
+
+        let first = query.fetch_into(&mut session);
+        let second = query.fetch_into(&mut session);
+        assert_eq!(first, second);
     }
 }
