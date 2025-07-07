@@ -113,7 +113,8 @@ impl ArangoQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArangoSession, DatabaseConnection, MockDatabaseConnection};
+    use crate::{ArangoSession, DatabaseConnection, ArangoError};
+    use crate::arango_session::MockDatabaseConnection;
     use serde_json::json;
     use std::sync::Arc;
 
@@ -238,7 +239,7 @@ mod tests {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
             .expect_query_arango()
-            .returning(|_, _| Box::pin(async { Err(crate::ArangoError("fail".into())) }));
+            .returning(|_, _| Box::pin(async { Err(ArangoError("fail".into())) }));
         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
         ArangoQuery::new(db).fetch_ids();
     }
