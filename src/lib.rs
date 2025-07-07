@@ -201,20 +201,25 @@ impl ArangoSession {
 
     /// Phase 2: All serialization succeeded. Now, commit to the database.
     fn _execute_commit(&mut self, commit_data: CommitData) -> Result<(), ArangoError> {
-        for entity in commit_data.deletes {
-            let key = entity.index().to_string();
-            self.runtime.block_on(self.db.delete_document(&key))?;
-        }
-
         for (entity, data) in commit_data.updates {
             let key = entity.index().to_string();
             if self.loaded_entities.contains(&entity) {
                 self.runtime
                     .block_on(self.db.update_document(&key, data))?;
             } else {
+                // insert _key into object before creating
+                let mut new_data = data;
+                if let Value::Object(ref mut map) = new_data {
+                    map.insert("_key".into(), Value::String(key.clone()));
+                }
                 self.runtime
-                    .block_on(self.db.create_document(&key, data))?;
+                    .block_on(self.db.create_document(&key, new_data))?;
             }
+        }
+
+        for entity in commit_data.deletes {
+            let key = entity.index().to_string();
+            self.runtime.block_on(self.db.delete_document(&key))?;
         }
 
         if let Some(data) = commit_data.resources {
@@ -239,7 +244,7 @@ mod tests {
     use super::*;
     use serde::{Serialize, Deserialize};
     use std::sync::Arc;
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::collections::HashMap;
 
     #[derive(Resource, Serialize, Deserialize, PartialEq, Debug)]
@@ -272,7 +277,8 @@ mod tests {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
             .expect_create_document()
-            .withf(|key, data| key == "0" && data == &json!({}))
+            // now payload includes "_key": "0"
+            .withf(|key, data| key == "0" && data == &json!({"_key":"0"}))
             .times(1)
             .returning(|_, _| Box::pin(async { Ok(()) }));
 
@@ -492,8 +498,87 @@ mod tests {
         let err = session.commit().unwrap_err();
         assert_eq!(err.to_string(), "ArangoDB error: up");
     }
-}
 
+    #[test]
+    fn commit_entity_with_zero_components_sends_only_key() {
+        let mut mock = MockDatabaseConnection::new();
+        mock.expect_create_document()
+            .withf(|_collection: &str, payload: &Value| {
+                if let Value::Object(map) = payload {
+                    map.len() == 1 && map.contains_key("_key")
+                } else {
+                    false
+                }
+            })
+            .times(1)
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock));
+        let entity = session.local_world.spawn(()).id();
+        session.mark_dirty(entity);
+        assert!(session.commit().is_ok());
+    }
+
+    #[derive(bevy::prelude::Component, Serialize, Deserialize, PartialEq, Debug)]
+    enum TestEnum {
+        A,
+        B { x: i32 },
+        C(String),
+    }
+
+    #[test]
+    fn enum_component_round_trip_serializes_correctly() {
+        let mut mock = MockDatabaseConnection::new();
+        // capture the full type name
+        let key_enum = std::any::type_name::<TestEnum>();
+        mock.expect_create_document()
+            .withf(move |_col, payload| {
+                let obj = payload.as_object().unwrap();
+                // lookup by full type name, not just "TestEnum"
+                matches!(obj.get(key_enum).unwrap(), Value::String(_) | Value::Object(_))
+            })
+            .times(1)
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock));
+        session.register_serializer::<TestEnum>();
+
+        let entity = session.local_world
+            .spawn((TestEnum::B { x: 42 },))
+            .id();
+        session.mark_dirty(entity);
+        assert!(session.commit().is_ok());
+    }
+
+    #[derive(bevy::prelude::Component, Serialize, Deserialize)]
+    struct BigVec { items: Vec<i32> }
+
+    #[test]
+    fn large_payload_serializes_without_panic() {
+        let mut mock = MockDatabaseConnection::new();
+        // capture the full type name
+        let key_big = std::any::type_name::<BigVec>();
+        mock.expect_create_document()
+            .withf(move |_col, payload| {
+                let obj = payload.as_object().unwrap();
+                // lookup the nested object by full type name
+                let big = obj.get(key_big).unwrap().as_object().unwrap();
+                let items = big.get("items").unwrap().as_array().unwrap();
+                items.len() == 1000
+            })
+            .times(1)
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock));
+        session.register_serializer::<BigVec>();
+
+        let mut b = session.local_world.spawn(());
+        let data: Vec<i32> = (0..1000).collect();
+        let entity = b.insert(BigVec { items: data }).id();
+        session.mark_dirty(entity);
+        assert!(session.commit().is_ok());
+    }
+}
 /// Note: Components and resources you wish to persist **must** derive
 /// `serde::Serialize` and `serde::Deserialize`.
 mod arango_query;
