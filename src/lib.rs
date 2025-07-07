@@ -5,5 +5,5 @@ mod arango_query;
 mod arango_connection;
 
 pub use arango_session::{ArangoSession, DatabaseConnection, ArangoError};
-pub use arango_query::ArangoQuery;
+pub use arango_query::{ArangoQuery, QueryComponent};
 pub use arango_connection::ArangoDbConnection;

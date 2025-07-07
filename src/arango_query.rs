@@ -54,7 +54,7 @@ impl ArangoQuery {
         } else {
             let presences = self.component_names
                 .iter()
-                .map(|name| format!("doc.{name} != null"))
+                .map(|name| format!("doc.`{name}` != null"))
                 .collect::<Vec<_>>()
                 .join(" && ");
             aql.push_str(&format!("\n  FILTER {presences}"));
@@ -85,6 +85,7 @@ impl ArangoQuery {
         // 1) run AQL to get keys
         let keys = self.fetch_ids();
         let mut result = Vec::new();
+
         for key in keys.iter() {
             // skip already loaded
             if session.loaded_entities.iter().any(|e| e.index().to_string() == *key) {
@@ -93,13 +94,14 @@ impl ArangoQuery {
             // spawn in local cache
             let e = session.local_world.spawn(()).id();
             // for each requested component name, fetch and insert
-            for &comp in &self.component_names {
+            for &comp_name in &self.component_names {
                 let jsonv = futures::executor::block_on(
-                    self.db.fetch_component(key, comp)
+                    self.db.fetch_component(key, comp_name)
                 ).expect("fetch_component failed");
-                if let Some(_val) = jsonv {
-                    // deserialize into T and insert; omitted here
-                    // TODO: deserialze & insert into `e`
+                if let Some(val) = jsonv {
+                    if let Some(deserializer) = session.component_deserializers.get(comp_name) {
+                        deserializer(&mut session.local_world, e, val).expect("deserialization failed");
+                    }
                 }
             }
             session.mark_loaded(e);
@@ -143,8 +145,8 @@ mod tests {
             .expect_query_arango()
             .withf(|aql, vars| {
                 aql.contains("FOR doc IN entities")
-                    && aql.contains("doc.A != null")
-                    && aql.contains("doc.B != null")
+                    && aql.contains("doc.`A` != null")
+                    && aql.contains("doc.`B` != null")
                     && aql.contains("doc.value > 5")
                     && vars.is_empty()
             })
@@ -188,6 +190,8 @@ mod tests {
 
         let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
         let mut session = ArangoSession::new_mocked(db_arc.clone());
+        session.register_deserializer::<Health>();
+        session.register_deserializer::<Position>();
         let query = ArangoQuery::new(db_arc)
             .with::<Health>()
             .with::<Position>();
@@ -217,6 +221,8 @@ mod tests {
 
         let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
         let mut session = ArangoSession::new_mocked(db_arc.clone());
+        session.register_deserializer::<Health>();
+        session.register_deserializer::<Position>();
         let query = ArangoQuery::new(db_arc)
             .with::<Health>()
             .with::<Position>();
@@ -253,13 +259,13 @@ mod tests {
     fn build_query_single_and_multi() {
         let db = Arc::new(MockDatabaseConnection::new());
         let (a_single, _) = ArangoQuery::new(db.clone()).with::<H>().build_aql();
-        assert!(a_single.contains("doc.H != null"));
+        assert!(a_single.contains("doc.`H` != null"));
 
         let (a_multi, _) = ArangoQuery::new(db)
             .with::<H>()
             .with::<P>()
             .build_aql();
-        assert!(a_multi.contains("doc.H != null"));
-        assert!(a_multi.contains("doc.P != null"));
+        assert!(a_multi.contains("doc.`H` != null"));
+        assert!(a_multi.contains("doc.`P` != null"));
     }
 }

@@ -166,4 +166,42 @@ impl DatabaseConnection for ArangoDbConnection {
         }
         .boxed()
     }
+
+    fn fetch_resource(
+        &self,
+        resource_name: &str,
+    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+        let db = self.db.clone();
+        let res_name = resource_name.to_string();
+        async move {
+            let col = db
+                .collection("entities")
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            let doc: Document<Value> = col
+                .document("resources")
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            Ok(doc
+                .document
+                .get(&res_name)
+                .cloned())
+        }
+        .boxed()
+    }
+
+    fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>> {
+        let db = self.db.clone();
+        async move {
+            let col = db
+                .collection("entities")
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            col.truncate()
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            Ok(())
+        }
+        .boxed()
+    }
 }
