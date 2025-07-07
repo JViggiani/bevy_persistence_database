@@ -48,8 +48,10 @@ impl ArangoQuery {
     fn build_aql(&self) -> (String, HashMap<String, Value>) {
         // base FOR clause
         let mut aql = "FOR doc IN entities".to_string();
-        // component presence filters
-        if !self.component_names.is_empty() {
+        if self.component_names.is_empty() {
+            // no components: match all
+            aql.push_str("\n  FILTER true");
+        } else {
             let presences = self.component_names
                 .iter()
                 .map(|name| format!("doc.{name} != null"))
@@ -221,5 +223,42 @@ mod tests {
         let first = query.fetch_into(&mut session);
         let second = query.fetch_into(&mut session);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn build_query_empty_filters() {
+        let db = Arc::new(MockDatabaseConnection::new());
+        let (aql, _) = ArangoQuery::new(db).build_aql();
+        assert!(aql.contains("FILTER true"));
+    }
+
+    #[test]
+    #[should_panic(expected = "AQL query failed")]
+    fn fetch_ids_panics_on_error() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db
+            .expect_query_arango()
+            .returning(|_, _| Box::pin(async { Err(crate::ArangoError("fail".into())) }));
+        let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
+        ArangoQuery::new(db).fetch_ids();
+    }
+
+    // dummy components for mix tests
+    struct H; struct P;
+    impl QueryComponent for H { fn name() -> &'static str { "H" } }
+    impl QueryComponent for P { fn name() -> &'static str { "P" } }
+
+    #[test]
+    fn build_query_single_and_multi() {
+        let db = Arc::new(MockDatabaseConnection::new());
+        let (a_single, _) = ArangoQuery::new(db.clone()).with::<H>().build_aql();
+        assert!(a_single.contains("doc.H != null"));
+
+        let (a_multi, _) = ArangoQuery::new(db)
+            .with::<H>()
+            .with::<P>()
+            .build_aql();
+        assert!(a_multi.contains("doc.H != null"));
+        assert!(a_multi.contains("doc.P != null"));
     }
 }
