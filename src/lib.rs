@@ -72,8 +72,14 @@ pub struct ArangoSession {
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     /// Async runtime for driving database futures.
     pub runtime: Runtime,
-    component_serializers: Vec<Box<dyn Fn(Entity, &World) -> Option<(String, Value)> + Send + Sync>>,
-    resource_serializers: Vec<Box<dyn Fn(&World) -> Option<(String, Value)> + Send + Sync>>,
+    component_serializers: Vec<Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
+    resource_serializers: Vec<Box<dyn Fn(&World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
+}
+
+struct CommitData {
+    deletes: Vec<Entity>,
+    updates: Vec<(Entity, Value)>,
+    resources: Option<Value>,
 }
 
 impl ArangoSession {
@@ -82,12 +88,22 @@ impl ArangoSession {
     where
         T: bevy::ecs::component::Component + serde::Serialize + 'static,
     {
-       // Use the full Rust path as the JSON key
-       let name = std::any::type_name::<T>().to_string();
-        self.component_serializers.push(Box::new(move |entity, world| {
-            world.get::<T>(entity)
-                .map(|c| (name.clone(), serde_json::to_value(c).unwrap()))
-        }));
+        let name = std::any::type_name::<T>().to_string();
+        self.component_serializers.push(Box::new(
+            move |entity, world| -> Result<Option<(String, Value)>, ArangoError> {
+                if let Some(c) = world.get::<T>(entity) {
+                    let v = serde_json::to_value(c)
+                        .map_err(|e| ArangoError(e.to_string()))?;
+                    // Treat null (e.g. non-finite floats) as serialization error
+                    if v.is_null() {
+                        return Err(ArangoError("Could not serialize".into()));
+                    }
+                    Ok(Some((name.clone(), v)))
+                } else {
+                    Ok(None)
+                }
+            },
+        ));
     }
 
     /// Register a resource type for persistence in `commit()`.
@@ -97,7 +113,17 @@ impl ArangoSession {
     {
         let name = std::any::type_name::<R>().to_string();
         self.resource_serializers.push(Box::new(move |world| {
-            world.get_resource::<R>().map(|r| (name.clone(), serde_json::to_value(r).unwrap()))
+            if let Some(r) = world.get_resource::<R>() {
+                let v = serde_json::to_value(r)
+                    .map_err(|e| ArangoError(e.to_string()))?;
+                // Treat null (e.g. non-finite floats) as serialization error
+                if v.is_null() {
+                    return Err(ArangoError("Could not serialize".into()));
+                }
+                Ok(Some((name.clone(), v)))
+            } else {
+                Ok(None)
+            }
         }));
     }
 
@@ -134,60 +160,77 @@ impl ArangoSession {
         }
     }
 
-    /// Persist new, changed, or despawned entities to the database.
-    pub fn commit(&mut self) {
-        // First process deletions
-        let to_delete: Vec<Entity> = self.despawned_entities.drain().collect();
-        let deleted_set: std::collections::HashSet<Entity> = to_delete.iter().cloned().collect();
-        for entity in to_delete {
-            let key = entity.index().to_string();
-            self.runtime
-                .block_on(self.db.delete_document(&key))
-                .expect("delete_document failed");
-        }
+    /// Serialize all data. This will fail early if any serialization fails.
+    fn _prepare_commit(&self) -> Result<CommitData, ArangoError> {
+        let deleted_set: HashSet<Entity> = self.despawned_entities.iter().cloned().collect();
 
-        // Then process creates/updates
-        let to_update = self
+        let updates = self
             .dirty_entities
-            .drain()
+            .iter()
             .filter(|e| !deleted_set.contains(e))
-            .collect::<Vec<_>>();
-
-        for entity in to_update {
-            // aggregate registered components into JSON
-            let mut map = serde_json::Map::new();
-            for func in &self.component_serializers {
-                if let Some((k, v)) = func(entity, &self.local_world) {
-                    map.insert(k, v);
+            .map(|entity| {
+                let mut map = serde_json::Map::new();
+                for func in &self.component_serializers {
+                    if let Some((k, v)) = func(*entity, &self.local_world)? {
+                        map.insert(k, v);
+                    }
                 }
-            }
-            let data = Value::Object(map);
-            let key = entity.index().to_string();
-            if self.loaded_entities.contains(&entity) {
-                self.runtime
-                    .block_on(self.db.update_document(&key, data))
-                    .expect("update_document failed");
-            } else {
-                self.runtime
-                    .block_on(self.db.create_document(&key, data))
-                    .expect("create_document failed");
-            }
-        }
+                Ok((*entity, Value::Object(map)))
+            })
+            .collect::<Result<Vec<_>, ArangoError>>()?;
 
-        // Persist registered resources as one Arango document under key "resources"
+        let mut resource_data = None;
         if !self.resource_serializers.is_empty() {
             let mut map = serde_json::Map::new();
             for func in &self.resource_serializers {
-                if let Some((k, v)) = func(&self.local_world) {
+                if let Some((k, v)) = func(&self.local_world)? {
                     map.insert(k, v);
                 }
             }
-            let data = Value::Object(map);
-            // write to special "resources" collection
-            self.runtime
-                .block_on(self.db.create_document("resources", data))
-                .expect("create_document for resources failed");
+            if !map.is_empty() {
+                resource_data = Some(Value::Object(map));
+            }
         }
+
+        Ok(CommitData {
+            deletes: self.despawned_entities.iter().cloned().collect(),
+            updates,
+            resources: resource_data,
+        })
+    }
+
+    /// Phase 2: All serialization succeeded. Now, commit to the database.
+    fn _execute_commit(&mut self, commit_data: CommitData) -> Result<(), ArangoError> {
+        for entity in commit_data.deletes {
+            let key = entity.index().to_string();
+            self.runtime.block_on(self.db.delete_document(&key))?;
+        }
+
+        for (entity, data) in commit_data.updates {
+            let key = entity.index().to_string();
+            if self.loaded_entities.contains(&entity) {
+                self.runtime
+                    .block_on(self.db.update_document(&key, data))?;
+            } else {
+                self.runtime
+                    .block_on(self.db.create_document(&key, data))?;
+            }
+        }
+
+        if let Some(data) = commit_data.resources {
+            self.runtime
+                .block_on(self.db.create_document("resources", data))?;
+        }
+
+        self.dirty_entities.clear();
+        self.despawned_entities.clear();
+        Ok(())
+    }
+
+    /// Persist new, changed, or despawned entities to the database.
+    pub fn commit(&mut self) -> Result<(), ArangoError> {
+        let commit_data = self._prepare_commit()?;
+        self._execute_commit(commit_data)
     }
 }
 
@@ -197,6 +240,7 @@ mod tests {
     use serde::{Serialize, Deserialize};
     use std::sync::Arc;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[derive(Resource, Serialize, Deserialize, PartialEq, Debug)]
     struct MyRes { value: i32 }
@@ -216,7 +260,7 @@ mod tests {
 
         // insert resource into local_world
         session.local_world.insert_resource(MyRes { value: 5 });
-        session.commit();
+        assert!(session.commit().is_ok());
     }
 
     #[allow(dead_code)]
@@ -235,7 +279,7 @@ mod tests {
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id = session.local_world.spawn(()).id();
         session.mark_dirty(id);
-        session.commit();
+        assert!(session.commit().is_ok());
     }
 
     #[test]
@@ -251,7 +295,7 @@ mod tests {
         let id = session.local_world.spawn(()).id();
         session.mark_loaded(id);      // simulate entity already in DB
         session.mark_dirty(id);
-        session.commit();
+        assert!(session.commit().is_ok());
     }
 
     #[test]
@@ -267,7 +311,7 @@ mod tests {
         let id = session.local_world.spawn(()).id();
         session.mark_loaded(id);
         session.mark_despawned(id);
-        session.commit();
+        assert!(session.commit().is_ok());
     }
 
     #[test]
@@ -308,7 +352,7 @@ mod tests {
         session.mark_dirty(id_old);
         session.mark_despawned(id_old);
 
-        session.commit();
+        assert!(session.commit().is_ok());
 
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
@@ -336,7 +380,7 @@ mod tests {
         session.mark_dirty(id0);
         session.mark_dirty(id1);
 
-        session.commit();
+        assert!(session.commit().is_ok());
     }
 
     #[test]
@@ -376,7 +420,77 @@ mod tests {
         session.register_serializer::<B>();
         let entity = session.local_world.spawn((A(10), B("hello".into()))).id();
         session.mark_dirty(entity);
-        session.commit();
+        assert!(session.commit().is_ok());
+    }
+
+    #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
+    struct NestedVec(Vec<String>);
+    #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
+    struct NestedMap(HashMap<String, i32>);
+
+    #[test]
+    fn commit_serializes_nested_containers() {
+        let mut mock_db = MockDatabaseConnection::new();
+        let key_nv = std::any::type_name::<NestedVec>();
+        let key_nm = std::any::type_name::<NestedMap>();
+
+        mock_db.expect_create_document()
+            .withf(move |_k, data| {
+                data.get(key_nv) == Some(&json!(["a", "b", "c"])) &&
+                data.get(key_nm) == Some(&json!({"x":1,"y":2}))
+            })
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        session.register_serializer::<NestedVec>();
+        session.register_serializer::<NestedMap>();
+
+        let mut map = HashMap::new();
+        map.insert("x".to_string(), 1);
+        map.insert("y".to_string(), 2);
+        let entity = session.local_world
+            .spawn((NestedVec(vec!["a".into(),"b".into(),"c".into()]), NestedMap(map)))
+            .id();
+        session.mark_dirty(entity);
+        assert!(session.commit().is_ok());
+    }
+
+    #[derive(bevy::prelude::Component, serde::Serialize)]
+    struct ErrComp(f32); // f32::INFINITY will fail to serialize
+
+    #[test]
+    fn commit_bubbles_serialize_error() {
+        let mut mock_db = MockDatabaseConnection::new();
+        // DB shouldn't be called
+        mock_db.expect_create_document().never();
+        mock_db.expect_update_document().never();
+        mock_db.expect_delete_document().never();
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        session.register_serializer::<ErrComp>();
+        let entity = session.local_world.spawn((ErrComp(f32::INFINITY),)).id();
+        session.mark_dirty(entity);
+
+        let err = session.commit().unwrap_err();
+        assert!(err.to_string().contains("Could not serialize"));
+    }
+
+    #[test]
+    fn commit_bubbles_db_error() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db
+            .expect_create_document()
+            .returning(|_, _| Box::pin(async { Err(ArangoError("up".into())) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        #[derive(bevy::prelude::Component, serde::Serialize)]
+        struct A(i32);
+        session.register_serializer::<A>();
+        let entity = session.local_world.spawn((A(1),)).id();
+        session.mark_dirty(entity);
+
+        let err = session.commit().unwrap_err();
+        assert_eq!(err.to_string(), "ArangoDB error: up");
     }
 }
 

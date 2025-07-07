@@ -76,3 +76,40 @@ let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
 // spawn & mark_dirty...
 session.commit();
 ```
+
+## Troubleshooting
+
+### Missing `Serialize`/`Deserialize` impl
+
+If you see a compiler error like:
+
+```
+error[E0277]: the trait bound `Position: serde::ser::Serialize` is not satisfied
+ --> src/main.rs:10:6
+  |
+10 |     Position,
+  |      ^^^^^^^ the trait `serde::ser::Serialize` is not implemented for `Position`
+  |
+  = note: add `#[derive(Serialize)]` or manually implement `serde::ser::Serialize` for `Position`
+```
+
+Ensure all nested components of your Bevy components implement `Serialize`/`Deserialize`.
+
+## Best Practices
+
+• All persisted components and resources **must** derive  
+  `serde::Serialize` + `serde::Deserialize`.  
+  Otherwise `commit()` will return a serialization error.
+
+• Avoid storing non-Serde types (e.g. raw pointers) in your components.  
+  Serialization failures at runtime will cause `commit()` to return an `ArangoError`.
+
+• Prefer simple, flat data structures (`i32`, `String`, simple `struct`s) for best performance.  
+  Nested `Vec<T>` and `HashMap<K,V>` are supported but can produce large JSON payloads.
+
+• Handle `commit()` errors gracefully:
+  ```rust
+  if let Err(e) = session.commit() {
+    eprintln!("Failed to persist data: {}", e);
+  }
+  ```
