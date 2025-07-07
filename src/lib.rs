@@ -2,7 +2,7 @@
 //! `DatabaseConnection` trait.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
-use bevy::prelude::{Entity, World};
+use bevy::prelude::{Entity, World, Resource};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::{collections::HashSet, fmt, sync::Arc};
@@ -73,6 +73,7 @@ pub struct ArangoSession {
     /// Async runtime for driving database futures.
     pub runtime: Runtime,
     component_serializers: Vec<Box<dyn Fn(Entity, &World) -> Option<(String, Value)> + Send + Sync>>,
+    resource_serializers: Vec<Box<dyn Fn(&World) -> Option<(String, Value)> + Send + Sync>>,
 }
 
 impl ArangoSession {
@@ -86,6 +87,17 @@ impl ArangoSession {
         self.component_serializers.push(Box::new(move |entity, world| {
             world.get::<T>(entity)
                 .map(|c| (name.clone(), serde_json::to_value(c).unwrap()))
+        }));
+    }
+
+    /// Register a resource type for persistence in `commit()`.
+    pub fn register_resource_serializer<R>(&mut self)
+    where
+        R: Resource + serde::Serialize + 'static,
+    {
+        let name = std::any::type_name::<R>().to_string();
+        self.resource_serializers.push(Box::new(move |world| {
+            world.get_resource::<R>().map(|r| (name.clone(), serde_json::to_value(r).unwrap()))
         }));
     }
 
@@ -111,6 +123,7 @@ impl ArangoSession {
             local_world: World::new(),
             db,
             component_serializers: Vec::new(),
+            resource_serializers: Vec::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             loaded_entities: HashSet::new(),
@@ -160,14 +173,51 @@ impl ArangoSession {
                     .expect("create_document failed");
             }
         }
+
+        // Persist registered resources as one Arango document under key "resources"
+        if !self.resource_serializers.is_empty() {
+            let mut map = serde_json::Map::new();
+            for func in &self.resource_serializers {
+                if let Some((k, v)) = func(&self.local_world) {
+                    map.insert(k, v);
+                }
+            }
+            let data = Value::Object(map);
+            // write to special "resources" collection
+            self.runtime
+                .block_on(self.db.create_document("resources", data))
+                .expect("create_document for resources failed");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json};
+    use serde::{Serialize, Deserialize};
     use std::sync::Arc;
+    use serde_json::json;
+
+    #[derive(Resource, Serialize, Deserialize, PartialEq, Debug)]
+    struct MyRes { value: i32 }
+
+    #[test]
+    fn commit_serializes_resources() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db.expect_create_document()
+            .withf(|key, data| {
+                key == "resources" &&
+                data.get(std::any::type_name::<MyRes>()) == Some(&json!({"value":5}))
+            })
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        session.register_resource_serializer::<MyRes>();
+
+        // insert resource into local_world
+        session.local_world.insert_resource(MyRes { value: 5 });
+        session.commit();
+    }
 
     #[allow(dead_code)]
     #[derive(bevy::prelude::Component)]
