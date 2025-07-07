@@ -1,10 +1,10 @@
 //! Core ECS‐to‐Arango bridge: defines `ArangoSession` and the abstract
-//! `DatabaseConnection` trait. Handles local cache, change tracking,
-//! and commit logic (create/update/delete) against any backend.
+//! `DatabaseConnection` trait.
+//! Handles local cache, change tracking, and commit logic (create/update/delete).
 
 use bevy::prelude::{Entity, World};
 use futures::future::BoxFuture;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{collections::HashSet, fmt, sync::Arc};
 use tokio::runtime::Runtime;
 
@@ -72,9 +72,23 @@ pub struct ArangoSession {
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     /// Async runtime for driving database futures.
     pub runtime: Runtime,
+    component_serializers: Vec<Box<dyn Fn(Entity, &World) -> Option<(String, Value)> + Send + Sync>>,
 }
 
 impl ArangoSession {
+    /// Register a component type for persistence in `commit()`.
+    pub fn register_serializer<T>(&mut self)
+    where
+        T: bevy::ecs::component::Component + serde::Serialize + 'static,
+    {
+       // Use the full Rust path as the JSON key
+       let name = std::any::type_name::<T>().to_string();
+        self.component_serializers.push(Box::new(move |entity, world| {
+            world.get::<T>(entity)
+                .map(|c| (name.clone(), serde_json::to_value(c).unwrap()))
+        }));
+    }
+
     /// Manually mark an entity as needing persistence.
     pub fn mark_dirty(&mut self, entity: Entity) {
         self.dirty_entities.insert(entity);
@@ -96,6 +110,7 @@ impl ArangoSession {
         Self {
             local_world: World::new(),
             db,
+            component_serializers: Vec::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             loaded_entities: HashSet::new(),
@@ -124,9 +139,17 @@ impl ArangoSession {
             .drain()
             .filter(|e| !deleted_set.contains(e))
             .collect::<Vec<_>>();
+
         for entity in to_update {
+            // aggregate registered components into JSON
+            let mut map = serde_json::Map::new();
+            for func in &self.component_serializers {
+                if let Some((k, v)) = func(entity, &self.local_world) {
+                    map.insert(k, v);
+                }
+            }
+            let data = Value::Object(map);
             let key = entity.index().to_string();
-            let data = json!({}); // TODO: actual component data
             if self.loaded_entities.contains(&entity) {
                 self.runtime
                     .block_on(self.db.update_document(&key, data))
@@ -143,7 +166,7 @@ impl ArangoSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json};
     use std::sync::Arc;
 
     #[allow(dead_code)]
@@ -265,9 +288,50 @@ mod tests {
 
         session.commit();
     }
+
+    #[test]
+    fn nested_serde_roundtrip() {
+        use serde::{Serialize, Deserialize};
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct Nested { a: u8, b: Vec<String> }
+
+        let orig = Nested { a: 42, b: vec!["foo".into(), "bar".into()] };
+        let val = serde_json::to_value(&orig).expect("serialize failed");
+        let back: Nested = serde_json::from_value(val).expect("deserialize failed");
+        assert_eq!(orig, back);
+    }
+
+    #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
+    struct A(i32);
+    #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
+    struct B(String);
+
+    #[test]
+    fn commit_serializes_multiple_components() {
+        let mut mock_db = MockDatabaseConnection::new();
+        // derive the full names for A and B
+        let key_a = std::any::type_name::<A>();
+        let key_b = std::any::type_name::<B>();
+        mock_db
+            .expect_create_document()
+            .withf(move |_key, data| {
+                data.get(key_a) == Some(&json!(10)) &&
+                data.get(key_b) == Some(&json!("hello"))
+            })
+            .returning(|_, _| Box::pin(async { Ok(()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        // register serializers for A and B
+        session.register_serializer::<A>();
+        session.register_serializer::<B>();
+        let entity = session.local_world.spawn((A(10), B("hello".into()))).id();
+        session.mark_dirty(entity);
+        session.commit();
+    }
 }
 
-// Include the query builder and real‐DB connection modules:
+/// Note: Components and resources you wish to persist **must** derive
+/// `serde::Serialize` and `serde::Deserialize`.
 mod arango_query;
 mod arango_connection;
 pub use arango_query::ArangoQuery;
