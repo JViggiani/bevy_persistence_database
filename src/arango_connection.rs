@@ -40,25 +40,18 @@ impl ArangoDbConnection {
 impl DatabaseConnection for ArangoDbConnection {
     fn create_document(
         &self,
-        entity_key: &str,
         data: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
+    ) -> BoxFuture<'static, Result<String, ArangoError>> {
         let db = self.db.clone();
-        let key = entity_key.to_string();
         async move {
-            // embed the key in the JSON body
-            let mut body = data;
-            if let Value::Object(map) = &mut body {
-                map.insert("_key".into(), Value::String(key));
-            }
             let col = db
                 .collection("entities")
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            col.create_document(body, Default::default())
+            let doc_meta = col.create_document(data, Default::default())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
+            Ok(doc_meta.header().unwrap()._key.clone())
         }
         .boxed()
     }

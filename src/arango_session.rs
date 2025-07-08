@@ -24,12 +24,11 @@ impl std::error::Error for ArangoError {}
 /// Abstracts database operations via async returns but remains object-safe.
 #[cfg_attr(test, automock)]
 pub trait DatabaseConnection: Send + Sync {
-    /// Create a new document (entity) with the given key.
+    /// Create a new document (entity). Returns the new doc's key.
     fn create_document(
         &self,
-        entity_key: &str,
         data: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>>;
+    ) -> BoxFuture<'static, Result<String, ArangoError>>;
 
     /// Update an existing document.
     fn update_document(
@@ -257,25 +256,22 @@ impl ArangoSession {
 
         // updates
         for (entity, data) in updates {
-            let key = entity.index().to_string();
-            if self.loaded_entities.contains(&entity) {
-                self.db.update_document(&key, data).await?;
+            if let Some(guid) = self.local_world.get::<crate::Guid>(entity) {
+                self.db.update_document(guid.id(), data).await?;
             } else {
-                let mut new_data = data;
-                if let Value::Object(ref mut map) = new_data {
-                    map.insert("_key".into(), Value::String(key.clone()));
-                }
-                self.db.create_document(&key, new_data).await?;
+                let key = self.db.create_document(data).await?;
+                self.local_world.entity_mut(entity).insert(crate::Guid::new(key));
             }
         }
         // deletes
         for entity in deletes {
-            let key = entity.index().to_string();
-            self.db.delete_document(&key).await?;
+            if let Some(guid) = self.local_world.get::<crate::Guid>(entity) {
+                self.db.delete_document(guid.id()).await?;
+            }
         }
         // resources
         if let Some(data) = resources {
-            self.db.create_document("resources", data).await?;
+            self.db.update_document("resources", data).await?;
         }
         self.dirty_entities.clear();
         self.despawned_entities.clear();
@@ -330,7 +326,7 @@ mod arango_session {
     #[tokio::test]
     async fn commit_serializes_resources() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db.expect_create_document()
+        mock_db.expect_update_document()
             .withf(|k, d| k=="resources" && d.get(type_name::<MyRes>())==Some(&json!({"value":5})))
             .returning(|_,_| Box::pin(async{Ok(())}));
 
@@ -348,9 +344,9 @@ mod arango_session {
     async fn commit_creates_new_entity() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_create_document()
-            .withf(|key, data| key=="0" && data==&json!({"_key": "0"}))
+            .withf(|data| data.as_object().unwrap().is_empty())
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id = session.local_world.spawn(()).id();
@@ -359,16 +355,36 @@ mod arango_session {
     }
 
     #[tokio::test]
+    async fn commit_assigns_guid_to_new_entity() {
+        let mut mock_db = MockDatabaseConnection::new();
+        mock_db.expect_create_document()
+            .returning(|_| Box::pin(async { Ok("new_key_123".to_string()) }));
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let id = session.local_world.spawn(()).id();
+        session.mark_dirty(id);
+        
+        // Before commit, no Guid
+        assert!(session.local_world.get::<crate::Guid>(id).is_none());
+
+        session.commit().await.unwrap();
+
+        // After commit, Guid should be present
+        let guid = session.local_world.get::<crate::Guid>(id).unwrap();
+        assert_eq!(guid.id(), "new_key_123");
+    }
+
+    #[tokio::test]
     async fn commit_updates_existing_entity() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
             .expect_update_document()
-            .withf(|key, data| key == "0" && data == &json!({}))
+            .withf(|key, data| key == "0" && data.as_object().unwrap().is_empty())
             .times(1)
             .returning(|_, _| Box::pin(async move { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id = session.local_world.spawn(()).id();
+        let id = session.local_world.spawn(crate::Guid::new("0".to_string())).id();
         session.mark_loaded(id);      // simulate entity already in DB
         session.mark_dirty(id);
         assert!(session.commit().await.is_ok());
@@ -378,13 +394,11 @@ mod arango_session {
     async fn commit_serializes_entity_with_key() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_create_document()
-            .withf(|key, data| {
-                key == "0" &&
-                data.get("_key") == Some(&json!("0")) &&
+            .withf(|data| {
                 data.get(type_name::<MyComp>()) == Some(&json!({"value": 10}))
             })
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         session.register_serializer::<MyComp>();
@@ -403,7 +417,7 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id = session.local_world.spawn(()).id();
+        let id = session.local_world.spawn(crate::Guid::new("0".to_string())).id();
         session.mark_loaded(id);
         session.mark_despawned(id);
         assert!(session.commit().await.is_ok());
@@ -436,12 +450,12 @@ mod arango_session {
     fn commit_clears_tracking_sets() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_delete_document().returning(|_| Box::pin(async { Ok(()) }));
-        mock_db.expect_create_document().returning(|_, _| Box::pin(async { Ok(()) }));
+        mock_db.expect_create_document().returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
 
         let id_new = session.local_world.spawn(()).id();
-        let id_old = session.local_world.spawn(()).id();
+        let id_old = session.local_world.spawn(crate::Guid::new("old_key".to_string())).id();
         session.mark_loaded(id_old);
         session.mark_dirty(id_new);
         session.mark_dirty(id_old);
@@ -458,9 +472,8 @@ mod arango_session {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
             .expect_create_document()
-            .withf(|key, _| key == "0")
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
         mock_db
             .expect_update_document()
             .withf(|key, _| key == "1")
@@ -469,7 +482,7 @@ mod arango_session {
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let id0 = session.local_world.spawn(()).id();
-        let id1 = session.local_world.spawn(()).id();
+        let id1 = session.local_world.spawn(crate::Guid::new("1".to_string())).id();
 
         session.mark_loaded(id1);
         session.mark_dirty(id0);
@@ -503,11 +516,11 @@ mod arango_session {
         let key_b = std::any::type_name::<B>();
         mock_db
             .expect_create_document()
-            .withf(move |_key, data| {
+            .withf(move |data| {
                 data.get(key_a) == Some(&json!(10)) &&
                 data.get(key_b) == Some(&json!("hello"))
             })
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         // register serializers for A and B
@@ -530,11 +543,11 @@ mod arango_session {
         let key_nm = std::any::type_name::<NestedMap>();
 
         mock_db.expect_create_document()
-            .withf(move |_k, data| {
+            .withf(move |data| {
                 data.get(key_nv) == Some(&json!(["a", "b", "c"])) &&
                 data.get(key_nm) == Some(&json!({"x":1,"y":2}))
             })
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         session.register_serializer::<NestedVec>();
@@ -575,7 +588,7 @@ mod arango_session {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
             .expect_create_document()
-            .returning(|_, _| Box::pin(async { Err(ArangoError("up".into())) }));
+            .returning(|_| Box::pin(async { Err(ArangoError("up".into())) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
@@ -592,15 +605,11 @@ mod arango_session {
     fn commit_entity_with_zero_components_sends_only_key() {
         let mut mock = MockDatabaseConnection::new();
         mock.expect_create_document()
-            .withf(|_collection: &str, payload: &Value| {
-                if let Value::Object(map) = payload {
-                    map.len() == 1 && map.contains_key("_key")
-                } else {
-                    false
-                }
+            .withf(|payload: &Value| {
+                payload.as_object().unwrap().is_empty()
             })
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
         let entity = session.local_world.spawn(()).id();
@@ -621,13 +630,13 @@ mod arango_session {
         // capture the full type name
         let key_enum = std::any::type_name::<TestEnum>();
         mock.expect_create_document()
-            .withf(move |_col, payload| {
+            .withf(move |payload| {
                 let obj = payload.as_object().unwrap();
                 // lookup by full type name, not just "TestEnum"
                 matches!(obj.get(key_enum).unwrap(), Value::String(_) | Value::Object(_))
             })
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
         session.register_serializer::<TestEnum>();
@@ -648,7 +657,7 @@ mod arango_session {
         // capture the full type name
         let key_big = std::any::type_name::<BigVec>();
         mock.expect_create_document()
-            .withf(move |_col, payload| {
+            .withf(move |payload| {
                 let obj = payload.as_object().unwrap();
                 // lookup the nested object by full type name
                 let big = obj.get(key_big).unwrap().as_object().unwrap();
@@ -656,7 +665,7 @@ mod arango_session {
                 items.len() == 1000
             })
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
         session.register_serializer::<BigVec>();
