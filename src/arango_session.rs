@@ -5,7 +5,7 @@
 use bevy::prelude::{Entity, World, Resource};
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::{collections::{HashSet, HashMap}, fmt, sync::Arc};
+use std::{any::TypeId, collections::{HashSet, HashMap}, fmt, sync::Arc};
 
 #[cfg(test)]
 use mockall::automock;
@@ -63,8 +63,18 @@ pub trait DatabaseConnection: Send + Sync {
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
 
+    /// Creates or replaces a resource document.
+    fn upsert_resource(
+        &self,
+        resource_name: &str,
+        data: Value,
+    ) -> BoxFuture<'static, Result<(), ArangoError>>;
+
     /// Clear all documents from the entities collection.
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>>;
+
+    /// Clear all documents from the resources collection.
+    fn clear_resources(&self) -> BoxFuture<'static, Result<(), ArangoError>>;
 }
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
@@ -74,16 +84,17 @@ pub struct ArangoSession {
     pub dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
+    pub dirty_resources: HashSet<TypeId>, // track dirty resources
     component_serializers: Vec<Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
     pub component_deserializers: HashMap<String, Box<dyn Fn(&mut World, Entity, Value) -> Result<(), ArangoError> + Send + Sync>>,
-    resource_serializers: Vec<Box<dyn Fn(&World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
+    resource_serializers: Vec<Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
     resource_deserializers: HashMap<String, Box<dyn Fn(&mut World, Value) -> Result<(), ArangoError> + Send + Sync>>,
 }
 
 struct CommitData {
     deletes: Vec<Entity>,
     updates: Vec<(Entity, Value)>,
-    resources: Option<Value>,
+    resources: Vec<(String, Value)>,
 }
 
 impl ArangoSession {
@@ -133,7 +144,12 @@ impl ArangoSession {
         R: Resource + serde::Serialize + serde::de::DeserializeOwned + 'static,
     {
         let name = std::any::type_name::<R>().to_string();
-        self.resource_serializers.push(Box::new(move |world| {
+        let type_id = TypeId::of::<R>();
+        self.resource_serializers.push(Box::new(move |world, session| {
+            // Only serialize if the resource is marked dirty
+            if !session.dirty_resources.contains(&type_id) {
+                return Ok(None);
+            }
             if let Some(r) = world.get_resource::<R>() {
                 let v = serde_json::to_value(r)
                     .map_err(|e| ArangoError(e.to_string()))?;
@@ -170,6 +186,11 @@ impl ArangoSession {
         self.dirty_entities.insert(entity);
     }
 
+    /// Manually mark a resource as needing persistence.
+    pub fn mark_resource_dirty<R: Resource>(&mut self) {
+        self.dirty_resources.insert(TypeId::of::<R>());
+    }
+
     /// Manually mark an entity as having been removed.
     pub fn mark_despawned(&mut self, entity: Entity) {
         self.despawned_entities.insert(entity);
@@ -193,6 +214,7 @@ impl ArangoSession {
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             loaded_entities: HashSet::new(),
+            dirty_resources: HashSet::new(),
         }
     }
 
@@ -208,6 +230,7 @@ impl ArangoSession {
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             loaded_entities: HashSet::new(),
+            dirty_resources: HashSet::new(),
         }
     }
 
@@ -230,16 +253,10 @@ impl ArangoSession {
             })
             .collect::<Result<Vec<_>, ArangoError>>()?;
 
-        let mut resource_data = None;
-        if !self.resource_serializers.is_empty() {
-            let mut map = serde_json::Map::new();
-            for func in &self.resource_serializers {
-                if let Some((k, v)) = func(&self.local_world)? {
-                    map.insert(k, v);
-                }
-            }
-            if !map.is_empty() {
-                resource_data = Some(Value::Object(map));
+        let mut resource_data = Vec::new();
+        for func in &self.resource_serializers {
+            if let Some((k, v)) = func(&self.local_world, self)? {
+                resource_data.push((k, v));
             }
         }
 
@@ -270,11 +287,12 @@ impl ArangoSession {
             }
         }
         // resources
-        if let Some(data) = resources {
-            self.db.update_document("resources", data).await?;
+        for (name, data) in resources {
+            self.db.upsert_resource(&name, data).await?;
         }
         self.dirty_entities.clear();
         self.despawned_entities.clear();
+        self.dirty_resources.clear();
         Ok(())
     }
 }
@@ -326,13 +344,27 @@ mod arango_session {
     #[tokio::test]
     async fn commit_serializes_resources() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db.expect_update_document()
-            .withf(|k, d| k=="resources" && d.get(type_name::<MyRes>())==Some(&json!({"value":5})))
+        mock_db.expect_upsert_resource()
+            .withf(|k, d| k==type_name::<MyRes>() && d==&json!({"value":5}))
             .returning(|_,_| Box::pin(async{Ok(())}));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         session.register_resource_serializer::<MyRes>();
         session.local_world.insert_resource(MyRes{value:5});
+        session.mark_resource_dirty::<MyRes>(); // Mark the resource as dirty
+        assert!(session.commit().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn commit_skips_clean_resources() {
+        let mut mock_db = MockDatabaseConnection::new();
+        // Expect upsert_resource to never be called
+        mock_db.expect_upsert_resource().never();
+
+        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        session.register_resource_serializer::<MyRes>();
+        session.local_world.insert_resource(MyRes{value:5});
+        // Do NOT mark the resource as dirty
         assert!(session.commit().await.is_ok());
     }
 

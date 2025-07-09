@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid};
+use crate::{DatabaseConnection, Guid, Collection};
 
 /// Trait for types that can be queried as a component in AQL.
 pub trait QueryComponent {
@@ -47,7 +47,7 @@ impl ArangoQuery {
     /// Construct the AQL and bind-variables tuple.
     fn build_aql(&self) -> (String, HashMap<String, Value>) {
         // base FOR clause
-        let mut aql = "FOR doc IN entities".to_string();
+        let mut aql = format!("FOR doc IN {}", Collection::Entities);
         if self.component_names.is_empty() {
             // no components: match all
             aql.push_str("\n  FILTER true");

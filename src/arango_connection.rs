@@ -2,16 +2,16 @@
 //! Inject this into `ArangoSession` in production to persist components.
 
 use arangors::{
-    Connection, Database,
     client::reqwest::ReqwestClient,
-    AqlQuery,
+    document::options::InsertOptions,
+    AqlQuery, ClientError, Connection, Database,
 };
 use arangors::document::Document;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
-use crate::{DatabaseConnection, ArangoError};
+use crate::{DatabaseConnection, ArangoError, Collection};
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
@@ -19,7 +19,8 @@ pub struct ArangoDbConnection {
 }
 
 impl ArangoDbConnection {
-    /// Connects to ArangoDB via JWT and selects the specified database.
+    /// Connects to ArangoDB via JWT, selects the specified database, and
+    /// ensures the required collections exist.
     pub async fn connect(
         url: &str,
         user: &str,
@@ -27,13 +28,35 @@ impl ArangoDbConnection {
         db_name: &str,
     ) -> Result<Self, ArangoError> {
         let conn = Connection::establish_jwt(url, user, pass)
-             .await
-             .map_err(|e| ArangoError(e.to_string()))?;
+            .await
+            .map_err(|e| ArangoError(e.to_string()))?;
         let db: Database<ReqwestClient> = conn
-             .db(db_name)
-             .await
-             .map_err(|e| ArangoError(e.to_string()))?;
-         Ok(Self { db })
+            .db(db_name)
+            .await
+            .map_err(|e| ArangoError(e.to_string()))?;
+
+        // Ensure all required collections exist.
+        let collections_to_ensure = vec![
+            Collection::Entities.to_string(),
+            Collection::Resources.to_string(),
+        ];
+        for col_name in collections_to_ensure {
+            match db.create_collection(&col_name).await {
+                Ok(_) => {} // Collection created successfully
+                Err(e) => {
+                    // If the error is "duplicate name", the collection already exists, which is fine.
+                    if let ClientError::Arango(arango_error) = e {
+                        if arango_error.error_num() != 1207 { // 1207 is "duplicate name"
+                            return Err(ArangoError(arango_error.to_string()));
+                        }
+                    } else {
+                        return Err(ArangoError(e.to_string()));
+                    }
+                }
+            }
+        }
+
+        Ok(Self { db })
     }
 }
 
@@ -45,7 +68,7 @@ impl DatabaseConnection for ArangoDbConnection {
         let db = self.db.clone();
         async move {
             let col = db
-                .collection("entities")
+                .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             let doc_meta = col.create_document(data, Default::default())
@@ -65,7 +88,7 @@ impl DatabaseConnection for ArangoDbConnection {
         let key_owned = entity_key.to_string();
         async move {
             let col = db
-                .collection("entities")
+                .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             col.update_document(&key_owned, patch, Default::default())
@@ -84,7 +107,7 @@ impl DatabaseConnection for ArangoDbConnection {
         let key_owned = entity_key.to_string();
         async move {
             let col = db
-                .collection("entities")
+                .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             // remove_document<T>: specify Value as the document type
@@ -144,7 +167,7 @@ impl DatabaseConnection for ArangoDbConnection {
         let comp = comp_name.to_string();
         async move {
             let col = db
-                .collection("entities")
+                .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             let doc: Document<Value> = col
@@ -165,20 +188,52 @@ impl DatabaseConnection for ArangoDbConnection {
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
         let db = self.db.clone();
-        let res_name = resource_name.to_string();
+        let res_key = resource_name.to_string();
         async move {
             let col = db
-                .collection("entities")
+                .collection(&Collection::Resources.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            let doc: Document<Value> = col
-                .document("resources")
+            // A document may not exist, so we handle the error.
+            match col.document::<Value>(&res_key).await {
+                Ok(doc) => Ok(Some(doc.document)),
+                Err(e) => {
+                    if let ClientError::Arango(ref api_err) = e {
+                        if api_err.error_num() == 1202 { // 1202 is "document not found"
+                            return Ok(None);
+                        }
+                    }
+                    Err(ArangoError(e.to_string()))
+                }
+            }
+        }
+        .boxed()
+    }
+
+    fn upsert_resource(
+        &self,
+        resource_name: &str,
+        mut data: Value,
+    ) -> BoxFuture<'static, Result<(), ArangoError>> {
+        let db = self.db.clone();
+        let key = resource_name.to_string();
+        async move {
+            let col = db
+                .collection(&Collection::Resources.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(doc
-                .document
-                .get(&res_name)
-                .cloned())
+
+            if let Some(obj) = data.as_object_mut() {
+                obj.insert("_key".to_string(), Value::String(key));
+            } else {
+                return Err(ArangoError("Resource data is not a JSON object".into()));
+            }
+
+            let options = InsertOptions::builder().overwrite(true).build();
+            col.create_document(data, options)
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            Ok(())
         }
         .boxed()
     }
@@ -187,7 +242,22 @@ impl DatabaseConnection for ArangoDbConnection {
         let db = self.db.clone();
         async move {
             let col = db
-                .collection("entities")
+                .collection(&Collection::Entities.to_string())
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            col.truncate()
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            Ok(())
+        }
+        .boxed()
+    }
+
+    fn clear_resources(&self) -> BoxFuture<'static, Result<(), ArangoError>> {
+        let db = self.db.clone();
+        async move {
+            let col = db
+                .collection(&Collection::Resources.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             col.truncate()
