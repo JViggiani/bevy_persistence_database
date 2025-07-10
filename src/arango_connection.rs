@@ -6,16 +6,23 @@ use arangors::{
     document::options::InsertOptions,
     AqlQuery, ClientError, Connection, Database,
 };
-use arangors::document::Document;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 use crate::{DatabaseConnection, ArangoError, Collection};
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
     db: Database<ReqwestClient>,
+}
+
+impl fmt::Debug for ArangoDbConnection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArangoDbConnection")
+            .finish_non_exhaustive()
+    }
 }
 
 impl ArangoDbConnection {

@@ -2,33 +2,84 @@ use bevy::prelude::{Component, Resource};
 use bevy_arangodb::{
     ArangoDbConnection, ArangoQuery, ArangoSession, DatabaseConnection, Guid, QueryComponent,
 };
+use ctor::dtor;
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use std::sync::Arc;
 use testcontainers::{
-    core::WaitFor,
-    runners::AsyncRunner,
-    ContainerAsync,
-    ContainerRequest,
-    GenericImage,
-    ImageExt,
+    core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, ContainerAsync
 };
 use tokio::sync::{Mutex, OnceCell};
 
-// holds the running arango container, initialized only once.
-static DOCKER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+// This will hold the container instance to keep it alive for the duration of the tests.
+static DOCKER_CONTAINER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+// This will hold the database connection Arc, which is cheap to clone.
+static DB_CONNECTION: OnceCell<Arc<ArangoDbConnection>> = OnceCell::const_new();
 
 // A mutex to ensure that tests run serially, not in parallel.
 static DB_LOCK: Mutex<()> = Mutex::const_new(());
 
-async fn get_docker_container() -> &'static ContainerAsync<GenericImage> {
-    DOCKER
-        .get_or_init(|| async {
-            arangodb_image()
-                .start()
-                .await
-                .expect("Failed to start ArangoDB container")
-        })
+/// This function will be executed when the test program exits.
+#[dtor]
+fn teardown() {
+    if let Some(container) = DOCKER_CONTAINER.get() {
+        let id = container.id();
+        let status = Command::new("docker")
+            .arg("rm")
+            .arg("--force")
+            .arg(id)
+            .status()
+            .expect("Failed to execute docker rm command");
+
+        if !status.success() {
+            eprintln!(
+                "Error removing container '{}': command exited with status {}",
+                id, status
+            );
+        }
+    }
+}
+
+/// Lazily initializes and returns a shared DB connection.
+/// On first call, starts the Docker container and connects to the database.
+async fn get_db_connection() -> Arc<ArangoDbConnection> {
+    if let Some(db) = DB_CONNECTION.get() {
+        return db.clone();
+    }
+
+    let container = GenericImage::new("arangodb", "3.12.5")
+        .with_wait_for(WaitFor::message_on_stdout("is ready for business"))
+        .with_env_var("ARANGO_ROOT_PASSWORD", "password")
+        .start()
         .await
+        .expect("Failed to start ArangoDB container");
+
+    let host_port = container.get_host_port_ipv4(8529).await.unwrap();
+    let url = format!("http://127.0.0.1:{}", host_port);
+
+    let db = Arc::new(
+        ArangoDbConnection::connect(&url, "root", "password", "_system")
+            .await
+            .expect("Failed to connect to ArangoDB container"),
+    );
+
+    // Store the container to keep it alive.
+    DOCKER_CONTAINER
+        .set(container)
+        .expect("Failed to set container");
+
+    DB_CONNECTION
+        .set(db.clone())
+        .expect("Failed to set DB connection");
+    db
+}
+
+/// Gets the shared test context and clears the database for a new test.
+async fn setup() -> Arc<ArangoDbConnection> {
+    let db = get_db_connection().await;
+    db.clear_entities().await.unwrap();
+    db.clear_resources().await.unwrap();
+    db
 }
 
 // Define components for testing purposes, similar to the example in main.rs
@@ -59,41 +110,10 @@ struct GameSettings {
     map_name: String,
 }
 
-// Helper function to define our ArangoDB container.
-fn arangodb_image() -> ContainerRequest<GenericImage> {
-    GenericImage::new("arangodb", "3.12.5")
-        .with_wait_for(WaitFor::message_on_stdout("is ready for business"))
-        .with_env_var("ARANGO_ROOT_PASSWORD", "password")
-}
-
-/// Test fixture to set up a clean database connection for each test.
-async fn setup_test_db() -> Arc<ArangoDbConnection> {
-    let container = get_docker_container().await;
-    let host_port = container.get_host_port_ipv4(8529).await.unwrap();
-    let url = format!("http://127.0.0.1:{}", host_port);
-
-    let db = Arc::new(
-        ArangoDbConnection::connect(&url, "root", "password", "_system")
-            .await
-            .expect("Failed to connect to ArangoDB container"),
-    );
-
-    // Clear all collections to ensure test isolation.
-    db.clear_entities()
-        .await
-        .expect("Failed to clear 'entities' collection");
-    db.clear_resources()
-        .await
-        .expect("Failed to clear 'resources' collection");
-
-    db
-}
-
 #[tokio::test]
 async fn test_entity_commit_and_fetch() {
     let _guard = DB_LOCK.lock().await;
-    // 1. Set up the database using our test fixture.
-    let db = setup_test_db().await;
+    let db = setup().await;
 
     // 2. Create a session and register components
     let mut session = ArangoSession::new(db.clone());
@@ -138,8 +158,7 @@ async fn test_entity_commit_and_fetch() {
 #[tokio::test]
 async fn test_resource_commit_and_fetch() {
     let _guard = DB_LOCK.lock().await;
-    // 1. Set up the database using our test fixture.
-    let db = setup_test_db().await;
+    let db = setup().await;
 
     // 2. Create a session, add a resource, and commit it
     let mut session = ArangoSession::new(db.clone());
@@ -172,8 +191,8 @@ async fn test_resource_commit_and_fetch() {
 #[tokio::test]
 async fn test_entity_load_into_new_session() {
     let _guard = DB_LOCK.lock().await;
-    // 1. Set up the database and a session to commit initial data.
-    let db = setup_test_db().await;
+    let db = setup().await;
+
     let mut session1 = ArangoSession::new(db.clone());
     session1.register_serializer::<Health>();
     session1.register_serializer::<Position>();
@@ -222,8 +241,8 @@ async fn test_entity_load_into_new_session() {
 #[tokio::test]
 async fn test_entity_delete() {
     let _guard = DB_LOCK.lock().await;
-    // 1. Set up the database and a session.
-    let db = setup_test_db().await;
+    let db = setup().await;
+
     let mut session = ArangoSession::new(db.clone());
     session.register_serializer::<Health>();
 
