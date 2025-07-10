@@ -84,10 +84,10 @@ pub trait DatabaseConnection: Send + Sync {
 }
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
+#[derive(Resource)]
 pub struct ArangoSession {
-    pub local_world: World,
     pub db: Arc<dyn DatabaseConnection>,
-    pub dirty_entities: HashSet<Entity>,
+    pub(crate) dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     pub dirty_resources: HashSet<TypeId>, // track dirty resources
@@ -170,11 +170,6 @@ impl ArangoSession {
         ));
     }
 
-    /// Manually mark an entity as needing persistence.
-    pub fn mark_dirty(&mut self, entity: Entity) {
-        self.dirty_entities.insert(entity);
-    }
-
     /// Manually mark a resource as needing persistence.
     pub fn mark_resource_dirty<R: Resource>(&mut self) {
         self.dirty_resources.insert(TypeId::of::<R>());
@@ -194,7 +189,6 @@ impl ArangoSession {
     #[cfg(test)]
     pub fn new_mocked(db: Arc<dyn DatabaseConnection>) -> Self {
         Self {
-            local_world: World::new(),
             db,
             component_serializers: Vec::new(),
             component_deserializers: HashMap::new(),
@@ -210,7 +204,6 @@ impl ArangoSession {
     /// Create a new session.
     pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
         Self {
-            local_world: World::new(),
             db,
             component_serializers: Vec::new(),
             component_deserializers: HashMap::new(),
@@ -222,68 +215,68 @@ impl ArangoSession {
             dirty_resources: HashSet::new(),
         }
     }
+}
 
-    /// Serialize all data. This will fail early if any serialization fails.
-    fn _prepare_commit(&self) -> Result<CommitData, ArangoError> {
-        let deleted_set: HashSet<Entity> = self.despawned_entities.iter().cloned().collect();
+/// Serialize all data. This will fail early if any serialization fails.
+fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData, ArangoError> {
+    let deleted_set: HashSet<Entity> = session.despawned_entities.iter().cloned().collect();
 
-        let updates = self
-            .dirty_entities
-            .iter()
-            .filter(|e| !deleted_set.contains(e))
-            .map(|entity| {
-                let mut map = serde_json::Map::new();
-                for func in &self.component_serializers {
-                    if let Some((k, v)) = func(*entity, &self.local_world)? {
-                        map.insert(k, v);
-                    }
+    let updates = session
+        .dirty_entities
+        .iter()
+        .filter(|e| !deleted_set.contains(e))
+        .map(|entity| {
+            let mut map = serde_json::Map::new();
+            for func in &session.component_serializers {
+                if let Some((k, v)) = func(*entity, world)? {
+                    map.insert(k, v);
                 }
-                Ok((*entity, Value::Object(map)))
-            })
-            .collect::<Result<Vec<_>, ArangoError>>()?;
-
-        let mut resource_data = Vec::new();
-        for func in &self.resource_serializers {
-            if let Some((k, v)) = func(&self.local_world, self)? {
-                resource_data.push((k, v));
             }
-        }
-
-        Ok(CommitData {
-            deletes: self.despawned_entities.iter().cloned().collect(),
-            updates,
-            resources: resource_data,
+            Ok((*entity, Value::Object(map)))
         })
+        .collect::<Result<Vec<_>, ArangoError>>()?;
+
+    let mut resource_data = Vec::new();
+    for func in &session.resource_serializers {
+        if let Some((k, v)) = func(world, session)? {
+            resource_data.push((k, v));
+        }
     }
 
-    /// Persist new, changed, or despawned entities to the database.
-    pub async fn commit(&mut self) -> Result<(), ArangoError> {
-        let CommitData { deletes, updates, resources } = self._prepare_commit()?;
+    Ok(CommitData {
+        deletes: session.despawned_entities.iter().cloned().collect(),
+        updates,
+        resources: resource_data,
+    })
+}
 
-        // updates
-        for (entity, data) in updates {
-            if let Some(guid) = self.local_world.get::<crate::Guid>(entity) {
-                self.db.update_document(guid.id(), data).await?;
-            } else {
-                let key = self.db.create_document(data).await?;
-                self.local_world.entity_mut(entity).insert(crate::Guid::new(key));
-            }
+/// Persist new, changed, or despawned entities to the database.
+pub async fn commit(session: &mut ArangoSession, world: &mut World) -> Result<(), ArangoError> {
+    let CommitData { deletes, updates, resources } = _prepare_commit(session, world)?;
+
+    // updates
+    for (entity, data) in updates {
+        if let Some(guid) = world.get::<crate::Guid>(entity) {
+            session.db.update_document(guid.id(), data).await?;
+        } else {
+            let key = session.db.create_document(data).await?;
+            world.entity_mut(entity).insert(crate::Guid::new(key));
         }
-        // deletes
-        for entity in deletes {
-            if let Some(guid) = self.local_world.get::<crate::Guid>(entity) {
-                self.db.delete_document(guid.id()).await?;
-            }
-        }
-        // resources
-        for (name, data) in resources {
-            self.db.upsert_resource(&name, data).await?;
-        }
-        self.dirty_entities.clear();
-        self.despawned_entities.clear();
-        self.dirty_resources.clear();
-        Ok(())
     }
+    // deletes
+    for entity in deletes {
+        if let Some(guid) = world.get::<crate::Guid>(entity) {
+            session.db.delete_document(guid.id()).await?;
+        }
+    }
+    // resources
+    for (name, data) in resources {
+        session.db.upsert_resource(&name, data).await?;
+    }
+    session.dirty_entities.clear();
+    session.despawned_entities.clear();
+    session.dirty_resources.clear();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -309,13 +302,14 @@ mod arango_session {
     fn deserializer_inserts_component() {
         let mut session = ArangoSession::new_mocked(Arc::new(MockDatabaseConnection::new()));
         session.register_component::<MyComp>();
-        let entity = session.local_world.spawn(()).id();
+        let mut world = World::new();
+        let entity = world.spawn(()).id();
         let json_val = json!({"value": 123});
 
         let deserializer = session.component_deserializers.get(type_name::<MyComp>()).unwrap();
-        deserializer(&mut session.local_world, entity, json_val).unwrap();
+        deserializer(&mut world, entity, json_val).unwrap();
 
-        let comp = session.local_world.get::<MyComp>(entity).unwrap();
+        let comp = world.get::<MyComp>(entity).unwrap();
         assert_eq!(comp.value, 123);
     }
 
@@ -323,12 +317,13 @@ mod arango_session {
     fn deserializer_inserts_resource() {
         let mut session = ArangoSession::new_mocked(Arc::new(MockDatabaseConnection::new()));
         session.register_resource::<MyRes>();
+        let mut world = World::new();
         let json_val = json!({"value": 456});
 
         let deserializer = session.resource_deserializers.get(type_name::<MyRes>()).unwrap();
-        deserializer(&mut session.local_world, json_val).unwrap();
+        deserializer(&mut world, json_val).unwrap();
 
-        let res = session.local_world.get_resource::<MyRes>().unwrap();
+        let res = world.get_resource::<MyRes>().unwrap();
         assert_eq!(res.value, 456);
     }
 
@@ -341,9 +336,10 @@ mod arango_session {
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         session.register_resource::<MyRes>();
-        session.local_world.insert_resource(MyRes{value:5});
+        let mut world = World::new();
+        world.insert_resource(MyRes{value:5});
         session.mark_resource_dirty::<MyRes>(); // Mark the resource as dirty
-        assert!(session.commit().await.is_ok());
+        assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
     #[tokio::test]
@@ -354,9 +350,10 @@ mod arango_session {
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         session.register_resource::<MyRes>();
-        session.local_world.insert_resource(MyRes{value:5});
+        let mut world = World::new();
+        world.insert_resource(MyRes{value:5});
         // Do NOT mark the resource as dirty
-        assert!(session.commit().await.is_ok());
+        assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
     #[allow(dead_code)]
@@ -372,9 +369,10 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id = session.local_world.spawn(()).id();
-        session.mark_dirty(id);
-        assert!(session.commit().await.is_ok());
+        let mut world = World::new();
+        let id = world.spawn(()).id();
+        session.dirty_entities.insert(id);
+        assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
     #[tokio::test]
@@ -384,16 +382,17 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key_123".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id = session.local_world.spawn(()).id();
-        session.mark_dirty(id);
+        let mut world = World::new();
+        let id = world.spawn(()).id();
+        session.dirty_entities.insert(id);
         
         // Before commit, no Guid
-        assert!(session.local_world.get::<crate::Guid>(id).is_none());
+        assert!(world.get::<crate::Guid>(id).is_none());
 
-        session.commit().await.unwrap();
+        commit(&mut session, &mut world).await.unwrap();
 
         // After commit, Guid should be present
-        let guid = session.local_world.get::<crate::Guid>(id).unwrap();
+        let guid = world.get::<crate::Guid>(id).unwrap();
         assert_eq!(guid.id(), "new_key_123");
     }
 
@@ -407,10 +406,11 @@ mod arango_session {
             .returning(|_, _| Box::pin(async move { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id = session.local_world.spawn(crate::Guid::new("0".to_string())).id();
+        let mut world = World::new();
+        let id = world.spawn(crate::Guid::new("0".to_string())).id();
         session.mark_loaded(id);      // simulate entity already in DB
-        session.mark_dirty(id);
-        assert!(session.commit().await.is_ok());
+        session.dirty_entities.insert(id);
+        assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
     #[tokio::test]
@@ -425,9 +425,10 @@ mod arango_session {
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         session.register_component::<MyComp>();
-        let id = session.local_world.spawn(MyComp { value: 10 }).id();
-        session.mark_dirty(id);
-        assert!(session.commit().await.is_ok());
+        let mut world = World::new();
+        let id = world.spawn(MyComp { value: 10 }).id();
+        session.dirty_entities.insert(id);
+        assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
     #[tokio::test]
@@ -440,31 +441,17 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id = session.local_world.spawn(crate::Guid::new("0".to_string())).id();
+        let mut world = World::new();
+        let id = world.spawn(crate::Guid::new("0".to_string())).id();
         session.mark_loaded(id);
         session.mark_despawned(id);
-        assert!(session.commit().await.is_ok());
-    }
-
-    #[test]
-    fn mark_dirty_tracks_entity() {
-        let mock_db = MockDatabaseConnection::new();
-        let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-
-        let e = session.local_world.spawn(Foo(42));
-        let id = e.id();
-        session.mark_dirty(id);
-        assert!(
-            session.dirty_entities.contains(&id),
-            "Entity should be marked dirty"
-        );
+        assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
     #[test]
     fn new_session_is_empty() {
         let mock_db = MockDatabaseConnection::new();
         let session = ArangoSession::new_mocked(Arc::new(mock_db));
-        assert_eq!(session.local_world.entities().len(), 0);
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
     }
@@ -476,15 +463,16 @@ mod arango_session {
         mock_db.expect_create_document().returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let mut world = World::new();
 
-        let id_new = session.local_world.spawn(()).id();
-        let id_old = session.local_world.spawn(crate::Guid::new("old_key".to_string())).id();
+        let id_new = world.spawn(()).id();
+        let id_old = world.spawn(crate::Guid::new("old_key".to_string())).id();
         session.mark_loaded(id_old);
-        session.mark_dirty(id_new);
-        session.mark_dirty(id_old);
+        session.dirty_entities.insert(id_new);
+        session.dirty_entities.insert(id_old);
         session.mark_despawned(id_old);
 
-        assert!(block_on(session.commit()).is_ok());
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
 
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
@@ -504,14 +492,15 @@ mod arango_session {
             .returning(|_, _| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        let id0 = session.local_world.spawn(()).id();
-        let id1 = session.local_world.spawn(crate::Guid::new("1".to_string())).id();
+        let mut world = World::new();
+        let id0 = world.spawn(()).id();
+        let id1 = world.spawn(crate::Guid::new("1".to_string())).id();
 
         session.mark_loaded(id1);
-        session.mark_dirty(id0);
-        session.mark_dirty(id1);
+        session.dirty_entities.insert(id0);
+        session.dirty_entities.insert(id1);
 
-        assert!(block_on(session.commit()).is_ok());
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
     }
 
     #[test]
@@ -548,12 +537,13 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let mut world = World::new();
         // register serializers for A and B
         session.register_component::<A>();
         session.register_component::<B>();
-        let entity = session.local_world.spawn((A(10), B("hello".into()))).id();
-        session.mark_dirty(entity);
-        assert!(block_on(session.commit()).is_ok());
+        let entity = world.spawn((A(10), B("hello".into()))).id();
+        session.dirty_entities.insert(entity);
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
     }
 
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
@@ -577,17 +567,18 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let mut world = World::new();
         session.register_component::<NestedVec>();
         session.register_component::<NestedMap>();
 
         let mut map = HashMap::new();
         map.insert("x".to_string(), 1);
         map.insert("y".to_string(), 2);
-        let entity = session.local_world
+        let entity = world
             .spawn((NestedVec(vec!["a".into(),"b".into(),"c".into()]), NestedMap(map)))
             .id();
-        session.mark_dirty(entity);
-        assert!(block_on(session.commit()).is_ok());
+        session.dirty_entities.insert(entity);
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
     }
 
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
@@ -603,11 +594,12 @@ mod arango_session {
         mock_db.expect_delete_document().never();
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let mut world = World::new();
         session.register_component::<ErrComp>();
-        let entity = session.local_world.spawn((ErrComp(f32::INFINITY),)).id();
-        session.mark_dirty(entity);
+        let entity = world.spawn((ErrComp(f32::INFINITY),)).id();
+        session.dirty_entities.insert(entity);
 
-        let err = block_on(session.commit()).unwrap_err();
+        let err = block_on(commit(&mut session, &mut world)).unwrap_err();
         assert!(err.to_string().contains("Could not serialize"));
     }
 
@@ -619,14 +611,15 @@ mod arango_session {
             .returning(|_| Box::pin(async { Err(ArangoError("up".into())) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let mut world = World::new();
         #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
         struct A(i32);
         impl Persist for A {}
         session.register_component::<A>();
-        let entity = session.local_world.spawn((A(1),)).id();
-        session.mark_dirty(entity);
+        let entity = world.spawn((A(1),)).id();
+        session.dirty_entities.insert(entity);
 
-        let err = block_on(session.commit()).unwrap_err();
+        let err = block_on(commit(&mut session, &mut world)).unwrap_err();
         assert_eq!(err.to_string(), "ArangoDB error: up");
     }
 
@@ -641,9 +634,10 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
-        let entity = session.local_world.spawn(()).id();
-        session.mark_dirty(entity);
-        assert!(block_on(session.commit()).is_ok());
+        let mut world = World::new();
+        let entity = world.spawn(()).id();
+        session.dirty_entities.insert(entity);
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
     }
 
     #[derive(bevy::prelude::Component, Serialize, Deserialize, PartialEq, Debug)]
@@ -669,13 +663,14 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
+        let mut world = World::new();
         session.register_component::<TestEnum>();
 
-        let entity = session.local_world
+        let entity = world
             .spawn((TestEnum::B { x: 42 },))
             .id();
-        session.mark_dirty(entity);
-        assert!(block_on(session.commit()).is_ok());
+        session.dirty_entities.insert(entity);
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
     }
 
     #[derive(bevy::prelude::Component, Serialize, Deserialize)]
@@ -699,12 +694,13 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
+        let mut world = World::new();
         session.register_component::<BigVec>();
 
-        let mut b = session.local_world.spawn(());
+        let mut b = world.spawn(());
         let data: Vec<i32> = (0..1000).collect();
         let entity = b.insert(BigVec { items: data }).id();
-        session.mark_dirty(entity);
-        assert!(block_on(session.commit()).is_ok());
+        session.dirty_entities.insert(entity);
+        assert!(block_on(commit(&mut session, &mut world)).is_ok());
     }
 }

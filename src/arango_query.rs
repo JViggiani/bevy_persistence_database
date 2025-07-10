@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Collection, Persist};
-use bevy::prelude::Component;
+use bevy::prelude::{Component, World};
 
 /// AQL query builder: select which components and filters to apply.
 pub struct ArangoQuery {
@@ -74,15 +74,15 @@ impl ArangoQuery {
 
     /// Load matching entities into `session.local_world`.
     /// Returns all matching (old + new) entities.
-    pub async fn fetch_into(&self, session: &mut crate::ArangoSession) -> Vec<bevy::prelude::Entity> {
+    pub async fn fetch_into(&self, session: &mut crate::ArangoSession, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // 1) run AQL to get keys
         let keys = self.fetch_ids().await;
         let mut result = Vec::new();
 
         // Build a map of existing entities by Guid for quick lookup
         let mut existing_entities_by_guid: HashMap<String, bevy::prelude::Entity> = HashMap::new();
-        let mut query = session.local_world.query::<(bevy::prelude::Entity, &Guid)>();
-        for (entity, guid) in query.iter(&session.local_world) {
+        let mut query = world.query::<(bevy::prelude::Entity, &Guid)>();
+        for (entity, guid) in query.iter(world) {
             existing_entities_by_guid.insert(guid.id().to_string(), entity);
         }
 
@@ -90,7 +90,7 @@ impl ArangoQuery {
             let e = if let Some(existing_entity) = existing_entities_by_guid.get(key) {
                 *existing_entity
             } else {
-                let new_e = session.local_world.spawn(Guid::new(key.clone())).id();
+                let new_e = world.spawn(Guid::new(key.clone())).id();
                 existing_entities_by_guid.insert(key.clone(), new_e);
                 new_e
             };
@@ -101,7 +101,7 @@ impl ArangoQuery {
                     .expect("fetch_component failed");
                 if let Some(val) = jsonv {
                     if let Some(deserializer) = session.component_deserializers.get(comp_name) {
-                        deserializer(&mut session.local_world, e, val).expect("deserialization failed");
+                        deserializer(world, e, val).expect("deserialization failed");
                     }
                 }
             }
@@ -120,6 +120,7 @@ mod tests {
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::Arc;
+    use bevy::prelude::World;
 
     // Dummy components for skeleton tests
     #[derive(Component, Serialize, Deserialize)]
@@ -192,12 +193,13 @@ mod tests {
 
         let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
         let mut session = ArangoSession::new_mocked(db_arc.clone());
+        let mut world = World::new();
         session.register_component::<Health>();
         session.register_component::<Position>();
         let query = ArangoQuery::new(db_arc)
             .with::<Health>()
             .with::<Position>();
-        let loaded = futures::executor::block_on(query.fetch_into(&mut session));
+        let loaded = futures::executor::block_on(query.fetch_into(&mut session, &mut world));
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(session.loaded_entities.len(), 2);

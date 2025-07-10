@@ -5,6 +5,7 @@ mod arango_query;
 mod arango_connection;
 mod guid;
 mod persist;
+mod bevy_plugin;
 pub enum Collection {
     /// The collection where all Bevy entities are stored as documents.
     Entities,
@@ -21,8 +22,9 @@ impl std::fmt::Display for Collection {
     }
 }
 
-pub use arango_session::{ArangoSession, DatabaseConnection, ArangoError};
+pub use arango_session::{ArangoSession, DatabaseConnection, ArangoError, commit};
 pub use arango_query::ArangoQuery;
 pub use arango_connection::ArangoDbConnection;
 pub use guid::Guid;
 pub use persist::Persist;
+pub use bevy_plugin::ArangoPlugin;
