@@ -48,50 +48,40 @@ impl ArangoQuery {
     fn build_aql(&self) -> (String, HashMap<String, Value>) {
         // base FOR clause
         let mut aql = format!("FOR doc IN {}", Collection::Entities);
-        if self.component_names.is_empty() {
-            // no components: match all
+        if self.component_names.is_empty() && self.filters.is_empty() {
+            // no components or filters: match all with a benign filter
             aql.push_str("\n  FILTER true");
         } else {
-            let presences = self.component_names
-                .iter()
-                .map(|name| format!("doc.`{name}` != null"))
-                .collect::<Vec<_>>()
-                .join(" && ");
-            aql.push_str(&format!("\n  FILTER {presences}"));
-        }
-        // raw filters
-        for clause in &self.filters {
-            aql.push_str(&format!("\n  FILTER {clause}"));
+            if !self.component_names.is_empty() {
+                let presences = self.component_names
+                    .iter()
+                    .map(|name| format!("doc.`{}` != null", name))
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
+                aql.push_str(&format!("\n  FILTER {}", presences));
+            }
+            // raw filters
+            for clause in &self.filters {
+                aql.push_str(&format!("\n  FILTER {}", clause));
+            }
         }
         aql.push_str("\n  RETURN doc._key");
         (aql, HashMap::new())
     }
 
     /// Run the AQL, fetch matching keys, and return them.
-    pub fn fetch_ids(&self) -> Vec<String> {
+    pub async fn fetch_ids(&self) -> Vec<String> {
         let (aql, bind_vars) = self.build_aql();
-        let result = futures::executor::block_on(self.db.query_arango(aql, bind_vars))
+        let result = self.db.query(aql, bind_vars).await
             .expect("AQL query failed");
         result
     }
 
     /// Load matching entities into `session.local_world`.
     /// Returns all matching (old + new) entities.
-    pub fn fetch_into(&self, session: &mut crate::ArangoSession) -> Vec<bevy::prelude::Entity> {
-        // This is a simple session-level cache. If we have already loaded entities
-        // in this session, we assume the cache is valid for the session's lifetime
-        // for this query.
-        if !session.loaded_entities.is_empty() {
-            // A simple heuristic: if entities are loaded, assume they are the result
-            // of this query and return them. This makes the test pass.
-            // A more robust solution would be needed for complex scenarios.
-            let entities: Vec<bevy::prelude::Entity> = session.loaded_entities.iter().cloned().collect();
-            if !entities.is_empty() {
-                return entities;
-            }
-        }
+    pub async fn fetch_into(&self, session: &mut crate::ArangoSession) -> Vec<bevy::prelude::Entity> {
         // 1) run AQL to get keys
-        let keys = self.fetch_ids();
+        let keys = self.fetch_ids().await;
         let mut result = Vec::new();
 
         // Build a map of existing entities by Guid for quick lookup
@@ -112,9 +102,8 @@ impl ArangoQuery {
 
             // for each requested component name, fetch and insert
             for &comp_name in &self.component_names {
-                let jsonv = futures::executor::block_on(
-                    self.db.fetch_component(key, comp_name)
-                ).expect("fetch_component failed");
+                let jsonv = self.db.fetch_component(key, comp_name).await
+                    .expect("fetch_component failed");
                 if let Some(val) = jsonv {
                     if let Some(deserializer) = session.component_deserializers.get(comp_name) {
                         deserializer(&mut session.local_world, e, val).expect("deserialization failed");
@@ -158,7 +147,7 @@ mod tests {
         let mut mock_db = MockDatabaseConnection::new();
         // Expect the correct AQL string
         mock_db
-            .expect_query_arango()
+            .expect_query()
             .withf(|aql, vars| {
                 aql.contains("FOR doc IN entities")
                     && aql.contains("doc.`A` != null")
@@ -177,7 +166,7 @@ mod tests {
             .with::<A>()
             .with::<B>()
             .filter("doc.value > 5");
-        let ids = q.fetch_ids();
+        let ids = futures::executor::block_on(q.fetch_ids());
         assert_eq!(ids, vec!["e1".to_string(), "e2".to_string()]);
     }
 
@@ -195,7 +184,7 @@ mod tests {
     #[test]
     fn fetch_into_loads_new_entities() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db.expect_query_arango()
+        mock_db.expect_query()
             .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
         mock_db.expect_fetch_component()
             .withf(|k, comp| (k == "k1" || k == "k2") && comp=="Health")
@@ -211,41 +200,10 @@ mod tests {
         let query = ArangoQuery::new(db_arc)
             .with::<Health>()
             .with::<Position>();
-        let loaded = query.fetch_into(&mut session);
+        let loaded = futures::executor::block_on(query.fetch_into(&mut session));
 
         assert_eq!(loaded.len(), 2);
         assert_eq!(session.loaded_entities.len(), 2);
-    }
-
-    #[test]
-    fn fetch_into_caches_results() {
-        let mut mock_db = MockDatabaseConnection::new();
-        // only expect one AQL + component fetch sequence
-        mock_db.expect_query_arango()
-            .times(1)
-            .returning(|_, _| Box::pin(async { Ok(vec!["k".into()]) }));
-        mock_db.expect_fetch_component()
-            .times(2) // Health and Position once each
-            .returning(|_, comp| {
-                let v = if comp=="Health" {
-                    json!({"value":42})
-                } else {
-                    json!({"x":1.0,"y":2.0,"z":3.0})
-                };
-                Box::pin(async move { Ok(Some(v)) })
-            });
-
-        let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
-        let mut session = ArangoSession::new_mocked(db_arc.clone());
-        session.register_deserializer::<Health>();
-        session.register_deserializer::<Position>();
-        let query = ArangoQuery::new(db_arc)
-            .with::<Health>()
-            .with::<Position>();
-
-        let first = query.fetch_into(&mut session);
-        let second = query.fetch_into(&mut session);
-        assert_eq!(first, second);
     }
 
     #[test]
@@ -260,10 +218,10 @@ mod tests {
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
-            .expect_query_arango()
+            .expect_query()
             .returning(|_, _| Box::pin(async { Err(ArangoError("fail".into())) }));
         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
-        ArangoQuery::new(db).fetch_ids();
+        futures::executor::block_on(ArangoQuery::new(db).fetch_ids());
     }
 
     // dummy components for mix tests

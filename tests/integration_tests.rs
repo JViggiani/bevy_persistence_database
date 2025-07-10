@@ -1,16 +1,24 @@
 use bevy::prelude::{Component, Resource};
 use bevy_arangodb::{
-    ArangoDbConnection, ArangoSession, DatabaseConnection, Guid, QueryComponent,
+    ArangoDbConnection, ArangoQuery, ArangoSession, DatabaseConnection, Guid, QueryComponent,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use testcontainers::{
-    core::WaitFor, runners::AsyncRunner, ContainerAsync, ContainerRequest, GenericImage, ImageExt,
+    core::WaitFor,
+    runners::AsyncRunner,
+    ContainerAsync,
+    ContainerRequest,
+    GenericImage,
+    ImageExt,
 };
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 
 // holds the running arango container, initialized only once.
 static DOCKER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
+
+// A mutex to ensure that tests run serially, not in parallel.
+static DB_LOCK: Mutex<()> = Mutex::const_new(());
 
 async fn get_docker_container() -> &'static ContainerAsync<GenericImage> {
     DOCKER
@@ -82,7 +90,8 @@ async fn setup_test_db() -> Arc<ArangoDbConnection> {
 }
 
 #[tokio::test]
-async fn test_spawn_and_commit() {
+async fn test_entity_commit_and_fetch() {
+    let _guard = DB_LOCK.lock().await;
     // 1. Set up the database using our test fixture.
     let db = setup_test_db().await;
 
@@ -128,6 +137,7 @@ async fn test_spawn_and_commit() {
 
 #[tokio::test]
 async fn test_resource_commit_and_fetch() {
+    let _guard = DB_LOCK.lock().await;
     // 1. Set up the database using our test fixture.
     let db = setup_test_db().await;
 
@@ -157,4 +167,92 @@ async fn test_resource_commit_and_fetch() {
 
     assert_eq!(fetched_settings.difficulty, 0.8);
     assert_eq!(fetched_settings.map_name, "level_1");
+}
+
+#[tokio::test]
+async fn test_entity_load_into_new_session() {
+    let _guard = DB_LOCK.lock().await;
+    // 1. Set up the database and a session to commit initial data.
+    let db = setup_test_db().await;
+    let mut session1 = ArangoSession::new(db.clone());
+    session1.register_serializer::<Health>();
+    session1.register_serializer::<Position>();
+
+    // 2. Spawn two entities, one with Health+Position, one with only Health.
+    let entity_to_load = session1
+        .local_world
+        .spawn((
+            Health { value: 150 },
+            Position { x: 10.0, y: 20.0 },
+        ))
+        .id();
+    let entity_to_ignore = session1.local_world.spawn(Health { value: 99 }).id();
+    session1.mark_dirty(entity_to_load);
+    session1.mark_dirty(entity_to_ignore);
+    session1.commit().await.expect("Initial commit failed");
+
+    // 3. Create a new, clean session to load the data into.
+    let mut session2 = ArangoSession::new(db.clone());
+    session2.register_deserializer::<Health>();
+    session2.register_deserializer::<Position>();
+
+    // 4. Query for entities that have BOTH Health and Position.
+    let loaded_entities = ArangoQuery::new(db.clone())
+        .with::<Health>()
+        .with::<Position>()
+        .fetch_into(&mut session2)
+        .await;
+
+    // 5. Verify that only the correct entity was loaded and its data is correct.
+    assert_eq!(
+        loaded_entities.len(),
+        1,
+        "Should only load one entity with both components"
+    );
+    let loaded_entity = loaded_entities[0];
+
+    let health = session2.local_world.get::<Health>(loaded_entity).unwrap();
+    assert_eq!(health.value, 150);
+
+    let position = session2.local_world.get::<Position>(loaded_entity).unwrap();
+    assert_eq!(position.x, 10.0);
+    assert_eq!(position.y, 20.0);
+}
+
+#[tokio::test]
+async fn test_entity_delete() {
+    let _guard = DB_LOCK.lock().await;
+    // 1. Set up the database and a session.
+    let db = setup_test_db().await;
+    let mut session = ArangoSession::new(db.clone());
+    session.register_serializer::<Health>();
+
+    // 2. Spawn and commit an entity.
+    let entity_id = session.local_world.spawn(Health { value: 100 }).id();
+    session.mark_dirty(entity_id);
+    session.commit().await.expect("Commit failed");
+
+    // 3. Verify it exists in the database.
+    let guid = session.local_world.get::<Guid>(entity_id).unwrap().id().to_string();
+    let component = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .expect("Fetch should not fail")
+        .expect("Component should exist after first commit");
+    assert_eq!(component.get("value").unwrap().as_i64().unwrap(), 100);
+
+    // 4. Despawn the entity and commit again.
+    session.mark_despawned(entity_id);
+    session.commit().await.expect("Second commit failed");
+
+    // 5. Verify it's gone from the database.
+    let component_after_delete = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .expect("Fetch should not fail");
+
+    assert!(
+        component_after_delete.is_none(),
+        "Component should be gone after delete commit"
+    );
 }

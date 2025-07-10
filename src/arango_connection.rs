@@ -123,7 +123,7 @@ impl DatabaseConnection for ArangoDbConnection {
         .boxed()
     }
 
-    fn query_arango(
+    fn query(
         &self,
         aql: String,
         bind_vars: HashMap<String, Value>,
@@ -170,15 +170,18 @@ impl DatabaseConnection for ArangoDbConnection {
                 .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            let doc: Document<Value> = col
-                .document(&key)
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            // pick out the field if present
-            Ok(doc
-                .document
-                .get(&comp)
-                .cloned())
+            match col.document::<Value>(&key).await {
+                Ok(doc) => Ok(doc.document.get(&comp).cloned()),
+                Err(e) => {
+                    if let ClientError::Arango(api_err) = &e {
+                        if api_err.error_num() == 1202 {
+                            // entity not found
+                            return Ok(None);
+                        }
+                    }
+                    Err(ArangoError(e.to_string()))
+                }
+            }
         }
         .boxed()
     }

@@ -44,7 +44,7 @@ pub trait DatabaseConnection: Send + Sync {
     ) -> BoxFuture<'static, Result<(), ArangoError>>;
 
     /// Execute a raw AQL query returning document keys.
-    fn query_arango(
+    fn query(
         &self,
         aql: String,
         bind_vars: std::collections::HashMap<String, Value>,
