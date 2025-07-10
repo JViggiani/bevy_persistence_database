@@ -1,6 +1,6 @@
 use bevy::prelude::{Component, Resource};
 use bevy_arangodb::{
-    ArangoDbConnection, ArangoQuery, ArangoSession, DatabaseConnection, Guid, QueryComponent,
+    ArangoDbConnection, ArangoQuery, ArangoSession, DatabaseConnection, Guid, Persist,
 };
 use ctor::dtor;
 use serde::{Deserialize, Serialize};
@@ -87,28 +87,21 @@ async fn setup() -> Arc<ArangoDbConnection> {
 struct Health {
     value: i32,
 }
-impl QueryComponent for Health {
-    fn name() -> &'static str {
-        std::any::type_name::<Health>()
-    }
-}
+impl Persist for Health {}
 
 #[derive(Component, Serialize, Deserialize, Debug, PartialEq)]
 struct Position {
     x: f32,
     y: f32,
 }
-impl QueryComponent for Position {
-    fn name() -> &'static str {
-        std::any::type_name::<Position>()
-    }
-}
+impl Persist for Position {}
 
 #[derive(Resource, Serialize, Deserialize, Debug, PartialEq)]
 struct GameSettings {
     difficulty: f32,
     map_name: String,
 }
+impl Persist for GameSettings {}
 
 #[tokio::test]
 async fn test_entity_commit_and_fetch() {
@@ -117,8 +110,8 @@ async fn test_entity_commit_and_fetch() {
 
     // 2. Create a session and register components
     let mut session = ArangoSession::new(db.clone());
-    session.register_serializer::<Health>();
-    session.register_serializer::<Position>();
+    session.register_component::<Health>();
+    session.register_component::<Position>();
 
     // 3. Spawn an entity and commit it
     let health_val = Health { value: 100 };
@@ -162,7 +155,7 @@ async fn test_resource_commit_and_fetch() {
 
     // 2. Create a session, add a resource, and commit it
     let mut session = ArangoSession::new(db.clone());
-    session.register_resource_serializer::<GameSettings>();
+    session.register_resource::<GameSettings>();
 
     let settings = GameSettings {
         difficulty: 0.8,
@@ -174,7 +167,7 @@ async fn test_resource_commit_and_fetch() {
     session.commit().await.expect("Commit failed");
 
     // 3. Verify the resource was saved correctly by fetching it directly
-    let resource_name = std::any::type_name::<GameSettings>();
+    let resource_name = GameSettings::name();
     let resource_json = db
         .fetch_resource(resource_name)
         .await
@@ -194,8 +187,8 @@ async fn test_entity_load_into_new_session() {
     let db = setup().await;
 
     let mut session1 = ArangoSession::new(db.clone());
-    session1.register_serializer::<Health>();
-    session1.register_serializer::<Position>();
+    session1.register_component::<Health>();
+    session1.register_component::<Position>();
 
     // 2. Spawn two entities, one with Health+Position, one with only Health.
     let entity_to_load = session1
@@ -212,8 +205,8 @@ async fn test_entity_load_into_new_session() {
 
     // 3. Create a new, clean session to load the data into.
     let mut session2 = ArangoSession::new(db.clone());
-    session2.register_deserializer::<Health>();
-    session2.register_deserializer::<Position>();
+    session2.register_component::<Health>();
+    session2.register_component::<Position>();
 
     // 4. Query for entities that have BOTH Health and Position.
     let loaded_entities = ArangoQuery::new(db.clone())
@@ -244,7 +237,7 @@ async fn test_entity_delete() {
     let db = setup().await;
 
     let mut session = ArangoSession::new(db.clone());
-    session.register_serializer::<Health>();
+    session.register_component::<Health>();
 
     // 2. Spawn and commit an entity.
     let entity_id = session.local_world.spawn(Health { value: 100 }).id();

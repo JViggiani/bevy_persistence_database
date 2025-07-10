@@ -2,10 +2,16 @@
 //! `DatabaseConnection` trait.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
-use bevy::prelude::{Entity, World, Resource};
+use bevy::prelude::{Component, Entity, Resource, World};
 use futures::future::BoxFuture;
 use serde_json::Value;
-use std::{any::TypeId, collections::{HashSet, HashMap}, fmt, sync::Arc};
+use std::{
+    any::TypeId,
+    collections::{HashMap, HashSet},
+    fmt,
+    sync::Arc,
+};
+use crate::persist::Persist;
 
 #[cfg(test)]
 use mockall::automock;
@@ -98,83 +104,66 @@ struct CommitData {
 }
 
 impl ArangoSession {
-    /// Register a component type for persistence in `commit()`.
-    pub fn register_serializer<T>(&mut self)
-    where
-        T: bevy::ecs::component::Component + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    {
-        let name = std::any::type_name::<T>().to_string();
+    /// Registers a component type for persistence.
+    ///
+    /// This method sets up both serialization and deserialization for any
+    /// component that implements the `Persist` marker trait.
+    pub fn register_component<T: Component + Persist>(&mut self) {
+        let name = T::name();
+
+        // --- Serializer ---
         self.component_serializers.push(Box::new(
             move |entity, world| -> Result<Option<(String, Value)>, ArangoError> {
                 if let Some(c) = world.get::<T>(entity) {
-                    let v = serde_json::to_value(c)
-                        .map_err(|e| ArangoError(e.to_string()))?;
-                    // Treat null (e.g. non-finite floats) as serialization error
+                    let v = serde_json::to_value(c).map_err(|e| ArangoError(e.to_string()))?;
                     if v.is_null() {
                         return Err(ArangoError("Could not serialize".into()));
                     }
-                    Ok(Some((name.clone(), v)))
+                    Ok(Some((name.to_string(), v)))
                 } else {
                     Ok(None)
                 }
             },
         ));
-        self.register_deserializer::<T>();
-    }
 
-    /// Register a component type for deserialization.
-    pub fn register_deserializer<T>(&mut self)
-    where
-        T: bevy::ecs::component::Component + serde::de::DeserializeOwned + 'static,
-    {
-        let name = std::any::type_name::<T>().to_string();
-        self.component_deserializers.insert(name, Box::new(
+        // --- Deserializer ---
+        self.component_deserializers.insert(name.to_string(), Box::new(
             |world, entity, json_val| {
-                let comp: T = serde_json::from_value(json_val)
-                    .map_err(|e| ArangoError(e.to_string()))?;
+                let comp: T = serde_json::from_value(json_val).map_err(|e| ArangoError(e.to_string()))?;
                 world.entity_mut(entity).insert(comp);
                 Ok(())
             }
         ));
     }
 
-    /// Register a resource type for persistence in `commit()`.
-    pub fn register_resource_serializer<R>(&mut self)
-    where
-        R: Resource + serde::Serialize + serde::de::DeserializeOwned + 'static,
-    {
-        let name = std::any::type_name::<R>().to_string();
+    /// Registers a resource type for persistence.
+    ///
+    /// This method sets up both serialization and deserialization for any
+    /// resource that implements the `Persist` marker trait.
+    pub fn register_resource<R: Resource + Persist>(&mut self) {
+        let name = R::name();
         let type_id = TypeId::of::<R>();
+
+        // --- Serializer ---
         self.resource_serializers.push(Box::new(move |world, session| {
-            // Only serialize if the resource is marked dirty
             if !session.dirty_resources.contains(&type_id) {
                 return Ok(None);
             }
             if let Some(r) = world.get_resource::<R>() {
-                let v = serde_json::to_value(r)
-                    .map_err(|e| ArangoError(e.to_string()))?;
-                // Treat null (e.g. non-finite floats) as serialization error
+                let v = serde_json::to_value(r).map_err(|e| ArangoError(e.to_string()))?;
                 if v.is_null() {
                     return Err(ArangoError("Could not serialize".into()));
                 }
-                Ok(Some((name.clone(), v)))
+                Ok(Some((name.to_string(), v)))
             } else {
                 Ok(None)
             }
         }));
-        self.register_resource_deserializer::<R>();
-    }
 
-    /// Register a resource type for deserialization.
-    pub fn register_resource_deserializer<R>(&mut self)
-        where
-            R: Resource + serde::de::DeserializeOwned + 'static,
-    {
-        let name = std::any::type_name::<R>().to_string();
-        self.resource_deserializers.insert(name, Box::new(
+        // --- Deserializer ---
+        self.resource_deserializers.insert(name.to_string(), Box::new(
             |world, json_val| {
-                let res: R = serde_json::from_value(json_val)
-                    .map_err(|e| ArangoError(e.to_string()))?;
+                let res: R = serde_json::from_value(json_val).map_err(|e| ArangoError(e.to_string()))?;
                 world.insert_resource(res);
                 Ok(())
             }
@@ -310,14 +299,16 @@ mod arango_session {
 
     #[derive(Resource, Serialize, Deserialize, PartialEq, Debug)]
     struct MyRes { value: i32 }
+    impl Persist for MyRes {}
 
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize, PartialEq, Debug)]
     struct MyComp { value: i32 }
+    impl Persist for MyComp {}
 
     #[test]
     fn deserializer_inserts_component() {
         let mut session = ArangoSession::new_mocked(Arc::new(MockDatabaseConnection::new()));
-        session.register_deserializer::<MyComp>();
+        session.register_component::<MyComp>();
         let entity = session.local_world.spawn(()).id();
         let json_val = json!({"value": 123});
 
@@ -331,7 +322,7 @@ mod arango_session {
     #[test]
     fn deserializer_inserts_resource() {
         let mut session = ArangoSession::new_mocked(Arc::new(MockDatabaseConnection::new()));
-        session.register_resource_deserializer::<MyRes>();
+        session.register_resource::<MyRes>();
         let json_val = json!({"value": 456});
 
         let deserializer = session.resource_deserializers.get(type_name::<MyRes>()).unwrap();
@@ -349,7 +340,7 @@ mod arango_session {
             .returning(|_,_| Box::pin(async{Ok(())}));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        session.register_resource_serializer::<MyRes>();
+        session.register_resource::<MyRes>();
         session.local_world.insert_resource(MyRes{value:5});
         session.mark_resource_dirty::<MyRes>(); // Mark the resource as dirty
         assert!(session.commit().await.is_ok());
@@ -362,7 +353,7 @@ mod arango_session {
         mock_db.expect_upsert_resource().never();
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        session.register_resource_serializer::<MyRes>();
+        session.register_resource::<MyRes>();
         session.local_world.insert_resource(MyRes{value:5});
         // Do NOT mark the resource as dirty
         assert!(session.commit().await.is_ok());
@@ -433,7 +424,7 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        session.register_serializer::<MyComp>();
+        session.register_component::<MyComp>();
         let id = session.local_world.spawn(MyComp { value: 10 }).id();
         session.mark_dirty(id);
         assert!(session.commit().await.is_ok());
@@ -537,8 +528,10 @@ mod arango_session {
 
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
     struct A(i32);
+    impl Persist for A {}
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
     struct B(String);
+    impl Persist for B {}
 
     #[test]
     fn commit_serializes_multiple_components() {
@@ -556,8 +549,8 @@ mod arango_session {
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         // register serializers for A and B
-        session.register_serializer::<A>();
-        session.register_serializer::<B>();
+        session.register_component::<A>();
+        session.register_component::<B>();
         let entity = session.local_world.spawn((A(10), B("hello".into()))).id();
         session.mark_dirty(entity);
         assert!(block_on(session.commit()).is_ok());
@@ -565,8 +558,10 @@ mod arango_session {
 
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
     struct NestedVec(Vec<String>);
+    impl Persist for NestedVec {}
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
     struct NestedMap(HashMap<String, i32>);
+    impl Persist for NestedMap {}
 
     #[test]
     fn commit_serializes_nested_containers() {
@@ -582,8 +577,8 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        session.register_serializer::<NestedVec>();
-        session.register_serializer::<NestedMap>();
+        session.register_component::<NestedVec>();
+        session.register_component::<NestedMap>();
 
         let mut map = HashMap::new();
         map.insert("x".to_string(), 1);
@@ -597,6 +592,7 @@ mod arango_session {
 
     #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
     struct ErrComp(f32); // f32::INFINITY will fail to serialize
+    impl Persist for ErrComp {}
 
     #[test]
     fn commit_bubbles_serialize_error() {
@@ -607,7 +603,7 @@ mod arango_session {
         mock_db.expect_delete_document().never();
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-        session.register_serializer::<ErrComp>();
+        session.register_component::<ErrComp>();
         let entity = session.local_world.spawn((ErrComp(f32::INFINITY),)).id();
         session.mark_dirty(entity);
 
@@ -625,7 +621,8 @@ mod arango_session {
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         #[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
         struct A(i32);
-        session.register_serializer::<A>();
+        impl Persist for A {}
+        session.register_component::<A>();
         let entity = session.local_world.spawn((A(1),)).id();
         session.mark_dirty(entity);
 
@@ -655,6 +652,7 @@ mod arango_session {
         B { x: i32 },
         C(String),
     }
+    impl Persist for TestEnum {}
 
     #[test]
     fn enum_component_round_trip_serializes_correctly() {
@@ -671,7 +669,7 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
-        session.register_serializer::<TestEnum>();
+        session.register_component::<TestEnum>();
 
         let entity = session.local_world
             .spawn((TestEnum::B { x: 42 },))
@@ -682,6 +680,7 @@ mod arango_session {
 
     #[derive(bevy::prelude::Component, Serialize, Deserialize)]
     struct BigVec { items: Vec<i32> }
+    impl Persist for BigVec {}
 
     #[test]
     fn large_payload_serializes_without_panic() {
@@ -700,7 +699,7 @@ mod arango_session {
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock));
-        session.register_serializer::<BigVec>();
+        session.register_component::<BigVec>();
 
         let mut b = session.local_world.spawn(());
         let data: Vec<i32> = (0..1000).collect();

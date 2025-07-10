@@ -7,13 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid, Collection};
-
-/// Trait for types that can be queried as a component in AQL.
-pub trait QueryComponent {
-    /// The ArangoDB document field name for this component.
-    fn name() -> &'static str;
-}
+use crate::{DatabaseConnection, Guid, Collection, Persist};
+use bevy::prelude::Component;
 
 /// AQL query builder: select which components and filters to apply.
 pub struct ArangoQuery {
@@ -33,7 +28,7 @@ impl ArangoQuery {
     }
 
     /// Request loading component `T`.
-    pub fn with<T: QueryComponent>(mut self) -> Self {
+    pub fn with<T: Component + Persist>(mut self) -> Self {
         self.component_names.push(T::name());
         self
     }
@@ -122,13 +117,17 @@ mod tests {
     use super::*;
     use crate::{ArangoSession, DatabaseConnection, ArangoError};
     use crate::arango_session::MockDatabaseConnection;
+    use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::Arc;
 
     // Dummy components for skeleton tests
-    struct A; struct B;
-    impl QueryComponent for A { fn name() -> &'static str { "A" } }
-    impl QueryComponent for B { fn name() -> &'static str { "B" } }
+    #[derive(Component, Serialize, Deserialize)]
+    struct A;
+    impl Persist for A {}
+    #[derive(Component, Serialize, Deserialize)]
+    struct B;
+    impl Persist for B {}
 
     #[test]
     fn build_query_skeleton() {
@@ -138,7 +137,7 @@ mod tests {
             .with::<B>()
             .filter("doc.value > 5");
 
-        assert_eq!(q.component_names, vec!["A", "B"]);
+        assert_eq!(q.component_names, vec![A::name(), B::name()]);
         assert_eq!(q.filters, vec!["doc.value > 5"]);
     }
 
@@ -150,8 +149,8 @@ mod tests {
             .expect_query()
             .withf(|aql, vars| {
                 aql.contains("FOR doc IN entities")
-                    && aql.contains("doc.`A` != null")
-                    && aql.contains("doc.`B` != null")
+                    && aql.contains(&format!("doc.`{}` != null", A::name()))
+                    && aql.contains(&format!("doc.`{}` != null", B::name()))
                     && aql.contains("doc.value > 5")
                     && vars.is_empty()
             })
@@ -171,32 +170,30 @@ mod tests {
     }
 
     // Real component types for fetch_into
-    #[allow(dead_code)]
-    #[derive(bevy::prelude::Component, serde::Deserialize)]
+    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize)]
     struct Health { value: i32 }
-    #[allow(dead_code)]
-    #[derive(bevy::prelude::Component, serde::Deserialize)]
+    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize)]
     struct Position { x: f32, y: f32, z: f32 }
 
-    impl QueryComponent for Health { fn name() -> &'static str { "Health" } }
-    impl QueryComponent for Position { fn name() -> &'static str { "Position" } }
+    impl Persist for Health {}
+    impl Persist for Position {}
 
-    #[test]
-    fn fetch_into_loads_new_entities() {
+    #[tokio::test]
+    async fn fetch_into_loads_new_entities() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_query()
             .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
         mock_db.expect_fetch_component()
-            .withf(|k, comp| (k == "k1" || k == "k2") && comp=="Health")
+            .withf(|k, comp| (k == "k1" || k == "k2") && comp==Health::name())
             .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
         mock_db.expect_fetch_component()
-            .withf(|k, comp| (k == "k1" || k == "k2") && comp=="Position")
+            .withf(|k, comp| (k == "k1" || k == "k2") && comp==Position::name())
             .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0,"z":3.0}))) }));
 
         let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
         let mut session = ArangoSession::new_mocked(db_arc.clone());
-        session.register_deserializer::<Health>();
-        session.register_deserializer::<Position>();
+        session.register_component::<Health>();
+        session.register_component::<Position>();
         let query = ArangoQuery::new(db_arc)
             .with::<Health>()
             .with::<Position>();
@@ -225,21 +222,24 @@ mod tests {
     }
 
     // dummy components for mix tests
-    struct H; struct P;
-    impl QueryComponent for H { fn name() -> &'static str { "H" } }
-    impl QueryComponent for P { fn name() -> &'static str { "P" } }
+    #[derive(Component, Serialize, Deserialize)]
+    struct H;
+    impl Persist for H {}
+    #[derive(Component, Serialize, Deserialize)]
+    struct P;
+    impl Persist for P {}
 
     #[test]
     fn build_query_single_and_multi() {
         let db = Arc::new(MockDatabaseConnection::new());
         let (a_single, _) = ArangoQuery::new(db.clone()).with::<H>().build_aql();
-        assert!(a_single.contains("doc.`H` != null"));
+        assert!(a_single.contains(&format!("doc.`{}` != null", H::name())));
 
         let (a_multi, _) = ArangoQuery::new(db)
             .with::<H>()
             .with::<P>()
             .build_aql();
-        assert!(a_multi.contains("doc.`H` != null"));
-        assert!(a_multi.contains("doc.`P` != null"));
+        assert!(a_multi.contains(&format!("doc.`{}` != null", H::name())));
+        assert!(a_multi.contains(&format!("doc.`{}` != null", P::name())));
     }
 }
