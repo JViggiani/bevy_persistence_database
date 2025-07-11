@@ -1,0 +1,15 @@
+[package]
+name = "bevy_arangodb_derive"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }
+bevy_arangodb_core = { path = "../bevy_arangodb_core", version = "0.1.0" }
+paste = "1.0.15"
+proc-macro-crate = "3.3.0"

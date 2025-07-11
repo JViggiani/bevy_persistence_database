@@ -7,14 +7,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid, Collection, Persist};
-use bevy::prelude::{Component, World};
+use crate::{DatabaseConnection, Guid, Collection, Persist, query_dsl};
+use bevy::prelude::{Component, World, App};
 
 /// AQL query builder: select which components and filters to apply.
 pub struct ArangoQuery {
     db: Arc<dyn DatabaseConnection>,
     pub component_names: Vec<&'static str>,
-    pub filters: Vec<String>,
+    filter_expr: Option<query_dsl::Expression>,
 }
 
 impl ArangoQuery {
@@ -23,7 +23,7 @@ impl ArangoQuery {
         Self {
             db,
             component_names: Vec::new(),
-            filters: Vec::new(),
+            filter_expr: None,
         }
     }
 
@@ -33,35 +33,41 @@ impl ArangoQuery {
         self
     }
 
-    /// Inject a raw AQL filter clause (e.g. `doc.age > 10`).
-    pub fn filter(mut self, clause: &str) -> Self {
-        self.filters.push(clause.to_string());
+    /// Sets the filter for the query using a `query_dsl::Expression`.
+    pub fn filter(mut self, expression: query_dsl::Expression) -> Self {
+        self.filter_expr = Some(expression);
         self
     }
 
     /// Construct the AQL and bind-variables tuple.
     fn build_aql(&self) -> (String, HashMap<String, Value>) {
+        let mut bind_vars = HashMap::new();
         // base FOR clause
         let mut aql = format!("FOR doc IN {}", Collection::Entities);
-        if self.component_names.is_empty() && self.filters.is_empty() {
-            // no components or filters: match all with a benign filter
-            aql.push_str("\n  FILTER true");
-        } else {
-            if !self.component_names.is_empty() {
-                let presences = self.component_names
-                    .iter()
-                    .map(|name| format!("doc.`{}` != null", name))
-                    .collect::<Vec<_>>()
-                    .join(" AND ");
-                aql.push_str(&format!("\n  FILTER {}", presences));
-            }
-            // raw filters
-            for clause in &self.filters {
-                aql.push_str(&format!("\n  FILTER {}", clause));
-            }
+
+        let mut filters = Vec::new();
+        if !self.component_names.is_empty() {
+            let presences = self.component_names
+                .iter()
+                .map(|name| format!("doc.`{}` != null", name))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            filters.push(format!("({})", presences));
         }
+
+        if let Some(expr) = &self.filter_expr {
+            filters.push(query_dsl::translate_expression(expr, &mut bind_vars));
+        }
+
+        if filters.is_empty() {
+             aql.push_str("\n  FILTER true");
+        } else {
+            aql.push_str("\n  FILTER ");
+            aql.push_str(&filters.join(" AND "));
+        }
+
         aql.push_str("\n  RETURN doc._key");
-        (aql, HashMap::new())
+        (aql, bind_vars)
     }
 
     /// Run the AQL, fetch matching keys, and return them.
@@ -110,74 +116,63 @@ impl ArangoQuery {
         }
         result
     }
+
+    /// Load matching entities into the `App`'s `World`.
+    ///
+    /// This is a helper function that encapsulates the `async` complexity of
+    /// removing the `ArangoSession` resource, performing the database
+    /// operations, and then re-inserting it.
+    pub async fn fetch_into_app(&self, app: &mut App) -> Vec<bevy::prelude::Entity> {
+        let mut session = app.world.remove_resource::<crate::ArangoSession>().unwrap();
+        let world_ptr = &mut app.world as *mut _;
+
+        // SAFETY: We have removed the ArangoSession, so we can now safely get a mutable
+        // reference to the world. The session resource is not accessed by any other
+        // part of the app while it's removed.
+        let world = unsafe { &mut *world_ptr };
+        let result = self.fetch_into(&mut session, world).await;
+
+        app.world.insert_resource(session);
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArangoSession, DatabaseConnection, ArangoError};
+    use crate::{ArangoSession, DatabaseConnection, ArangoError, Persist};
     use crate::arango_session::MockDatabaseConnection;
+    use bevy_arangodb_derive::Persist;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
     use std::sync::Arc;
     use bevy::prelude::World;
 
     // Dummy components for skeleton tests
-    #[derive(Component, Serialize, Deserialize)]
-    struct A;
-    impl Persist for A {}
-    #[derive(Component, Serialize, Deserialize)]
-    struct B;
-    impl Persist for B {}
+    #[derive(Component, Serialize, Deserialize, Persist)]
+    struct A { value: i32 }
+    #[derive(Component, Serialize, Deserialize, Persist)]
+    struct B { name: String }
 
     #[test]
-    fn build_query_skeleton() {
+    fn build_query_with_dsl() {
         let db = Arc::new(MockDatabaseConnection::new());
         let q = ArangoQuery::new(db.clone())
             .with::<A>()
-            .with::<B>()
-            .filter("doc.value > 5");
+            .filter(A::value().gt(10).and(B::name().eq("test")));
 
-        assert_eq!(q.component_names, vec![A::name(), B::name()]);
-        assert_eq!(q.filters, vec!["doc.value > 5"]);
-    }
+        let (aql, bind_vars) = q.build_aql();
 
-    #[test]
-    fn fetch_ids_invokes_query_arango() {
-        let mut mock_db = MockDatabaseConnection::new();
-        // Expect the correct AQL string
-        mock_db
-            .expect_query()
-            .withf(|aql, vars| {
-                aql.contains("FOR doc IN entities")
-                    && aql.contains(&format!("doc.`{}` != null", A::name()))
-                    && aql.contains(&format!("doc.`{}` != null", B::name()))
-                    && aql.contains("doc.value > 5")
-                    && vars.is_empty()
-            })
-            .times(1)
-            .returning(|_, _| {
-                let keys = vec!["e1".to_string(), "e2".to_string()];
-                Box::pin(async move { Ok(keys) })
-            });
-
-        let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
-        let q = ArangoQuery::new(db_arc.clone())
-            .with::<A>()
-            .with::<B>()
-            .filter("doc.value > 5");
-        let ids = futures::executor::block_on(q.fetch_ids());
-        assert_eq!(ids, vec!["e1".to_string(), "e2".to_string()]);
+        assert!(aql.contains("FILTER (doc.`A` != null) AND ((doc.`A`.`value` > @bevy_arangodb_bind_0) AND (doc.`B`.`name` == @bevy_arangodb_bind_1))"));
+        assert_eq!(bind_vars.get("bevy_arangodb_bind_0").unwrap(), &json!(10));
+        assert_eq!(bind_vars.get("bevy_arangodb_bind_1").unwrap(), &json!("test"));
     }
 
     // Real component types for fetch_into
-    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize)]
+    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize, Persist)]
     struct Health { value: i32 }
-    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize)]
+    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize, Persist)]
     struct Position { x: f32, y: f32, z: f32 }
-
-    impl Persist for Health {}
-    impl Persist for Position {}
 
     #[tokio::test]
     async fn fetch_into_loads_new_entities() {
@@ -224,12 +219,10 @@ mod tests {
     }
 
     // dummy components for mix tests
-    #[derive(Component, Serialize, Deserialize)]
+    #[derive(Component, Serialize, Deserialize, Persist)]
     struct H;
-    impl Persist for H {}
-    #[derive(Component, Serialize, Deserialize)]
+    #[derive(Component, Serialize, Deserialize, Persist)]
     struct P;
-    impl Persist for P {}
 
     #[test]
     fn build_query_single_and_multi() {

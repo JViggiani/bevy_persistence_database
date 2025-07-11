@@ -1,9 +1,11 @@
-use bevy::prelude::{Component, Resource};
-use bevy_arangodb::{
-    commit, ArangoDbConnection, ArangoQuery, ArangoSession, DatabaseConnection, Guid, Persist,
-    ArangoPlugin,
+use bevy::prelude::{Component, Resource, App};
+use bevy_arangodb_core::{
+    commit, ArangoQuery, ArangoSession, DatabaseConnection, Guid, Persist,
+    ArangoPlugin, ArangoDbConnection,
 };
+use bevy_arangodb_derive::Persist;
 use ctor::dtor;
+use downcast_rs::Downcast;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::Arc;
@@ -15,7 +17,7 @@ use tokio::sync::{Mutex, OnceCell};
 // This will hold the container instance to keep it alive for the duration of the tests.
 static DOCKER_CONTAINER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
 // This will hold the database connection Arc, which is cheap to clone.
-static DB_CONNECTION: OnceCell<Arc<ArangoDbConnection>> = OnceCell::const_new();
+static DB_CONNECTION: OnceCell<Arc<dyn DatabaseConnection>> = OnceCell::const_new();
 
 // A mutex to ensure that tests run serially, not in parallel.
 static DB_LOCK: Mutex<()> = Mutex::const_new(());
@@ -43,7 +45,7 @@ fn teardown() {
 
 /// Lazily initializes and returns a shared DB connection.
 /// On first call, starts the Docker container and connects to the database.
-async fn get_db_connection() -> Arc<ArangoDbConnection> {
+async fn get_db_connection() -> Arc<dyn DatabaseConnection> {
     if let Some(db) = DB_CONNECTION.get() {
         return db.clone();
     }
@@ -71,38 +73,44 @@ async fn get_db_connection() -> Arc<ArangoDbConnection> {
 
     DB_CONNECTION
         .set(db.clone())
-        .expect("Failed to set DB connection");
+        .unwrap();
     db
 }
 
 /// Gets the shared test context and clears the database for a new test.
-async fn setup() -> Arc<ArangoDbConnection> {
+async fn setup() -> Arc<dyn DatabaseConnection> {
     let db = get_db_connection().await;
-    db.clear_entities().await.unwrap();
-    db.clear_resources().await.unwrap();
+    let conn = db
+        .as_any()
+        .downcast_ref::<ArangoDbConnection>()
+        .unwrap();
+    conn.clear_entities().await.unwrap();
+    conn.clear_resources().await.unwrap();
     db
 }
 
 // Define components for testing purposes, similar to the example in main.rs
-#[derive(Component, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Debug, PartialEq, Persist)]
 struct Health {
     value: i32,
 }
-impl Persist for Health {}
 
-#[derive(Component, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Debug, PartialEq, Persist)]
 struct Position {
     x: f32,
     y: f32,
 }
-impl Persist for Position {}
 
-#[derive(Resource, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Component, Serialize, Deserialize, Debug, PartialEq, Persist)]
+struct Creature {
+    is_screaming: bool,
+}
+
+#[derive(Resource, Serialize, Deserialize, Debug, PartialEq, Persist)]
 struct GameSettings {
     difficulty: f32,
     map_name: String,
 }
-impl Persist for GameSettings {}
 
 #[tokio::test]
 async fn test_entity_commit_and_fetch() {
@@ -110,25 +118,22 @@ async fn test_entity_commit_and_fetch() {
     let db = setup().await;
 
     // 2. Create a session and register components
-    let mut app = bevy::prelude::App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone())
-        .with_component::<Health>()
-        .with_component::<Position>());
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
 
     // 3. Spawn an entity and commit it
     let health_val = Health { value: 100 };
     let pos_val = Position { x: 1.0, y: 2.0 };
 
-    let entity_id = app.world_mut().spawn((health_val, pos_val)).id();
+    let entity_id = app.world.spawn((health_val, pos_val)).id();
     
     app.update(); // Run the schedule to trigger change detection
 
-    let mut session = app.world_mut().remove_resource::<ArangoSession>().unwrap();
-    commit(&mut session, app.world_mut()).await.expect("Commit failed");
+    commit(&mut app).await.expect("Commit failed");
 
     // 4. Verify the results
     // The entity should now have a Guid component assigned by the library.
-    let guid = app.world().get::<Guid>(entity_id)
+    let guid = app.world.get::<Guid>(entity_id)
         .expect("Entity should have a Guid after commit");
 
     assert!(!guid.id().is_empty(), "Guid should not be empty");
@@ -156,18 +161,17 @@ async fn test_resource_commit_and_fetch() {
     let db = setup().await;
 
     // 2. Create a session, add a resource, and commit it
-    let mut app = bevy::prelude::App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()).with_resource::<GameSettings>());
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
 
     let settings = GameSettings {
         difficulty: 0.8,
         map_name: "level_1".into(),
     };
-    app.world_mut().insert_resource(settings);
+    app.insert_resource(settings);
     
-    let mut session = app.world_mut().remove_resource::<ArangoSession>().unwrap();
-    session.mark_resource_dirty::<GameSettings>();
-    commit(&mut session, app.world_mut()).await.expect("Commit failed");
+    app.world.resource_mut::<ArangoSession>().mark_resource_dirty::<GameSettings>();
+    commit(&mut app).await.expect("Commit failed");
 
     // 3. Verify the resource was saved correctly by fetching it directly
     let resource_name = GameSettings::name();
@@ -189,41 +193,34 @@ async fn test_entity_load_into_new_session() {
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
-    let mut app1 = bevy::prelude::App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone())
-        .with_component::<Health>()
-        .with_component::<Position>());
+    let mut app1 = App::new();
+    app1.add_plugins(ArangoPlugin::new(db.clone()));
 
     // 2. Spawn two entities, one with Health+Position, one with only Health.
     let _entity_to_load = app1
-        .world_mut()
+        .world
         .spawn((
             Health { value: 150 },
             Position { x: 10.0, y: 20.0 },
         ))
         .id();
-    let _entity_to_ignore = app1.world_mut().spawn(Health { value: 99 }).id();
+    let _entity_to_ignore = app1.world.spawn(Health { value: 99 }).id();
     
     app1.update();
 
-    let mut session1 = app1.world_mut().remove_resource::<ArangoSession>().unwrap();
-    commit(&mut session1, app1.world_mut()).await.expect("Initial commit failed");
-    app1.world_mut().insert_resource(session1);
+    commit(&mut app1).await.expect("Initial commit failed");
 
 
     // 3. Create a new, clean session to load the data into.
-    let mut app2 = bevy::prelude::App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone())
-        .with_component::<Health>()
-        .with_component::<Position>());
-    let mut session2 = app2.world_mut().remove_resource::<ArangoSession>().unwrap();
-
-    // 4. Query for entities that have BOTH Health and Position.
-    let loaded_entities = ArangoQuery::new(db.clone())
+    let mut app2 = App::new();
+    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    
+    // 4. Query for entities that have BOTH Health and Position, and Health > 100.
+    let query = ArangoQuery::new(db.clone())
         .with::<Health>()
         .with::<Position>()
-        .fetch_into(&mut session2, app2.world_mut())
-        .await;
+        .filter(Health::value().gt(100));
+    let loaded_entities = query.fetch_into_app(&mut app2).await;
 
     // 5. Verify that only the correct entity was loaded and its data is correct.
     assert_eq!(
@@ -233,12 +230,69 @@ async fn test_entity_load_into_new_session() {
     );
     let loaded_entity = loaded_entities[0];
 
-    let health = app2.world().get::<Health>(loaded_entity).unwrap();
+    let health = app2.world.get::<Health>(loaded_entity).unwrap();
     assert_eq!(health.value, 150);
 
-    let position = app2.world().get::<Position>(loaded_entity).unwrap();
+    let position = app2.world.get::<Position>(loaded_entity).unwrap();
     assert_eq!(position.x, 10.0);
     assert_eq!(position.y, 20.0);
+}
+
+#[tokio::test]
+async fn test_complex_query_with_dsl() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // 2. Spawn a few entities to represent our "scream" scenario.
+    // A screaming creature in the target zone
+    app.world.spawn((
+        Creature { is_screaming: true },
+        Position { x: 50.0, y: 50.0 },
+    ));
+    // A quiet creature in the target zone
+    app.world.spawn((
+        Creature { is_screaming: false },
+        Position { x: 75.0, y: 75.0 },
+    ));
+    // A screaming creature outside the target zone
+    app.world.spawn((
+        Creature { is_screaming: true },
+        Position { x: 150.0, y: 150.0 },
+    ));
+
+    app.update();
+    commit(&mut app).await.expect("Commit failed");
+
+    // 3. Build a complex query with the DSL.
+    // We want to find all creatures that are screaming AND are inside a specific area.
+    let query = ArangoQuery::new(db.clone())
+        .with::<Creature>()
+        .with::<Position>()
+        .filter(
+            Creature::is_screaming().eq(true)
+            .and(Position::x().gt(0.0))
+            .and(Position::x().lt(100.0))
+            .and(Position::y().gt(0.0))
+            .and(Position::y().lt(100.0))
+        );
+
+    // 4. Fetch the results into a new app instance.
+    let mut app2 = App::new();
+    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    let loaded_entities = query.fetch_into_app(&mut app2).await;
+
+    // 5. Verify that only the single matching entity was loaded.
+    assert_eq!(loaded_entities.len(), 1, "Should only load one screaming creature in the zone");
+    let loaded_entity = loaded_entities[0];
+
+    let creature = app2.world.get::<Creature>(loaded_entity).unwrap();
+    assert!(creature.is_screaming);
+
+    let position = app2.world.get::<Position>(loaded_entity).unwrap();
+    assert_eq!(position.x, 50.0);
 }
 
 #[tokio::test]
@@ -246,19 +300,18 @@ async fn test_entity_delete() {
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
-    let mut app = bevy::prelude::App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()).with_component::<Health>());
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
 
     // 2. Spawn and commit an entity.
-    let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
+    let entity_id = app.world.spawn(Health { value: 100 }).id();
     
     app.update();
 
-    let mut session = app.world_mut().remove_resource::<ArangoSession>().unwrap();
-    commit(&mut session, app.world_mut()).await.expect("Commit failed");
+    commit(&mut app).await.expect("Commit failed");
 
     // 3. Verify it exists in the database.
-    let guid = app.world().get::<Guid>(entity_id).unwrap().id().to_string();
+    let guid = app.world.get::<Guid>(entity_id).unwrap().id().to_string();
     let component = db
         .fetch_component(&guid, Health::name())
         .await
@@ -267,8 +320,9 @@ async fn test_entity_delete() {
     assert_eq!(component.get("value").unwrap().as_i64().unwrap(), 100);
 
     // 4. Despawn the entity and commit again.
-    session.mark_despawned(entity_id);
-    commit(&mut session, app.world_mut()).await.expect("Second commit failed");
+    app.world.entity_mut(entity_id).despawn();
+    app.update(); // This runs the despawn command and our auto-despawn-tracking system
+    commit(&mut app).await.expect("Second commit failed");
 
     // 5. Verify it's gone from the database.
     let component_after_delete = db
