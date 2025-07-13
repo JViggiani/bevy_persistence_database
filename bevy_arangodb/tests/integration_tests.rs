@@ -1,6 +1,5 @@
 use bevy::app::App;
 use bevy_arangodb::{commit, DatabaseConnection, Guid, ArangoPlugin, ArangoDbConnection};
-use ctor::dtor;
 use std::process::Command;
 use std::sync::Arc;
 use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, ContainerAsync};
@@ -16,7 +15,7 @@ static DB_CONNECTION: OnceCell<Arc<dyn DatabaseConnection>> = OnceCell::const_ne
 static DB_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// This function will be executed when the test program exits.
-#[dtor]
+#[ctor::dtor]
 fn teardown() {
     if let Some(container) = DOCKER_CONTAINER.get() {
         let id = container.id();
@@ -105,11 +104,9 @@ async fn test_entity_commit_and_fetch() {
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
-    // 2. Create a session and register components
     let mut app = App::new();
     app.add_plugins(ArangoPlugin::new(db.clone()));
 
-    // 3. Spawn an entity and commit it
     let health_val = Health { value: 100 };
     let pos_val = Position { x: 1.0, y: 2.0 };
 
@@ -117,7 +114,7 @@ async fn test_entity_commit_and_fetch() {
     
     app.update(); // Run the schedule to trigger change detection
 
-    commit(&mut app).await.expect("Commit failed");
+    commit(&mut app).await.unwrap();
 
     // 4. Verify the results
     // The entity should now have a Guid component assigned by the library.
