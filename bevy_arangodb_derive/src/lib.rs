@@ -10,19 +10,6 @@ use syn::{
     DeriveInput, Item, Meta, Data, Fields,
 };
 
-fn get_crate_path() -> proc_macro2::TokenStream {
-    use proc_macro_crate::{crate_name, FoundCrate};
-
-    match crate_name("bevy_arangodb_core") {
-        Ok(FoundCrate::Itself) => quote!(crate),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-            quote!(::#ident)
-        }
-        Err(_) => quote!(::bevy_arangodb_core), // Fallback for cases like docs.rs
-    }
-}
-
 #[proc_macro_derive(Persist)]
 pub fn persist_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -84,9 +71,23 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Attach appropriate derives
     let derive_list = if is_comp {
-        quote! { Component, Persist }
+        quote! {
+            Component,
+            Persist,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::std::fmt::Debug,
+            ::std::cmp::PartialEq
+        }
     } else {
-        quote! { Resource, Persist }
+        quote! {
+            Resource,
+            Persist,
+            ::serde::Serialize,
+            ::serde::Deserialize,
+            ::std::fmt::Debug,
+            ::std::cmp::PartialEq
+        }
     };
     match &mut ast {
         Item::Struct(s) => s.attrs.push(syn::parse_quote!(#[derive(#derive_list)])),
@@ -146,4 +147,17 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         #registration
         #push
     })
+}
+
+fn get_crate_path() -> proc_macro2::TokenStream {
+    use proc_macro_crate::{crate_name, FoundCrate};
+
+    match crate_name("bevy_arangodb_core") {
+        Ok(FoundCrate::Itself) => quote!(crate),
+        Ok(FoundCrate::Name(name)) => {
+            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            quote!(::#ident)
+        }
+        Err(_) => quote!(::bevy_arangodb_core), // Fallback for cases like docs.rs
+    }
 }

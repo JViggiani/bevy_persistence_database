@@ -140,8 +140,8 @@ impl ArangoQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ArangoSession, DatabaseConnection, ArangoError, Persist};
     use crate::arango_session::MockDatabaseConnection;
+    use crate::{ArangoSession, DatabaseConnection, ArangoError, Persist};
     use bevy_arangodb_derive::Persist;
     use serde::{Deserialize, Serialize};
     use serde_json::json;

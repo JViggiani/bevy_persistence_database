@@ -451,7 +451,6 @@ dependencies = [
  "ctor",
  "downcast-rs 2.0.1",
  "futures",
- "inventory",
  "mockall",
  "once_cell",
  "serde",
@@ -464,9 +463,7 @@ dependencies = [
 name = "bevy_arangodb_derive"
 version = "0.1.0"
 dependencies = [
- "bevy_arangodb_core",
  "ctor",
- "paste",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
@@ -2935,15 +2932,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e05c02b5e89bff3b946cedeca278abc628fe811e604f027c45a8aa3cf793d0eb"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "inventory"
-version = "0.3.20"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab08d7cd2c5897f2c949e5383ea7c7db03fb19130ffcfbf7eda795137ae3cb83"
-dependencies = [
- "rustversion",
 ]
 
 [[package]]

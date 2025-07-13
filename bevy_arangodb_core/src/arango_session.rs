@@ -2,6 +2,11 @@
 //! `DatabaseConnection` trait.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
+// only pull in `automock` when compiling tests
+#[cfg(test)]
+use mockall::automock;
+
+use downcast_rs::{Downcast, impl_downcast};
 use bevy::prelude::{Component, Entity, Resource, World, App};
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -12,10 +17,11 @@ use std::{
     sync::Arc,
 };
 use crate::persist::Persist;
-use downcast_rs::{impl_downcast, Downcast};
 
-#[cfg(test)]
-use mockall::automock;
+type ComponentSerializer   = Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>;
+type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(), ArangoError> + Send + Sync>;
+type ResourceSerializer    = Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>;
+type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), ArangoError> + Send + Sync>;
 
 #[derive(Debug)]
 pub struct ArangoError(pub String);
@@ -93,10 +99,10 @@ pub struct ArangoSession {
     pub despawned_entities: HashSet<Entity>,
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     pub dirty_resources: HashSet<TypeId>, // track dirty resources
-    component_serializers: Vec<Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
-    pub component_deserializers: HashMap<String, Box<dyn Fn(&mut World, Entity, Value) -> Result<(), ArangoError> + Send + Sync>>,
-    resource_serializers: Vec<Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>>,
-    resource_deserializers: HashMap<String, Box<dyn Fn(&mut World, Value) -> Result<(), ArangoError> + Send + Sync>>,
+    component_serializers: Vec<ComponentSerializer>,
+    pub component_deserializers: HashMap<String, ComponentDeserializer>,
+    resource_serializers: Vec<ResourceSerializer>,
+    resource_deserializers: HashMap<String, ResourceDeserializer>,
 }
 
 struct CommitData {

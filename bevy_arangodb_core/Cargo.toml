@@ -10,8 +10,6 @@ serde_json = { workspace = true }
 arangors = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
-mockall = { workspace = true }
-inventory = "0.3.15"
 downcast-rs = "2.0.1"
 once_cell.workspace = true
 
@@ -21,3 +19,4 @@ testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 bevy_arangodb_derive = { path = "../bevy_arangodb_derive" }
 ctor = { workspace = true }
+mockall.workspace = true

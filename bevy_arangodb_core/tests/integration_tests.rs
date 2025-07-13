@@ -5,7 +5,6 @@ use bevy_arangodb_core::{
 };
 use bevy_arangodb_derive::{persist, Persist};
 use ctor::dtor;
-use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::Arc;
 use testcontainers::{
@@ -85,26 +84,22 @@ async fn setup() -> Arc<dyn DatabaseConnection> {
 }
 
 // Define components for testing purposes, similar to the example in main.rs
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[persist(component)]
 struct Health {
     value: i32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[persist(component)]
 struct Position {
     x: f32,
     y: f32,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[persist(component)]
 struct Creature {
     is_screaming: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[persist(resource)]
 struct GameSettings {
     difficulty: f32,
