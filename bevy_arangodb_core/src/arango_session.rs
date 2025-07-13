@@ -111,9 +111,7 @@ impl ArangoSession {
     /// This method sets up both serialization and deserialization for any
     /// component that implements the `Persist` marker trait.
     pub fn register_component<T: Component + Persist>(&mut self) {
-        let type_key = std::any::type_name::<T>().to_string();
-
-        let ser_key = type_key.clone();
+        let ser_key = T::name();
         self.component_serializers.push(Box::new(
             move |entity, world| -> Result<Option<(String, Value)>, ArangoError> {
                 if let Some(c) = world.get::<T>(entity) {
@@ -121,15 +119,15 @@ impl ArangoSession {
                     if v.is_null() {
                         return Err(ArangoError("Could not serialize".into()));
                     }
-                    Ok(Some((ser_key.clone(), v)))
+                    Ok(Some((ser_key.to_string(), v)))
                 } else {
                     Ok(None)
                 }
             },
         ));
 
-        let de_key = type_key.clone();
-        self.component_deserializers.insert(de_key, Box::new(
+        let de_key = T::name();
+        self.component_deserializers.insert(de_key.to_string(), Box::new(
             |world, entity, json_val| {
                 let comp: T = serde_json::from_value(json_val).map_err(|e| ArangoError(e.to_string()))?;
                 world.entity_mut(entity).insert(comp);
@@ -143,9 +141,7 @@ impl ArangoSession {
     /// This method sets up both serialization and deserialization for any
     /// resource that implements the `Persist` marker trait.
     pub fn register_resource<R: Resource + Persist>(&mut self) {
-        let type_key = std::any::type_name::<R>().to_string();
-
-        let ser_key = type_key.clone();
+        let ser_key = R::name();
         let type_id = std::any::TypeId::of::<R>();
         self.resource_serializers.push(Box::new(move |world, session| {
             if !session.dirty_resources.contains(&type_id) {
@@ -156,14 +152,14 @@ impl ArangoSession {
                 if v.is_null() {
                     return Err(ArangoError("Could not serialize".into()));
                 }
-                Ok(Some((ser_key.clone(), v)))
+                Ok(Some((ser_key.to_string(), v)))
             } else {
                 Ok(None)
             }
         }));
 
-        let de_key = type_key.clone();
-        self.resource_deserializers.insert(de_key, Box::new(
+        let de_key = R::name();
+        self.resource_deserializers.insert(de_key.to_string(), Box::new(
             |world, json_val| {
                 let res: R = serde_json::from_value(json_val).map_err(|e| ArangoError(e.to_string()))?;
                 world.insert_resource(res);
@@ -312,7 +308,6 @@ mod arango_session {
     use std::sync::Arc;
     use std::collections::HashMap;
     use futures::executor::block_on;
-    use std::any::type_name;
     use bevy_arangodb_derive::Persist;
 
     #[derive(Resource, Serialize, Deserialize, PartialEq, Debug, Persist)]
@@ -329,7 +324,7 @@ mod arango_session {
         let entity = world.spawn(()).id();
         let json_val = json!({"value": 123});
 
-        let deserializer = session.component_deserializers.get(type_name::<MyComp>()).unwrap();
+        let deserializer = session.component_deserializers.get(MyComp::name()).unwrap();
         deserializer(&mut world, entity, json_val).unwrap();
 
         let comp = world.get::<MyComp>(entity).unwrap();
@@ -343,7 +338,7 @@ mod arango_session {
         let mut world = World::new();
         let json_val = json!({"value": 456});
 
-        let deserializer = session.resource_deserializers.get(type_name::<MyRes>()).unwrap();
+        let deserializer = session.resource_deserializers.get(MyRes::name()).unwrap();
         deserializer(&mut world, json_val).unwrap();
 
         let res = world.get_resource::<MyRes>().unwrap();
@@ -354,7 +349,7 @@ mod arango_session {
     async fn commit_serializes_resources() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_upsert_resource()
-            .withf(|k, d| k==type_name::<MyRes>() && d==&json!({"value":5}))
+            .withf(|k, d| k==MyRes::name() && d==&json!({"value":5}))
             .returning(|_,_| Box::pin(async{Ok(())}));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
@@ -431,7 +426,6 @@ mod arango_session {
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let mut world = World::new();
         let id = world.spawn(crate::Guid::new("0".to_string())).id();
-        session.mark_loaded(id);      // simulate entity already in DB
         session.dirty_entities.insert(id);
         assert!(commit(&mut session, &mut world).await.is_ok());
     }
@@ -441,7 +435,7 @@ mod arango_session {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_create_document()
             .withf(|data| {
-                data.get(type_name::<MyComp>()) == Some(&json!({"value": 10}))
+                data.get(MyComp::name()) == Some(&json!({"value": 10}))
             })
             .times(1)
             .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
@@ -466,7 +460,6 @@ mod arango_session {
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let mut world = World::new();
         let id = world.spawn(crate::Guid::new("0".to_string())).id();
-        session.mark_loaded(id);
         session.mark_despawned(id);
         assert!(commit(&mut session, &mut world).await.is_ok());
     }
@@ -484,13 +477,13 @@ mod arango_session {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_delete_document().returning(|_| Box::pin(async { Ok(()) }));
         mock_db.expect_create_document().returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+        mock_db.expect_update_document().returning(|_,_| Box::pin(async { Ok(()) }));
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let mut world = World::new();
 
         let id_new = world.spawn(()).id();
         let id_old = world.spawn(crate::Guid::new("old_key".to_string())).id();
-        session.mark_loaded(id_old);
         session.dirty_entities.insert(id_new);
         session.dirty_entities.insert(id_old);
         session.mark_despawned(id_old);
@@ -519,7 +512,6 @@ mod arango_session {
         let id0 = world.spawn(()).id();
         let id1 = world.spawn(crate::Guid::new("1".to_string())).id();
 
-        session.mark_loaded(id1);
         session.dirty_entities.insert(id0);
         session.dirty_entities.insert(id1);
 
@@ -547,8 +539,8 @@ mod arango_session {
     fn commit_serializes_multiple_components() {
         let mut mock_db = MockDatabaseConnection::new();
         // derive the full names for A and B
-        let key_a = std::any::type_name::<A>();
-        let key_b = std::any::type_name::<B>();
+        let key_a = A::name();
+        let key_b = B::name();
         mock_db
             .expect_create_document()
             .withf(move |data| {
@@ -575,8 +567,8 @@ mod arango_session {
     #[test]
     fn commit_serializes_nested_containers() {
         let mut mock_db = MockDatabaseConnection::new();
-        let key_nv = std::any::type_name::<NestedVec>();
-        let key_nm = std::any::type_name::<NestedMap>();
+        let key_nv = NestedVec::name();
+        let key_nm = NestedMap::name();
 
         mock_db.expect_create_document()
             .withf(move |data| {
@@ -668,7 +660,7 @@ mod arango_session {
     fn enum_component_round_trip_serializes_correctly() {
         let mut mock = MockDatabaseConnection::new();
         // capture the full type name
-        let key_enum = std::any::type_name::<TestEnum>();
+        let key_enum = TestEnum::name();
         mock.expect_create_document()
             .withf(move |payload| {
                 let obj = payload.as_object().unwrap();
@@ -696,7 +688,7 @@ mod arango_session {
     fn large_payload_serializes_without_panic() {
         let mut mock = MockDatabaseConnection::new();
         // capture the full type name
-        let key_big = std::any::type_name::<BigVec>();
+        let key_big = BigVec::name();
         mock.expect_create_document()
             .withf(move |payload| {
                 let obj = payload.as_object().unwrap();

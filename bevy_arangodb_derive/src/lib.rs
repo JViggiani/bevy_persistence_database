@@ -19,7 +19,6 @@ fn get_crate_path() -> proc_macro2::TokenStream {
 pub fn persist_derive(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-    let name_str = name.to_string();
     let crate_path = get_crate_path();
 
     // --- Generate the field accessors inside an `impl` block for the struct ---
@@ -50,7 +49,7 @@ pub fn persist_derive(input: TokenStream) -> TokenStream {
     let persist_impl = quote! {
         impl #crate_path::Persist for #name {
             fn name() -> &'static str {
-                #name_str
+                std::any::type_name::<#name>()
             }
         }
     };

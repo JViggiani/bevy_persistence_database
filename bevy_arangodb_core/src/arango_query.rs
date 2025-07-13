@@ -163,7 +163,11 @@ mod tests {
 
         let (aql, bind_vars) = q.build_aql();
 
-        assert!(aql.contains("FILTER (doc.`A` != null) AND ((doc.`A`.`value` > @bevy_arangodb_bind_0) AND (doc.`B`.`name` == @bevy_arangodb_bind_1))"));
+        let expected_filter = format!(
+            "FILTER (doc.`{}` != null) AND ((doc.`{}`.`value` > @bevy_arangodb_bind_0) AND (doc.`{}`.`name` == @bevy_arangodb_bind_1))",
+            <A as Persist>::name(), <A as Persist>::name(), <B as Persist>::name()
+        );
+        assert!(aql.contains(&expected_filter));
         assert_eq!(bind_vars.get("bevy_arangodb_bind_0").unwrap(), &json!(10));
         assert_eq!(bind_vars.get("bevy_arangodb_bind_1").unwrap(), &json!("test"));
     }
