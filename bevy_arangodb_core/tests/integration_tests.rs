@@ -80,12 +80,8 @@ async fn get_db_connection() -> Arc<dyn DatabaseConnection> {
 /// Gets the shared test context and clears the database for a new test.
 async fn setup() -> Arc<dyn DatabaseConnection> {
     let db = get_db_connection().await;
-    let conn = db
-        .as_any()
-        .downcast_ref::<ArangoDbConnection>()
-        .expect("Database connection is not of type ArangoDbConnection");
-    conn.clear_entities().await.unwrap();
-    conn.clear_resources().await.unwrap();
+    db.clear_entities().await.unwrap();
+    db.clear_resources().await.unwrap();
     db
 }
 
