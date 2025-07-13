@@ -9,4 +9,8 @@ bevy_arangodb_derive = { path = "../bevy_arangodb_derive", version = "0.1.0" }
 
 [dev-dependencies]
 bevy = { workspace = true }
-tokio = { workspace = true, features = ["full"] }
+ctor.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+testcontainers.workspace = true
+tokio = { workspace = true, features = ["full", "macros", "rt"] }

@@ -69,11 +69,11 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input item (struct or enum)
     let mut ast = parse_macro_input!(item as Item);
 
-    // Attach appropriate derives
+    // Attach appropriate derives, fully‐qualified:
     let derive_list = if is_comp {
         quote! {
-            Component,
-            Persist,
+            ::bevy::prelude::Component,
+            ::bevy_arangodb::Persist,
             ::serde::Serialize,
             ::serde::Deserialize,
             ::std::fmt::Debug,
@@ -81,8 +81,8 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            Resource,
-            Persist,
+            ::bevy::prelude::Resource,
+            ::bevy_arangodb::Persist,
             ::serde::Serialize,
             ::serde::Deserialize,
             ::std::fmt::Debug,
@@ -142,10 +142,20 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
+    // Inherent `name` method so users can call `Type::name()` directly:
+    let inherent_name = quote! {
+        impl #name {
+            pub fn name() -> &'static str {
+                std::any::type_name::<#name>()
+            }
+        }
+    };
+
     TokenStream::from(quote! {
         #ast
         #registration
         #push
+        #inherent_name
     })
 }
 

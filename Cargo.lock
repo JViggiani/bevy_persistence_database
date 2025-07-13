@@ -438,6 +438,10 @@ dependencies = [
  "bevy",
  "bevy_arangodb_core",
  "bevy_arangodb_derive",
+ "ctor",
+ "serde",
+ "serde_json",
+ "testcontainers",
  "tokio",
 ]
 

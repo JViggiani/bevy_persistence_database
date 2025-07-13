@@ -1,16 +1,11 @@
-use bevy::prelude::{Component, Resource, App};
-use bevy_arangodb_core::{
-    commit, DatabaseConnection, Guid, Persist,
-    ArangoPlugin, ArangoDbConnection,
-};
-use bevy_arangodb_derive::{persist, Persist};
+use bevy::app::App;
+use bevy_arangodb::{commit, DatabaseConnection, Guid, ArangoPlugin, ArangoDbConnection};
 use ctor::dtor;
 use std::process::Command;
 use std::sync::Arc;
-use testcontainers::{
-    core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, ContainerAsync
-};
+use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, ContainerAsync};
 use tokio::sync::{Mutex, OnceCell};
+use serde_json;
 
 // This will hold the container instance to keep it alive for the duration of the tests.
 static DOCKER_CONTAINER: OnceCell<ContainerAsync<GenericImage>> = OnceCell::const_new();
@@ -83,24 +78,23 @@ async fn setup() -> Arc<dyn DatabaseConnection> {
     db
 }
 
-// Define components for testing purposes, similar to the example in main.rs
-#[persist(component)]
+#[bevy_arangodb::persist(component)]
 struct Health {
     value: i32,
 }
 
-#[persist(component)]
+#[bevy_arangodb::persist(component)]
 struct Position {
     x: f32,
     y: f32,
 }
 
-#[persist(component)]
+#[bevy_arangodb::persist(component)]
 struct Creature {
     is_screaming: bool,
 }
 
-#[persist(resource)]
+#[bevy_arangodb::persist(resource)]
 struct GameSettings {
     difficulty: f32,
     map_name: String,

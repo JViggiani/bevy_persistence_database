@@ -16,5 +16,14 @@
 /// Publicly re-export all items from the core library.
 pub use bevy_arangodb_core::*;
 
-/// Publicly re-export the `Persist` derive macro.
-pub use bevy_arangodb_derive::Persist;
+// Re-export the persist attribute macro and Persist derive
+pub use bevy_arangodb_derive::{persist, Persist};
+
+// Re-export core API
+pub use bevy_arangodb_core::{
+    commit,
+    DatabaseConnection,
+    Guid,
+    ArangoPlugin,
+    ArangoDbConnection,
+};
