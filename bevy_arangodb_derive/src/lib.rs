@@ -1,3 +1,4 @@
+#![allow(non_snake_case)]
 extern crate ctor;
 
 use proc_macro::TokenStream;
@@ -28,15 +29,6 @@ pub fn persist_derive(input: TokenStream) -> TokenStream {
     let name = &input.ident;
     let crate_path = get_crate_path();
 
-    // --- DEBUG: dump the incoming DeriveInput ---
-    eprintln!("--- derive(Persist) for {} ---", name);
-    eprintln!("attrs count = {}", input.attrs.len());
-    for attr in &input.attrs {
-        eprintln!("  attr.path = {:?}", attr.path());
-        // print the Meta instead of a non‐existent tokens field
-        eprintln!("  attr.meta = {:?}", attr.meta);
-    }
-
     // --- field‐accessors impl ---
     let field_accessors_impl = if let Data::Struct(s) = &input.data {
         if let Fields::Named(fields) = &s.fields {
@@ -66,14 +58,12 @@ pub fn persist_derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    let expanded = quote! {
+    TokenStream::from(quote! {
         // Persist impl
         #persist_impl
         // field accessors
         #field_accessors_impl
-    };
-
-    TokenStream::from(expanded)
+    })
 }
 
 // New attribute macro: single annotation for derive + registration
@@ -116,6 +106,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let registration = if is_comp {
         quote! {
+            #[allow(non_snake_case)]
             #[allow(dead_code)]
             fn #register_fn(app: &mut bevy::app::App) {
                 app.world
@@ -129,6 +120,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
+            #[allow(non_snake_case)]
             #[allow(dead_code)]
             fn #register_fn(app: &mut bevy::app::App) {
                 app.world
@@ -139,6 +131,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     let push = quote! {
+        #[allow(non_snake_case)]
         #[ctor::ctor]
         fn #ctor_fn() {
             #crate_path::registration::COMPONENT_REGISTRY
