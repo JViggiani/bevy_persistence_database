@@ -1,11 +1,10 @@
 use bevy::prelude::{Component, Resource, App};
 use bevy_arangodb_core::{
-    commit, ArangoQuery, ArangoSession, DatabaseConnection, Guid, Persist,
+    commit, DatabaseConnection, Guid, Persist,
     ArangoPlugin, ArangoDbConnection,
 };
-use bevy_arangodb_derive::Persist;
+use bevy_arangodb_derive::{persist, Persist};
 use ctor::dtor;
-use downcast_rs::Downcast;
 use serde::{Deserialize, Serialize};
 use std::process::Command;
 use std::sync::Arc;
@@ -86,23 +85,27 @@ async fn setup() -> Arc<dyn DatabaseConnection> {
 }
 
 // Define components for testing purposes, similar to the example in main.rs
-#[derive(Component, Serialize, Deserialize, Debug, PartialEq, Persist)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[persist(component)]
 struct Health {
     value: i32,
 }
 
-#[derive(Component, Serialize, Deserialize, Debug, PartialEq, Persist)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[persist(component)]
 struct Position {
     x: f32,
     y: f32,
 }
 
-#[derive(Component, Serialize, Deserialize, Debug, PartialEq, Persist)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[persist(component)]
 struct Creature {
     is_screaming: bool,
 }
 
-#[derive(Resource, Serialize, Deserialize, Debug, PartialEq, Persist)]
+#[derive(Serialize, Deserialize, Debug, PartialEq)]
+#[persist(resource)]
 struct GameSettings {
     difficulty: f32,
     map_name: String,

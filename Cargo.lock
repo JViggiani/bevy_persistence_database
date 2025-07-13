@@ -465,6 +465,7 @@ name = "bevy_arangodb_derive"
 version = "0.1.0"
 dependencies = [
  "bevy_arangodb_core",
+ "ctor",
  "paste",
  "proc-macro-crate",
  "proc-macro2",

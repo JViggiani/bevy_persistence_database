@@ -3,7 +3,7 @@
 //! This plugin simplifies the setup process by managing the `ArangoSession`
 //! as a resource and automatically adding systems for change detection.
 
-use crate::{ArangoSession, DatabaseConnection, Guid, Persist};
+use crate::{registration, ArangoSession, DatabaseConnection, Guid, Persist};
 use bevy::{
     app::{App, Plugin, PostUpdate},
     ecs::{
@@ -16,13 +16,9 @@ use bevy::{
 };
 use std::sync::Arc;
 
-pub struct AppRegister(pub fn(&mut App));
-
-inventory::collect!(AppRegister);
-
 /// A system that automatically marks entities with changed components as dirty.
 #[allow(dead_code)]
-pub(crate) fn auto_dirty_tracking_system<T: Component + Persist>(
+pub fn auto_dirty_tracking_system<T: Component + Persist>(
     mut session: ResMut<ArangoSession>,
     query: Query<Entity, Changed<T>>,
 ) {
@@ -60,8 +56,10 @@ impl Plugin for ArangoPlugin {
         session.register_component::<Guid>();
         app.insert_resource(session);
 
-        for reg in inventory::iter::<AppRegister> {
-            (reg.0)(app);
+        // Drain the runtime registry and call each registration fn
+        let mut registry = registration::COMPONENT_REGISTRY.lock().unwrap();
+        for reg in registry.drain(..) {
+            reg(app);
         }
 
         // Add the despawn tracking system.

@@ -1,6 +1,13 @@
+extern crate ctor;
+
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens, format_ident};
-use syn::{parse_macro_input, Data, DeriveInput, Fields};
+use quote::{quote, format_ident};
+use syn::{
+    parse_macro_input,
+    punctuated::Punctuated,
+    token::Comma,
+    DeriveInput, Item, Meta, Data, Fields,
+};
 
 fn get_crate_path() -> proc_macro2::TokenStream {
     use proc_macro_crate::{crate_name, FoundCrate};
@@ -21,31 +28,36 @@ pub fn persist_derive(input: TokenStream) -> TokenStream {
     let name = &input.ident;
     let crate_path = get_crate_path();
 
-    // --- Generate the field accessors inside an `impl` block for the struct ---
+    // --- DEBUG: dump the incoming DeriveInput ---
+    eprintln!("--- derive(Persist) for {} ---", name);
+    eprintln!("attrs count = {}", input.attrs.len());
+    for attr in &input.attrs {
+        eprintln!("  attr.path = {:?}", attr.path());
+        // print the Meta instead of a non‐existent tokens field
+        eprintln!("  attr.meta = {:?}", attr.meta);
+    }
+
+    // --- field‐accessors impl ---
     let field_accessors_impl = if let Data::Struct(s) = &input.data {
         if let Fields::Named(fields) = &s.fields {
-            let field_methods = fields.named.iter().map(|f| {
-                let field_name = f.ident.as_ref().unwrap();
-                let field_name_str = field_name.to_string();
+            let methods = fields.named.iter().map(|f| {
+                let fname = f.ident.as_ref().unwrap();
+                let fname_str = fname.to_string();
                 quote! {
                     #[allow(dead_code)]
-                    pub fn #field_name() -> #crate_path::query_dsl::Expression {
+                    pub fn #fname() -> #crate_path::query_dsl::Expression {
                         #crate_path::query_dsl::Expression::Field {
                             component_name: <#name as #crate_path::Persist>::name(),
-                            field_name: #field_name_str,
+                            field_name: #fname_str,
                         }
                     }
                 }
             });
-            quote! { impl #name { #(#field_methods)* } }
-        } else {
-            quote! {}
-        }
-    } else {
-        quote! {}
-    };
+            quote! { impl #name { #(#methods)* } }
+        } else { quote!{} }
+    } else { quote!{} };
 
-    // --- Generate the Persist trait implementation ---
+    // --- Persist trait impl ---
     let persist_impl = quote! {
         impl #crate_path::Persist for #name {
             fn name() -> &'static str {
@@ -54,37 +66,91 @@ pub fn persist_derive(input: TokenStream) -> TokenStream {
         }
     };
 
-    // Determine if this type is a Bevy Component
-    let is_component = input.attrs.iter().any(|attr| {
-        attr.path().is_ident("component")
-            || (attr.path().is_ident("derive")
-                && attr.meta.to_token_stream().to_string().contains("Component"))
-    });
+    let expanded = quote! {
+        // Persist impl
+        #persist_impl
+        // field accessors
+        #field_accessors_impl
+    };
 
-    // --- Generate auto‐dirty‐tracking registration for components ---
-    let registration_impl = if is_component {
-        let fn_ident = format_ident!("register_component_system_{}", name);
+    TokenStream::from(expanded)
+}
+
+// New attribute macro: single annotation for derive + registration
+#[proc_macro_attribute]
+pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Parse component/resource list: e.g. #[persist(component,resource)]
+    let metas = parse_macro_input!(attr with Punctuated::<Meta, Comma>::parse_terminated);
+    let is_comp = metas.iter().any(|m| matches!(m, Meta::Path(p) if p.is_ident("component")));
+    let is_res  = metas.iter().any(|m| matches!(m, Meta::Path(p) if p.is_ident("resource")));
+
+    // No effect if neither
+    if !is_comp && !is_res {
+        return item;
+    }
+
+    // Parse the input item (struct or enum)
+    let mut ast = parse_macro_input!(item as Item);
+
+    // Attach appropriate derives
+    let derive_list = if is_comp {
+        quote! { Component, Persist }
+    } else {
+        quote! { Resource, Persist }
+    };
+    match &mut ast {
+        Item::Struct(s) => s.attrs.push(syn::parse_quote!(#[derive(#derive_list)])),
+        Item::Enum(e)   => e.attrs.push(syn::parse_quote!(#[derive(#derive_list)])),
+        _ => {}
+    }
+
+    // Registration boilerplate
+    let name       = match &ast {
+        Item::Struct(s) => &s.ident,
+        Item::Enum(e)   => &e.ident,
+        _ => unreachable!(),
+    };
+    let register_fn = format_ident!("__persist_register_{}", name);
+    let ctor_fn     = format_ident!("__persist_ctor_{}", name);
+    let crate_path  = get_crate_path();
+
+    let registration = if is_comp {
         quote! {
             #[allow(dead_code)]
-            fn #fn_ident(app: &mut bevy::app::App) {
+            fn #register_fn(app: &mut bevy::app::App) {
+                app.world
+                    .resource_mut::<#crate_path::ArangoSession>()
+                    .register_component::<#name>();
                 app.add_systems(
                     bevy::app::PostUpdate,
                     #crate_path::bevy_plugin::auto_dirty_tracking_system::<#name>,
                 );
             }
-            inventory::submit! {
-                #crate_path::bevy_plugin::AppRegister(#fn_ident)
-            }
         }
     } else {
-        quote! {}
+        quote! {
+            #[allow(dead_code)]
+            fn #register_fn(app: &mut bevy::app::App) {
+                app.world
+                    .resource_mut::<#crate_path::ArangoSession>()
+                    .register_resource::<#name>();
+            }
+        }
     };
 
-    let expanded = quote! {
-        #persist_impl
-        #field_accessors_impl
-        #registration_impl
+    let push = quote! {
+        #[ctor::ctor]
+        fn #ctor_fn() {
+            #crate_path::registration::COMPONENT_REGISTRY
+                .lock()
+                .unwrap()
+                .push(#register_fn);
+        }
     };
 
-    TokenStream::from(expanded)
+    TokenStream::from(quote! {
+        #ast
+        #registration
+        #push
+    })
 }

@@ -13,6 +13,7 @@ futures = { workspace = true }
 mockall = { workspace = true }
 inventory = "0.3.15"
 downcast-rs = "2.0.1"
+once_cell.workspace = true
 
 [dev-dependencies]
 once_cell = { workspace = true }
