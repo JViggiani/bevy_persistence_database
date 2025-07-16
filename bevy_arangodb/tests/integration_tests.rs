@@ -1,4 +1,5 @@
 use bevy::app::App;
+use bevy::reflect::Reflect;
 use bevy_arangodb::{commit, DatabaseConnection, Guid, ArangoPlugin, ArangoDbConnection, ArangoQuery};
 use std::process::Command;
 use std::sync::Arc;
@@ -77,6 +78,7 @@ async fn setup() -> Arc<dyn DatabaseConnection> {
     db
 }
 
+#[derive(Debug, Reflect)]
 #[bevy_arangodb::persist(component)]
 struct Health {
     value: i32,

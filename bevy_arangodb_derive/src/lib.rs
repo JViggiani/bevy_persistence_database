@@ -76,8 +76,6 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::bevy_arangodb::Persist,
             ::serde::Serialize,
             ::serde::Deserialize,
-            ::std::fmt::Debug,
-            ::std::cmp::PartialEq
         }
     } else {
         quote! {
@@ -85,8 +83,6 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             ::bevy_arangodb::Persist,
             ::serde::Serialize,
             ::serde::Deserialize,
-            ::std::fmt::Debug,
-            ::std::cmp::PartialEq
         }
     };
     match &mut ast {
