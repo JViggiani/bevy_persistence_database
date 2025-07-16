@@ -78,6 +78,7 @@ async fn setup() -> Arc<dyn DatabaseConnection> {
     db
 }
 
+// Example component which derives additional traits - not required for the tests, but shows how to use the derive macro.
 #[derive(Debug, Reflect)]
 #[bevy_arangodb::persist(component)]
 struct Health {

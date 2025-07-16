@@ -9,8 +9,6 @@ pub mod bevy_plugin;
 pub mod query_dsl;
 pub mod registration;
 #[doc(hidden)]
-pub mod internal_traits;
-#[doc(hidden)]
 pub mod prelude {
     pub use bevy::prelude::Component;
 }
