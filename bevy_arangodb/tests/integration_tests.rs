@@ -99,46 +99,46 @@ struct GameSettings {
     map_name: String,
 }
 
-// #[tokio::test]
-// async fn test_entity_commit_and_fetch() {
-//     let _guard = DB_LOCK.lock().await;
-//     let db = setup().await;
+#[tokio::test]
+async fn test_entity_commit_and_fetch() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
 
-//     let mut app = App::new();
-//     app.add_plugins(ArangoPlugin::new(db.clone()));
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
 
-//     let health_val = Health { value: 100 };
-//     let pos_val = Position { x: 1.0, y: 2.0 };
+    let health_val = Health { value: 100 };
+    let pos_val = Position { x: 1.0, y: 2.0 };
 
-//     let entity_id = app.world.spawn((health_val, pos_val)).id();
+    let entity_id = app.world.spawn((health_val, pos_val)).id();
     
-//     app.update(); // Run the schedule to trigger change detection
+    app.update(); // Run the schedule to trigger change detection
 
-//     commit(&mut app).await.unwrap();
+    commit(&mut app).await.unwrap();
 
-//     // 4. Verify the results
-//     // The entity should now have a Guid component assigned by the library.
-//     let guid = app.world.get::<Guid>(entity_id)
-//         .expect("Entity should have a Guid after commit");
+    // 4. Verify the results
+    // The entity should now have a Guid component assigned by the library.
+    let guid = app.world.get::<Guid>(entity_id)
+        .expect("Entity should have a Guid after commit");
 
-//     assert!(!guid.id().is_empty(), "Guid should not be empty");
+    assert!(!guid.id().is_empty(), "Guid should not be empty");
 
-//     // To be absolutely sure, let's fetch the Health component directly from the DB
-//     // using the new Guid and verify its content.
-//     let health_json = db
-//         .fetch_component(guid.id(), Health::name())
-//         .await
-//         .expect("Failed to fetch component from DB")
-//         .expect("Component should exist in DB");
+    // To be absolutely sure, let's fetch the Health component directly from the DB
+    // using the new Guid and verify its content.
+    let health_json = db
+        .fetch_component(guid.id(), Health::name())
+        .await
+        .expect("Failed to fetch component from DB")
+        .expect("Component should exist in DB");
 
-//     let fetched_health: Health =
-//         serde_json::from_value(health_json).expect("Failed to deserialize Health component");
+    let fetched_health: Health =
+        serde_json::from_value(health_json).expect("Failed to deserialize Health component");
 
-//     assert_eq!(
-//         fetched_health.value, 100,
-//         "The health value in the database is incorrect"
-//     );
-// }
+    assert_eq!(
+        fetched_health.value, 100,
+        "The health value in the database is incorrect"
+    );
+}
 
 #[tokio::test]
 async fn test_resource_commit_and_fetch() {

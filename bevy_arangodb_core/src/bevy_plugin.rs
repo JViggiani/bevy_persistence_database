@@ -70,9 +70,14 @@ impl Plugin for ArangoPlugin {
         session.register_component::<Guid>();
         app.insert_resource(session);
 
-        // Drain the runtime registry and call each registration fn
-        let mut registry = registration::COMPONENT_REGISTRY.lock().unwrap();
-        for reg in registry.drain(..) {
+        // Clone the registration functions from the runtime registry
+        let registry = registration::COMPONENT_REGISTRY.lock().unwrap();
+        let registrations: Vec<registration::RegistrationFn> = registry.iter().copied().collect();
+        // Drop the lock before iterating
+        drop(registry);
+
+        // Call each registration fn
+        for reg in registrations {
             reg(app);
         }
 
