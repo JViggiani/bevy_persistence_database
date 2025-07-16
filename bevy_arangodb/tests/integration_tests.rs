@@ -1,5 +1,5 @@
 use bevy::app::App;
-use bevy_arangodb::{commit, DatabaseConnection, Guid, ArangoPlugin, ArangoDbConnection};
+use bevy_arangodb::{commit, DatabaseConnection, Guid, ArangoPlugin, ArangoDbConnection, ArangoQuery};
 use std::process::Command;
 use std::sync::Arc;
 use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, ContainerAsync};
@@ -145,7 +145,7 @@ async fn test_resource_commit_and_fetch() {
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
-    // 2. Create a session, add a resource, and commit it
+    // 1. Create a session, add a resource, and commit it
     let mut app = App::new();
     app.add_plugins(ArangoPlugin::new(db.clone()));
 
@@ -159,7 +159,7 @@ async fn test_resource_commit_and_fetch() {
 
     commit(&mut app).await.expect("Commit failed");
 
-    // 3. Verify the resource was saved correctly by fetching it directly
+    // 2. Verify the resource was saved correctly by fetching it directly
     let resource_name = GameSettings::name();
     let resource_json = db
         .fetch_resource(resource_name)
@@ -174,55 +174,55 @@ async fn test_resource_commit_and_fetch() {
     assert_eq!(fetched_settings.map_name, "level_1");
 }
 
-// #[tokio::test]
-// async fn test_entity_load_into_new_session() {
-//     let _guard = DB_LOCK.lock().await;
-//     let db = setup().await;
+#[tokio::test]
+async fn test_entity_load_into_new_session() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
 
-//     let mut app1 = App::new();
-//     app1.add_plugins(ArangoPlugin::new(db.clone()));
+    let mut app1 = App::new();
+    app1.add_plugins(ArangoPlugin::new(db.clone()));
 
-//     // 2. Spawn two entities, one with Health+Position, one with only Health.
-//     let _entity_to_load = app1
-//         .world
-//         .spawn((
-//             Health { value: 150 },
-//             Position { x: 10.0, y: 20.0 },
-//         ))
-//         .id();
-//     let _entity_to_ignore = app1.world.spawn(Health { value: 99 }).id();
+    // 1. Spawn two entities, one with Health+Position, one with only Health.
+    let _entity_to_load = app1
+        .world
+        .spawn((
+            Health { value: 150 },
+            Position { x: 10.0, y: 20.0 },
+        ))
+        .id();
+    let _entity_to_ignore = app1.world.spawn(Health { value: 99 }).id();
     
-//     app1.update();
+    app1.update();
 
-//     commit(&mut app1).await.expect("Initial commit failed");
+    commit(&mut app1).await.expect("Initial commit failed");
 
 
-//     // 3. Create a new, clean session to load the data into.
-//     let mut app2 = App::new();
-//     app2.add_plugins(ArangoPlugin::new(db.clone()));
+    // 2. Create a new, clean session to load the data into.
+    let mut app2 = App::new();
+    app2.add_plugins(ArangoPlugin::new(db.clone()));
     
-//     // 4. Query for entities that have BOTH Health and Position, and Health > 100.
-//     let query = ArangoQuery::new(db.clone())
-//         .with::<Health>()
-//         .with::<Position>()
-//         .filter(Health::value().gt(100));
-//     let loaded_entities = query.fetch_into_app(&mut app2).await;
+    // 3. Query for entities that have BOTH Health and Position, and Health > 100.
+    let query = ArangoQuery::new(db.clone())
+        .with::<Health>()
+        .with::<Position>()
+        .filter(Health::value().gt(100));
+    let loaded_entities = query.fetch_into_app(&mut app2).await;
 
-//     // 5. Verify that only the correct entity was loaded and its data is correct.
-//     assert_eq!(
-//         loaded_entities.len(),
-//         1,
-//         "Should only load one entity with both components"
-//     );
-//     let loaded_entity = loaded_entities[0];
+    // 4. Verify that only the correct entity was loaded and its data is correct.
+    assert_eq!(
+        loaded_entities.len(),
+        1,
+        "Should only load one entity with both components"
+    );
+    let loaded_entity = loaded_entities[0];
 
-//     let health = app2.world.get::<Health>(loaded_entity).unwrap();
-//     assert_eq!(health.value, 150);
+    let health = app2.world.get::<Health>(loaded_entity).unwrap();
+    assert_eq!(health.value, 150);
 
-//     let position = app2.world.get::<Position>(loaded_entity).unwrap();
-//     assert_eq!(position.x, 10.0);
-//     assert_eq!(position.y, 20.0);
-// }
+    let position = app2.world.get::<Position>(loaded_entity).unwrap();
+    assert_eq!(position.x, 10.0);
+    assert_eq!(position.y, 20.0);
+}
 
 // #[tokio::test]
 // async fn test_complex_query_with_dsl() {
