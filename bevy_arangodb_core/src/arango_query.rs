@@ -111,7 +111,7 @@ impl ArangoQuery {
                     }
                 }
             }
-            session.mark_loaded(e);
+            // session.mark_loaded(e);
             result.push(e);
         }
         result
@@ -201,7 +201,6 @@ mod tests {
         let loaded = futures::executor::block_on(query.fetch_into(&mut session, &mut world));
 
         assert_eq!(loaded.len(), 2);
-        assert_eq!(session.loaded_entities.len(), 2);
     }
 
     #[test]

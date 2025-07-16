@@ -98,7 +98,6 @@ pub struct ArangoSession {
     pub(crate) dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
     pub entity_keys: HashMap<Entity, String>,
-    pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     pub dirty_resources: HashSet<TypeId>, // track dirty resources
     component_serializers: Vec<ComponentSerializer>,
     pub component_deserializers: HashMap<String, ComponentDeserializer>,
@@ -185,11 +184,6 @@ impl ArangoSession {
         self.despawned_entities.insert(entity);
     }
 
-    /// Mark an entity as already present in the database.
-    pub fn mark_loaded(&mut self, entity: Entity) {
-        self.loaded_entities.insert(entity);
-    }
-
     /// Testing constructor w/ mock DB.
     #[cfg(test)]
     pub fn new_mocked(db: Arc<dyn DatabaseConnection>) -> Self {
@@ -201,7 +195,6 @@ impl ArangoSession {
             resource_deserializers: HashMap::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
-            loaded_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
             entity_keys: HashMap::new(),
         }
@@ -217,7 +210,6 @@ impl ArangoSession {
             resource_deserializers: HashMap::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
-            loaded_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
             entity_keys: HashMap::new(),
         }

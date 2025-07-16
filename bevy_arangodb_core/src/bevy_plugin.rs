@@ -18,7 +18,6 @@ use bevy::{
 use std::sync::Arc;
 
 /// A system that automatically marks entities with changed components as dirty.
-#[allow(dead_code)]
 pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
     mut session: ResMut<ArangoSession>,
     query: Query<Entity, Changed<T>>,
@@ -29,7 +28,6 @@ pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
 }
 
 /// A system that automatically marks changed resources as dirty.
-#[allow(dead_code)]
 pub fn auto_dirty_tracking_resource_system<T: Resource + Persist>(
     mut session: ResMut<ArangoSession>,
     resource: Option<Res<T>>,
