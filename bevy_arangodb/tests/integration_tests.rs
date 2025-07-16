@@ -123,7 +123,7 @@ async fn test_entity_commit_and_fetch() {
 
     assert!(!guid.id().is_empty(), "Guid should not be empty");
 
-    // To be absolutely sure, let's fetch the Health component directly from the DB
+    // To be absolutely sure, fetch the Health component directly from the DB
     // using the new Guid and verify its content.
     let health_json = db
         .fetch_component(guid.id(), Health::name())
@@ -224,100 +224,100 @@ async fn test_entity_load_into_new_session() {
     assert_eq!(position.y, 20.0);
 }
 
-// #[tokio::test]
-// async fn test_complex_query_with_dsl() {
-//     let _guard = DB_LOCK.lock().await;
-//     let db = setup().await;
+#[tokio::test]
+async fn test_complex_query_with_dsl() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
 
-//     let mut app = App::new();
-//     app.add_plugins(ArangoPlugin::new(db.clone()));
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
 
-//     // 2. Spawn a few entities to represent our "scream" scenario.
-//     // A screaming creature in the target zone
-//     app.world.spawn((
-//         Creature { is_screaming: true },
-//         Position { x: 50.0, y: 50.0 },
-//     ));
-//     // A quiet creature in the target zone
-//     app.world.spawn((
-//         Creature { is_screaming: false },
-//         Position { x: 75.0, y: 75.0 },
-//     ));
-//     // A screaming creature outside the target zone
-//     app.world.spawn((
-//         Creature { is_screaming: true },
-//         Position { x: 150.0, y: 150.0 },
-//     ));
+    // 1. Spawn a few entities to represent a scenario where entities must move away from a screaming creature.
+    // A screaming creature in the target zone
+    app.world.spawn((
+        Creature { is_screaming: true },
+        Position { x: 50.0, y: 50.0 },
+    ));
+    // A quiet creature in the target zone
+    app.world.spawn((
+        Creature { is_screaming: false },
+        Position { x: 75.0, y: 75.0 },
+    ));
+    // A screaming creature outside the target zone
+    app.world.spawn((
+        Creature { is_screaming: true },
+        Position { x: 150.0, y: 150.0 },
+    ));
 
-//     app.update();
-//     commit(&mut app).await.expect("Commit failed");
+    app.update();
+    commit(&mut app).await.expect("Commit failed");
 
-//     // 3. Build a complex query with the DSL.
-//     // We want to find all creatures that are screaming AND are inside a specific area.
-//     let query = ArangoQuery::new(db.clone())
-//         .with::<Creature>()
-//         .with::<Position>()
-//         .filter(
-//             Creature::is_screaming().eq(true)
-//             .and(Position::x().gt(0.0))
-//             .and(Position::x().lt(100.0))
-//             .and(Position::y().gt(0.0))
-//             .and(Position::y().lt(100.0))
-//         );
+    // 2. Build a complex query with the DSL.
+    // We want to find all creatures that are screaming AND are inside a specific area.
+    let query = ArangoQuery::new(db.clone())
+        .with::<Creature>()
+        .with::<Position>()
+        .filter(
+            Creature::is_screaming().eq(true)
+            .and(Position::x().gt(0.0))
+            .and(Position::x().lt(100.0))
+            .and(Position::y().gt(0.0))
+            .and(Position::y().lt(100.0))
+        );
 
-//     // 4. Fetch the results into a new app instance.
-//     let mut app2 = App::new();
-//     app2.add_plugins(ArangoPlugin::new(db.clone()));
-//     let loaded_entities = query.fetch_into_app(&mut app2).await;
+    // 3. Fetch the results into a new app instance.
+    let mut app2 = App::new();
+    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    let loaded_entities = query.fetch_into_app(&mut app2).await;
 
-//     // 5. Verify that only the single matching entity was loaded.
-//     assert_eq!(loaded_entities.len(), 1, "Should only load one screaming creature in the zone");
-//     let loaded_entity = loaded_entities[0];
+    // 4. Verify that only the single matching entity was loaded.
+    assert_eq!(loaded_entities.len(), 1, "Should only load one screaming creature in the zone");
+    let loaded_entity = loaded_entities[0];
 
-//     let creature = app2.world.get::<Creature>(loaded_entity).unwrap();
-//     assert!(creature.is_screaming);
+    let creature = app2.world.get::<Creature>(loaded_entity).unwrap();
+    assert!(creature.is_screaming);
 
-//     let position = app2.world.get::<Position>(loaded_entity).unwrap();
-//     assert_eq!(position.x, 50.0);
-// }
+    let position = app2.world.get::<Position>(loaded_entity).unwrap();
+    assert_eq!(position.x, 50.0);
+}
 
-// #[tokio::test]
-// async fn test_entity_delete() {
-//     let _guard = DB_LOCK.lock().await;
-//     let db = setup().await;
+#[tokio::test]
+async fn test_entity_delete() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
 
-//     let mut app = App::new();
-//     app.add_plugins(ArangoPlugin::new(db.clone()));
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
 
-//     // 2. Spawn and commit an entity.
-//     let entity_id = app.world.spawn(Health { value: 100 }).id();
+    // 1. Spawn and commit an entity.
+    let entity_id = app.world.spawn(Health { value: 100 }).id();
     
-//     app.update();
+    app.update();
 
-//     commit(&mut app).await.expect("Commit failed");
+    commit(&mut app).await.expect("Commit failed");
 
-//     // 3. Verify it exists in the database.
-//     let guid = app.world.get::<Guid>(entity_id).unwrap().id().to_string();
-//     let component = db
-//         .fetch_component(&guid, Health::name())
-//         .await
-//         .expect("Fetch should not fail")
-//         .expect("Component should exist after first commit");
-//     assert_eq!(component.get("value").unwrap().as_i64().unwrap(), 100);
+    // 2. Verify it exists in the database.
+    let guid = app.world.get::<Guid>(entity_id).unwrap().id().to_string();
+    let component = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .expect("Fetch should not fail")
+        .expect("Component should exist after first commit");
+    assert_eq!(component.get("value").unwrap().as_i64().unwrap(), 100);
 
-//     // 4. Despawn the entity and commit again.
-//     app.world.entity_mut(entity_id).despawn();
-//     app.update(); // This runs the despawn command and our auto-despawn-tracking system
-//     commit(&mut app).await.expect("Second commit failed");
+    // 3. Despawn the entity and commit again.
+    app.world.entity_mut(entity_id).despawn();
+    app.update(); // This runs the despawn command and our auto-despawn-tracking system
+    commit(&mut app).await.expect("Second commit failed");
 
-//     // 5. Verify it's gone from the database.
-//     let component_after_delete = db
-//         .fetch_component(&guid, Health::name())
-//         .await
-//         .expect("Fetch should not fail");
+    // 4. Verify it's gone from the database.
+    let component_after_delete = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .expect("Fetch should not fail");
 
-//     assert!(
-//         component_after_delete.is_none(),
-//         "Component should be gone after delete commit"
-//     );
-// }
+    assert!(
+        component_after_delete.is_none(),
+        "Component should be gone after delete commit"
+    );
+}

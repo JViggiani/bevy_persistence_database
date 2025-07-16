@@ -97,6 +97,7 @@ pub struct ArangoSession {
     pub db: Arc<dyn DatabaseConnection>,
     pub(crate) dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
+    pub entity_keys: HashMap<Entity, String>,
     pub loaded_entities: HashSet<Entity>,    // track pre-loaded entities
     pub dirty_resources: HashSet<TypeId>, // track dirty resources
     component_serializers: Vec<ComponentSerializer>,
@@ -202,6 +203,7 @@ impl ArangoSession {
             despawned_entities: HashSet::new(),
             loaded_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
+            entity_keys: HashMap::new(),
         }
     }
 
@@ -217,13 +219,14 @@ impl ArangoSession {
             despawned_entities: HashSet::new(),
             loaded_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
+            entity_keys: HashMap::new(),
         }
     }
 }
 
 /// Serialize all data. This will fail early if any serialization fails.
 fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData, ArangoError> {
-    let deleted_set: HashSet<Entity> = session.despawned_entities.iter().cloned().collect();
+    let deleted_set = session.despawned_entities.clone();
 
     let updates = session
         .dirty_entities
@@ -241,7 +244,7 @@ fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData,
             }
             Ok((*entity, Value::Object(map)))
         })
-        .collect::<Result<Vec<_>, ArangoError>>()?;
+        .collect::<Result<_, _>>()?;
 
     let mut resource_data = Vec::new();
     for func in &session.resource_serializers {
@@ -267,19 +270,23 @@ pub(crate) async fn commit(session: &mut ArangoSession, world: &mut World) -> Re
             session.db.update_document(guid.id(), data).await?;
         } else {
             let key = session.db.create_document(data).await?;
-            world.entity_mut(entity).insert(crate::Guid::new(key));
+            world.entity_mut(entity).insert(crate::Guid::new(key.clone()));
+            session.entity_keys.insert(entity, key);
         }
     }
+
     // deletes
     for entity in deletes {
-        if let Some(guid) = world.get::<crate::Guid>(entity) {
-            session.db.delete_document(guid.id()).await?;
+        if let Some(key) = session.entity_keys.remove(&entity) {
+            session.db.delete_document(&key).await?;
         }
     }
+
     // resources
     for (name, data) in resources {
         session.db.upsert_resource(&name, data).await?;
     }
+
     session.dirty_entities.clear();
     session.despawned_entities.clear();
     session.dirty_resources.clear();
@@ -475,8 +482,9 @@ mod arango_session {
 
         let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
         let mut world = World::new();
-        let id = world.spawn(crate::Guid::new("0".to_string())).id();
-        session.mark_despawned(id);
+        let entity_id = world.spawn_empty().id();
+        session.entity_keys.insert(entity_id, "0".to_string());
+        session.mark_despawned(entity_id);
         assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
@@ -499,7 +507,9 @@ mod arango_session {
         let mut world = World::new();
 
         let id_new = world.spawn(()).id();
-        let id_old = world.spawn(crate::Guid::new("old_key".to_string())).id();
+        let old_guid = crate::Guid::new("old_key".to_string());
+        let id_old = world.spawn(old_guid.clone()).id();
+        session.entity_keys.insert(id_old, old_guid.id().to_string());
         session.dirty_entities.insert(id_new);
         session.dirty_entities.insert(id_old);
         session.mark_despawned(id_old);

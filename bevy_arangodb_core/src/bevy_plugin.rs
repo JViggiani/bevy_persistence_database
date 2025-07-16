@@ -46,8 +46,8 @@ fn auto_despawn_tracking_system(
     mut session: ResMut<ArangoSession>,
     mut removed: RemovedComponents<Guid>,
 ) {
-    for r in removed.read() {
-        session.mark_despawned(r);
+    for entity in removed.read() {
+        session.mark_despawned(entity);
     }
 }
 
