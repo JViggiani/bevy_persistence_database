@@ -3,8 +3,6 @@
 use bevy::prelude::Component;
 use serde::{Deserialize, Serialize, Serializer, Deserializer};
 
-use crate::Persist;
-
 /// A globally-unique identifier for an entity, used to link the Bevy `Entity`
 /// to its corresponding document in ArangoDB. This is typically the `_key`.
 /// The inner value is private to prevent manual modification.
@@ -38,11 +36,5 @@ impl Guid {
     /// Returns the underlying global ID
     pub fn id(&self) -> &str {
         &self.0
-    }
-}
-
-impl Persist for Guid {
-    fn name() -> &'static str {
-        "_key"
     }
 }

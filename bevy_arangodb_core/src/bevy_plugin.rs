@@ -63,9 +63,7 @@ impl ArangoPlugin {
 
 impl Plugin for ArangoPlugin {
     fn build(&self, app: &mut App) {
-        let mut session = ArangoSession::new(self.db.clone());
-        // Manually register the Guid component, as it's part of the library itself.
-        session.register_component::<Guid>();
+        let session = ArangoSession::new(self.db.clone());
         app.insert_resource(session);
 
         // Clone the registration functions from the runtime registry
