@@ -23,7 +23,6 @@ pub fn persist_derive(input: TokenStream) -> TokenStream {
                 let fname = f.ident.as_ref().unwrap();
                 let fname_str = fname.to_string();
                 quote! {
-                    #[allow(dead_code)]
                     pub fn #fname() -> #crate_path::query_dsl::Expression {
                         #crate_path::query_dsl::Expression::Field {
                             component_name: <#name as #crate_path::Persist>::name(),
@@ -104,7 +103,6 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     let registration = if is_comp {
         quote! {
             #[allow(non_snake_case)]
-            #[allow(dead_code)]
             fn #register_fn(app: &mut bevy::app::App) {
                 app.world
                     .resource_mut::<#crate_path::ArangoSession>()
@@ -118,7 +116,6 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else {
         quote! {
             #[allow(non_snake_case)]
-            #[allow(dead_code)]
             fn #register_fn(app: &mut bevy::app::App) {
                 app.world
                     .resource_mut::<#crate_path::ArangoSession>()

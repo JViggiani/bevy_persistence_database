@@ -389,10 +389,6 @@ mod arango_session {
         assert!(commit(&mut session, &mut world).await.is_ok());
     }
 
-    #[allow(dead_code)]
-    #[derive(bevy::prelude::Component)]
-    struct Foo(i32);
-
     #[tokio::test]
     async fn commit_creates_new_entity() {
         let mut mock_db = MockDatabaseConnection::new_with_defaults();
