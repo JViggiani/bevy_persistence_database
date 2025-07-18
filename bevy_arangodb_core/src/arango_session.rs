@@ -239,6 +239,21 @@ impl ArangoSession {
         }
         Ok(())
     }
+
+    /// Fetch each registered resource’s JSON blob from `db`
+    /// and run the registered deserializer to insert it into `world`.
+    pub async fn fetch_and_insert_resources(
+        &self,
+        db: &(dyn DatabaseConnection + 'static),
+        world: &mut World,
+    ) -> Result<(), ArangoError> {
+        for (res_name, deser) in self.resource_deserializers.iter() {
+            if let Some(val) = db.fetch_resource(res_name).await? {
+                deser(world, val)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Serialize all data. This will fail early if any serialization fails.

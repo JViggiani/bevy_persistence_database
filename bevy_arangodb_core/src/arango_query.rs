@@ -116,7 +116,13 @@ impl ArangoQuery {
             result.push(e);
         }
 
-        // 4) restore the session and return
+        // 4) Fetch all persisted resources back into the world
+        session
+            .fetch_and_insert_resources(&*self.db, world)
+            .await
+            .expect("resource deserialization failed");
+
+        // 5) restore the session and return
         app.world.insert_resource(session);
         result
     }
@@ -174,16 +180,19 @@ mod tests {
         mock_db.expect_fetch_component()
             .withf(|k, comp| (k=="k1"||k=="k2") && comp==Position::name())
             .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0,"z":3.0}))) }));
+        // Due to test pollution from other modules, other resource types might be registered.
+        // We must expect `fetch_resource` to be called, and we can just return `None`.
+        mock_db.expect_fetch_resource()
+            .returning(|_| Box::pin(async { Ok(None) }));
 
         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
 
         // build app + session
         let mut app = App::new();
-        let mut session = ArangoSession::new_mocked(db.clone());
+        app.add_plugins(ArangoPlugin::new(db.clone()));
+        let mut session = app.world.resource_mut::<ArangoSession>();
         session.register_component::<Health>();
         session.register_component::<Position>();
-        app.insert_resource(session);
-        app.add_plugins(ArangoPlugin::new(db.clone()));
 
         let query = ArangoQuery::new(db)
             .with::<Health>()

@@ -97,6 +97,7 @@ struct Creature {
     is_screaming: bool,
 }
 
+#[derive(Clone)]
 #[bevy_arangodb::persist(resource)]
 struct GameSettings {
     difficulty: f32,
@@ -324,4 +325,33 @@ async fn test_entity_delete() {
         component_after_delete.is_none(),
         "Component should be gone after delete commit"
     );
+}
+
+#[tokio::test]
+async fn test_query_fetches_resources() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    // 1) Commit a resource in app1
+    let mut app1 = App::new();
+    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    let settings = GameSettings {
+        difficulty: 0.42,
+        map_name: "mystic".into(),
+    };
+    app1.insert_resource(settings.clone());
+    app1.update();
+    commit(&mut app1).await.expect("initial commit failed");
+
+    // 2) Start a fresh session and run a query (no components requested)
+    let mut app2 = App::new();
+    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    // no `.with::<T>()` calls → fetch_ids returns all entities, but we only care about resources
+    let query = ArangoQuery::new(db.clone());
+    let _ = query.fetch_into(&mut app2).await;
+
+    // 3) Verify the resource was reloaded into app2
+    let loaded: &GameSettings = app2.world.resource::<GameSettings>();
+    assert_eq!(loaded.difficulty, 0.42);
+    assert_eq!(loaded.map_name, "mystic");
 }

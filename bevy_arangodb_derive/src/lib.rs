@@ -66,26 +66,34 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
-                app.world
-                    .resource_mut::<#crate_path::ArangoSession>()
-                    .register_component::<#name>();
-                app.add_systems(
-                    bevy::app::PostUpdate,
-                    #crate_path::bevy_plugin::auto_dirty_tracking_entity_system::<#name>,
-                );
+                let type_id = std::any::TypeId::of::<#name>();
+                let mut registered = app.world.resource_mut::<#crate_path::bevy_plugin::RegisteredPersistTypes>();
+                if registered.0.insert(type_id) {
+                    app.world
+                        .resource_mut::<#crate_path::ArangoSession>()
+                        .register_component::<#name>();
+                    app.add_systems(
+                        bevy::app::PostUpdate,
+                        #crate_path::bevy_plugin::auto_dirty_tracking_entity_system::<#name>,
+                    );
+                }
             }
         }
     } else {
         quote! {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
-                app.world
-                    .resource_mut::<#crate_path::ArangoSession>()
-                    .register_resource::<#name>();
-                app.add_systems(
-                    bevy::app::PostUpdate,
-                    #crate_path::bevy_plugin::auto_dirty_tracking_resource_system::<#name>,
-                );
+                let type_id = std::any::TypeId::of::<#name>();
+                let mut registered = app.world.resource_mut::<#crate_path::bevy_plugin::RegisteredPersistTypes>();
+                if registered.0.insert(type_id) {
+                    app.world
+                        .resource_mut::<#crate_path::ArangoSession>()
+                        .register_resource::<#name>();
+                    app.add_systems(
+                        bevy::app::PostUpdate,
+                        #crate_path::bevy_plugin::auto_dirty_tracking_resource_system::<#name>,
+                    );
+                }
             }
         }
     };

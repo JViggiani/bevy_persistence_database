@@ -15,7 +15,14 @@ use bevy::{
         system::{Query, Res, ResMut, Resource},
     },
 };
+use std::any::TypeId;
+use std::collections::HashSet;
 use std::sync::Arc;
+
+/// A resource used to track which `Persist` types have been registered with an `App`.
+/// This prevents duplicate systems from being added.
+#[derive(Resource, Default)]
+pub struct RegisteredPersistTypes(pub HashSet<TypeId>);
 
 /// A system that automatically marks entities with changed components as dirty.
 pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
@@ -65,10 +72,13 @@ impl Plugin for ArangoPlugin {
     fn build(&self, app: &mut App) {
         let session = ArangoSession::new(self.db.clone());
         app.insert_resource(session);
+        app.init_resource::<RegisteredPersistTypes>();
 
-        // Clone the registration functions from the runtime registry
+        // Drain the registration functions from the global registry to ensure they are only
+        // processed once per plugin instance.
         let registry = registration::COMPONENT_REGISTRY.lock().unwrap();
-        let registrations: Vec<registration::RegistrationFn> = registry.iter().copied().collect();
+        // Clone the registry so that each App/Plugin instance gets all registrations.
+        let registrations = registry.clone();
         // Drop the lock before iterating
         drop(registry);
 
