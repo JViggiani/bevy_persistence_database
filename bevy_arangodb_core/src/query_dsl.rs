@@ -69,10 +69,28 @@ impl Expression {
         }
     }
 
+    /// Creates a greater-than-or-equal comparison (`>=`).
+    pub fn gte<T: Serialize>(self, value: T) -> Expression {
+        Expression::BinaryOp {
+            op: BinaryOperator::Gte,
+            lhs: Box::new(self),
+            rhs: Box::new(Expression::Literal(serde_json::to_value(value).unwrap())),
+        }
+    }
+
     /// Creates a less-than comparison (`<`).
     pub fn lt<T: Serialize>(self, value: T) -> Expression {
         Expression::BinaryOp {
             op: BinaryOperator::Lt,
+            lhs: Box::new(self),
+            rhs: Box::new(Expression::Literal(serde_json::to_value(value).unwrap())),
+        }
+    }
+
+    /// Creates a less-than-or-equal comparison (`<=`).
+    pub fn lte<T: Serialize>(self, value: T) -> Expression {
+        Expression::BinaryOp {
+            op: BinaryOperator::Lte,
             lhs: Box::new(self),
             rhs: Box::new(Expression::Literal(serde_json::to_value(value).unwrap())),
         }
