@@ -78,54 +78,45 @@ impl ArangoQuery {
         result
     }
 
-    /// Load matching entities into `session.local_world`.
-    /// Returns all matching (old + new) entities.
-    pub async fn fetch_into(&self, session: &mut crate::ArangoSession, world: &mut World) -> Vec<bevy::prelude::Entity> {
-        // 1) run AQL to get keys
+    /// Load matching entities into the `App`'s `World`.
+    ///
+    /// Removes the `ArangoSession` resource, performs the database
+    /// operations, and then re-inserts it.
+    pub async fn fetch_into(&self, app: &mut App) -> Vec<bevy::prelude::Entity> {
+        // remove the session resource
+        let session = app.world.remove_resource::<crate::ArangoSession>().unwrap();
+
+        // SAFETY: With the session removed, it's safe to get a mutable World reference
+        let world_ptr: *mut World = &mut app.world as *mut World;
+        let world = unsafe { &mut *world_ptr };
+
+        // 1) run AQL to get matching keys
         let keys = self.fetch_ids().await;
         let mut result = Vec::new();
 
-        // Build a map of existing entities by Guid for quick lookup
-        let mut existing_entities_by_guid: HashMap<String, bevy::prelude::Entity> = HashMap::new();
-        let mut query = world.query::<(bevy::prelude::Entity, &Guid)>();
-        for (entity, guid) in query.iter(world) {
-            existing_entities_by_guid.insert(guid.id().to_string(), entity);
+        // 2) build map of existing entities by Guid
+        let mut existing = std::collections::HashMap::new();
+        for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
+            existing.insert(guid.id().to_string(), e);
         }
 
-        for key in keys.iter() {
-            let e = if let Some(existing_entity) = existing_entities_by_guid.get(key) {
-                *existing_entity
+        // 3) for each key: spawn or reuse, then fetch & insert components
+        for key in keys {
+            let e = if let Some(&e) = existing.get(&key) {
+                e
             } else {
                 let new_e = world.spawn(Guid::new(key.clone())).id();
-                existing_entities_by_guid.insert(key.clone(), new_e);
+                existing.insert(key.clone(), new_e);
                 new_e
             };
-
-            // for each requested component name, fetch and insert
             session
-                .fetch_and_insert_components(&*self.db, world, key, e, &self.component_names)
+                .fetch_and_insert_components(&*self.db, world, &key, e, &self.component_names)
                 .await
                 .expect("component deserialization failed");
             result.push(e);
         }
-        result
-    }
 
-    /// Load matching entities into the `App`'s `World`.
-    ///
-    /// This is a helper function that encapsulates the `async` complexity of
-    /// removing the `ArangoSession` resource, performing the database
-    /// operations, and then re-inserting it.
-    pub async fn fetch_into_app(&self, app: &mut App) -> Vec<bevy::prelude::Entity> {
-        let mut session = app.world.remove_resource::<crate::ArangoSession>().unwrap();
-        let world_ptr = &mut app.world as *mut _;
-
-        // SAFETY: We have removed the ArangoSession, so we can now safely get a mutable
-        // reference to the world. The session resource is not accessed by any other
-        // part of the app while it's removed.
-        let world = unsafe { &mut *world_ptr };
-        let result = self.fetch_into(&mut session, world).await;
-
+        // 4) restore the session and return
         app.world.insert_resource(session);
         result
     }
@@ -135,12 +126,12 @@ impl ArangoQuery {
 mod tests {
     use super::*;
     use crate::arango_session::MockDatabaseConnection;
-    use crate::{ArangoSession, DatabaseConnection, Persist};
+    use crate::{ArangoSession, DatabaseConnection, Persist, ArangoPlugin};
     use bevy_arangodb_derive::persist;
+    use bevy::prelude::App;
     use serde_json::json;
     use std::sync::Arc;
     use futures::executor::block_on;
-    use bevy::prelude::World;
 
     // Dummy components for skeleton tests
     #[persist(component)]
@@ -178,22 +169,27 @@ mod tests {
         mock_db.expect_query()
             .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
         mock_db.expect_fetch_component()
-            .withf(|k, comp| (k == "k1" || k == "k2") && comp==Health::name())
+            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Health::name())
             .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
         mock_db.expect_fetch_component()
-            .withf(|k, comp| (k == "k1" || k == "k2") && comp==Position::name())
+            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Position::name())
             .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0,"z":3.0}))) }));
 
-        let db_arc: Arc<dyn DatabaseConnection> = Arc::new(mock_db);
-        let mut session = ArangoSession::new_mocked(db_arc.clone());
-        let mut world = World::new();
+        let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
+
+        // build app + session
+        let mut app = App::new();
+        let mut session = ArangoSession::new_mocked(db.clone());
         session.register_component::<Health>();
         session.register_component::<Position>();
-        let query = ArangoQuery::new(db_arc)
+        app.insert_resource(session);
+        app.add_plugins(ArangoPlugin::new(db.clone()));
+
+        let query = ArangoQuery::new(db)
             .with::<Health>()
             .with::<Position>();
-        let loaded = futures::executor::block_on(query.fetch_into(&mut session, &mut world));
 
+        let loaded = block_on(query.fetch_into(&mut app));
         assert_eq!(loaded.len(), 2);
     }
 

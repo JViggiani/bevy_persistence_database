@@ -210,7 +210,7 @@ async fn test_entity_load_into_new_session() {
         .with::<Health>()
         .with::<Position>()
         .filter(Health::value().gt(100));
-    let loaded_entities = query.fetch_into_app(&mut app2).await;
+    let loaded_entities = query.fetch_into(&mut app2).await;
 
     // 4. Verify that only the correct entity was loaded and its data is correct.
     assert_eq!(
@@ -272,7 +272,7 @@ async fn test_complex_query_with_dsl() {
     // 3. Fetch the results into a new app instance.
     let mut app2 = App::new();
     app2.add_plugins(ArangoPlugin::new(db.clone()));
-    let loaded_entities = query.fetch_into_app(&mut app2).await;
+    let loaded_entities = query.fetch_into(&mut app2).await;
 
     // 4. Verify that only the single matching entity was loaded.
     assert_eq!(loaded_entities.len(), 1, "Should only load one screaming creature in the zone");
