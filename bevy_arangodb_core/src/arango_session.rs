@@ -9,6 +9,7 @@ use mockall::automock;
 use downcast_rs::{Downcast, impl_downcast};
 use bevy::prelude::{Component, Entity, Resource, World, App};
 use futures::future::BoxFuture;
+use serde::Serialize;
 use serde_json::Value;
 use std::{
     any::TypeId,
@@ -22,6 +23,15 @@ type ComponentSerializer   = Box<dyn Fn(Entity, &World) -> Result<Option<(String
 type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(), ArangoError> + Send + Sync>;
 type ResourceSerializer    = Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>;
 type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), ArangoError> + Send + Sync>;
+
+/// Represents one DB operation in our atomic transaction.
+#[derive(Serialize, Debug, Clone)]
+pub enum TransactionOperation {
+    CreateDocument(Value),
+    UpdateDocument(String, Value),
+    DeleteDocument(String),
+    UpsertResource(String, Value),
+}
 
 /// An error type for database operations.
 #[derive(Debug)]
@@ -38,24 +48,12 @@ impl std::error::Error for ArangoError {}
 /// Abstracts database operations via async returns but remains object-safe.
 #[cfg_attr(test, automock)]
 pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
-    /// Create a new document (entity). Returns the new doc's key.
-    fn create_document(
+    /// Execute all ops in one atomic, server‐side transaction.
+    /// Returns new `_key`s for any created docs.
+    fn execute_transaction(
         &self,
-        data: Value,
-    ) -> BoxFuture<'static, Result<String, ArangoError>>;
-
-    /// Update an existing document.
-    fn update_document(
-        &self,
-        entity_key: &str,
-        patch: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>>;
-
-    /// Delete a document (entity).
-    fn delete_document(
-        &self,
-        entity_key: &str,
-    ) -> BoxFuture<'static, Result<(), ArangoError>>;
+        operations: Vec<TransactionOperation>,
+    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>>;
 
     /// Execute a raw AQL query returning document keys.
     fn query(
@@ -76,13 +74,6 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
         &self,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
-
-    /// Creates or replaces a resource document.
-    fn upsert_resource(
-        &self,
-        resource_name: &str,
-        data: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>>;
 
     /// Clear all documents from the entities collection.
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>>;
@@ -107,9 +98,8 @@ pub struct ArangoSession {
 }
 
 struct CommitData {
-    deletes: Vec<Entity>,
-    updates: Vec<(Entity, Value)>,
-    resources: Vec<(String, Value)>,
+    operations: Vec<TransactionOperation>,
+    new_entities: Vec<Entity>,
 }
 
 impl ArangoSession {
@@ -258,32 +248,40 @@ impl ArangoSession {
 
 /// Serialize all data. This will fail early if any serialization fails.
 fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData, ArangoError> {
-    let mut updates = Vec::new();
-    for entity in session.dirty_entities.iter() {
-        let mut components_json = serde_json::Map::new();
-        for serializer in session.component_serializers.values() {
-            if let Some((name, value)) = serializer(*entity, world)? {
-                components_json.insert(name, value);
-            }
-        }
-        updates.push((*entity, Value::Object(components_json)));
-    }
+    let mut operations = Vec::new();
+    let mut new_entities = Vec::new();
 
-    // Serialize dirty resources
-    let mut resources = Vec::new();
-    for type_id in session.dirty_resources.iter() {
-        if let Some(serializer) = session.resource_serializers.get(type_id) {
-            if let Some((name, value)) = serializer(world, session)? {
-                resources.push((name, value));
-            }
+    // Deletions
+    for &e in &session.despawned_entities {
+        if let Some(key) = session.entity_keys.get(&e) {
+            operations.push(TransactionOperation::DeleteDocument(key.clone()));
         }
     }
-
-    Ok(CommitData {
-        deletes: session.despawned_entities.iter().copied().collect(),
-        updates,
-        resources,
-    })
+    // Creations & Updates
+    for &e in &session.dirty_entities {
+        let mut map = serde_json::Map::new();
+        for ser in session.component_serializers.values() {
+            if let Some((n, v)) = ser(e, world)? {
+                map.insert(n, v);
+            }
+        }
+        let doc = Value::Object(map);
+        if let Some(key) = session.entity_keys.get(&e) {
+            operations.push(TransactionOperation::UpdateDocument(key.clone(), doc));
+        } else {
+            operations.push(TransactionOperation::CreateDocument(doc));
+            new_entities.push(e);
+        }
+    }
+    // Resources
+    for &tid in &session.dirty_resources {
+        if let Some(ser) = session.resource_serializers.get(&tid) {
+            if let Some((n, v)) = ser(world, session)? {
+                operations.push(TransactionOperation::UpsertResource(n, v));
+            }
+        }
+    }
+    Ok(CommitData { operations, new_entities })
 }
 
 /// Persist new, changed, or despawned entities to the database.
@@ -291,7 +289,6 @@ pub(crate) async fn commit(
     session: &mut ArangoSession,
     world: &mut World,
 ) -> Result<(), ArangoError> {
-    // short‐circuit if nothing to do
     if session.dirty_entities.is_empty()
         && session.despawned_entities.is_empty()
         && session.dirty_resources.is_empty()
@@ -299,56 +296,20 @@ pub(crate) async fn commit(
         return Ok(());
     }
 
-    // Step 1: Serialize all dirty data from the World.
-    // This is done first to ensure that if serialization fails, we haven't
-    // made any changes to the database yet.
-    let commit_data = _prepare_commit(session, world)?;
+    let data = _prepare_commit(session, world)?;
+    let new_keys = session.db.execute_transaction(data.operations).await?;
 
-    // Step 2: Process Deletions.
-    // Remove entities that were despawned in Bevy from the database.
-    for entity in commit_data.deletes.iter() {
-        if let Some(key) = session.entity_keys.get(entity) {
-            session.db.delete_document(key)
-                .await
-                .map_err(|_| ArangoError("DB operation failed".into()))?;
+    // assign new GUIDs
+    for (entity, key) in data.new_entities.into_iter().zip(new_keys.into_iter()) {
+        if let Some(mut e) = world.get_entity_mut(entity) {
+            e.insert(crate::Guid::new(key.clone()));
         }
+        session.entity_keys.insert(entity, key);
     }
 
-    // Step 3: Process Creations and Updates.
-    // This loop handles both new entities and existing ones with changed components.
-        for (entity, data) in commit_data.updates.iter() {
-        if let Some(key) = session.entity_keys.get(entity) {
-            // This is an existing entity, so we update its document.
-            session.db.update_document(key, data.clone())
-                .await
-                .map_err(|_| ArangoError("DB operation failed".into()))?;
-        } else {
-            // This is a new entity, so we create a new document.
-            let new_key = session.db.create_document(data.clone())
-                .await
-                .map_err(|_| ArangoError("DB operation failed".into()))?;
-            // We need to add a Guid component to the Bevy entity to link it to the DB.
-            if let Some(mut entity_mut) = world.get_entity_mut(*entity) {
-                entity_mut.insert(crate::Guid::new(new_key.clone()));
-            }
-            session.entity_keys.insert(*entity, new_key);
-        }
-    }
-
-    // Step 4: Process Resource Updates.
-    // Upsert any resources that have been marked as dirty.
-    for (name, data) in commit_data.resources.iter() {
-        session.db.upsert_resource(name, data.clone())
-            .await
-            .map_err(|_| ArangoError("DB operation failed".into()))?;
-    }
-
-    // Step 5: Clean up tracking sets.
-    // Now that the changes are committed, we can clear the dirty flags.
     session.dirty_entities.clear();
     session.despawned_entities.clear();
     session.dirty_resources.clear();
-
     Ok(())
 }
 
@@ -422,10 +383,14 @@ mod arango_session {
     #[tokio::test]
     async fn commit_serializes_resources() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_upsert_resource()
-            .withf(|k, d| k==MyRes::name() && d==&json!({"value":5}))
+        db.expect_execute_transaction()
+            .withf(|ops| ops.iter().any(|op| match op {
+                TransactionOperation::UpsertResource(name, data) =>
+                    name == MyRes::name() && data == &json!({"value":5}),
+                _ => false,
+            }))
             .times(1)
-            .returning(|_, _| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok(vec![]) }));
 
         let mut app = App::new();
         app.insert_resource(MyRes { value: 5 });
@@ -440,7 +405,7 @@ mod arango_session {
     #[tokio::test]
     async fn commit_skips_clean_resources() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_upsert_resource().times(0);
+        db.expect_execute_transaction().times(0);
 
         let mut app = App::new();
         app.insert_resource(MyRes { value: 5 });
@@ -455,12 +420,10 @@ mod arango_session {
     #[tokio::test]
     async fn commit_creates_new_entity() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .withf(move |data| {
-                data.get(MyComp::name()) == Some(&json!({"value": 10}))
-            })
+        db.expect_execute_transaction()
+            .withf(|ops| ops.iter().any(|op| matches!(op, TransactionOperation::CreateDocument(_))))
             .times(1)
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -476,8 +439,9 @@ mod arango_session {
     #[tokio::test]
     async fn commit_assigns_guid_to_new_entity() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+        db.expect_execute_transaction()
+            .times(1)
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -500,13 +464,14 @@ mod arango_session {
     #[tokio::test]
     async fn commit_updates_existing_entity() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_update_document()
-            .withf(move |key, data| {
-                key == "existing_key" &&
-                data.get(MyComp::name()) == Some(&json!({"value": 20}))
-            })
+        db.expect_execute_transaction()
+            .withf(|ops| ops.iter().any(|op| match op {
+                TransactionOperation::UpdateDocument(key, patch) =>
+                    key == "existing_key" && patch.get(MyComp::name()) == Some(&json!({"value":20})),
+                _ => false,
+            }))
             .times(1)
-            .returning(|_, _| Box::pin(async move { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok(vec![]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -524,12 +489,10 @@ mod arango_session {
     #[tokio::test]
     async fn commit_serializes_entity_with_key() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .withf(move |data| {
-                data.get(MyComp::name()) == Some(&json!({"value": 10}))
-            })
+        db.expect_execute_transaction()
+            .withf(|ops| ops.iter().any(|op| matches!(op, TransactionOperation::CreateDocument(_))))
             .times(1)
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -545,10 +508,18 @@ mod arango_session {
     #[tokio::test]
     async fn commit_deletes_entity() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_delete_document()
-            .withf(|key| key == "key_to_delete")
+        db.expect_execute_transaction()
+            .withf(|ops| {
+                ops.iter().any(|op| {
+                    if let TransactionOperation::DeleteDocument(key) = op {
+                        key == "key_to_delete"
+                    } else {
+                        false
+                    }
+                })
+            })
             .times(1)
-            .returning(|_| Box::pin(async { Ok(()) }));
+            .returning(|_| Box::pin(async { Ok(vec![]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -573,15 +544,19 @@ mod arango_session {
     #[tokio::test]
     async fn commit_serializes_multiple_components() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .withf(move |data| {
+        db.expect_execute_transaction()
+            .withf(move |ops| {
                 let key_a = A::name();
                 let key_b = B::name();
-                data.get(key_a) == Some(&json!(1)) &&
-                data.get(key_b) == Some(&json!("hello"))
+                ops.iter().any(|op| match op {
+                    TransactionOperation::CreateDocument(doc) =>
+                        doc.get(key_a) == Some(&json!(1)) &&
+                        doc.get(key_b) == Some(&json!("hello")),
+                    _ => false,
+                })
             })
             .times(1)
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -603,8 +578,8 @@ mod arango_session {
     #[tokio::test]
     async fn commit_serializes_nested_containers() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .withf(move |data| {
+        db.expect_execute_transaction()
+            .withf(move |ops| {
                 let key_nv = NestedVec::name();
                 let key_nm = NestedMap::name();
                 let expected_vec = json!(["a", "b"]);
@@ -612,11 +587,15 @@ mod arango_session {
                 map.insert("x".to_string(), 1);
                 let expected_map = json!(map);
 
-                data.get(key_nv) == Some(&expected_vec) &&
-                data.get(key_nm) == Some(&expected_map)
+                ops.iter().any(|op| match op {
+                    TransactionOperation::CreateDocument(doc) =>
+                        doc.get(key_nv) == Some(&expected_vec) &&
+                        doc.get(key_nm) == Some(&expected_map),
+                    _ => false,
+                })
             })
             .times(1)
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -674,13 +653,13 @@ mod arango_session {
     }
 
     #[tokio::test]
-    #[should_panic(expected = "DB operation failed")]
+    #[should_panic(expected = "db error")]
     async fn commit_bubbles_db_error() {
         #[persist(component)]
         struct A(i32);
 
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
+        db.expect_execute_transaction()
             .times(1)
             .returning(|_| Box::pin(async { Err(ArangoError("db error".to_string())) }));
 
@@ -704,17 +683,19 @@ mod arango_session {
     #[test]
     fn enum_component_round_trip_serializes_correctly() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .withf(move |data| {
+        db.expect_execute_transaction()
+            .withf(move |ops| {
                 let key_enum = TestEnum::name();
                 let expected_a = json!("A");
                 let expected_b = json!({"B": 42});
-                // This test is a bit tricky, we don't know the order.
-                // Let's just check if one of them matches.
-                data.get(key_enum) == Some(&expected_a) || data.get(key_enum) == Some(&expected_b)
+                ops.iter().any(|op| match op {
+                    TransactionOperation::CreateDocument(doc) =>
+                        doc.get(key_enum) == Some(&expected_a) || doc.get(key_enum) == Some(&expected_b),
+                    _ => false,
+                })
             })
-            .times(2)
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+            .times(1) // only one transaction call for both enums
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));
@@ -736,13 +717,17 @@ mod arango_session {
     #[test]
     fn large_payload_serializes_without_panic() {
         let mut db = MockDatabaseConnection::new();
-        db.expect_create_document()
-            .withf(move |data| {
+        db.expect_execute_transaction()
+            .withf(move |ops| {
                 let key_big = BigVec::name();
-                data.get(key_big).is_some()
+                ops.iter().any(|op| match op {
+                    TransactionOperation::CreateDocument(doc) =>
+                        doc.get(key_big).is_some(),
+                    _ => false,
+                })
             })
             .times(1)
-            .returning(|_| Box::pin(async { Ok("new_key".to_string()) }));
+            .returning(|_| Box::pin(async { Ok(vec!["new_key".into()]) }));
 
         let mut app = App::new();
         let mut session = ArangoSession::new(Arc::new(db));

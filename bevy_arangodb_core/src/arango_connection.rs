@@ -6,12 +6,14 @@ use arangors::{
     document::options::InsertOptions,
     AqlQuery, ClientError, Connection, Database,
 };
+use crate::DatabaseConnection;
+use crate::arango_session::{ArangoError, TransactionOperation};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use crate::{arango_session::ArangoError, DatabaseConnection};
+use arangors::transaction::{TransactionCollections, TransactionSettings};
 
 /// An enum representing the collections used by this library.
 pub enum Collection {
@@ -85,72 +87,6 @@ impl ArangoDbConnection {
 }
 
 impl DatabaseConnection for ArangoDbConnection {
-    fn create_document(
-        &self,
-        data: Value,
-    ) -> BoxFuture<'static, Result<String, ArangoError>> {
-        let db = self.db.clone();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            let doc_meta = col
-                .create_document(data, Default::default())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-
-            doc_meta
-                .header()
-                .map(|h| h._key.clone())
-                .ok_or_else(|| ArangoError("Failed to get document key from header".to_string()))
-        }
-        .boxed()
-    }
-
-    fn update_document(
-        &self,
-        entity_key: &str,
-        patch: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
-        let db = self.db.clone();
-        let key_owned = entity_key.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            col.update_document(&key_owned, patch, Default::default())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
-    }
-
-    fn delete_document(
-        &self,
-        entity_key: &str,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
-        let db = self.db.clone();
-        let key_owned = entity_key.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            col.remove_document::<Value>(
-                &key_owned,
-                Default::default(),
-                None
-            )
-            .await
-            .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
-    }
-
     fn query(
         &self,
         aql: String,
@@ -241,34 +177,6 @@ impl DatabaseConnection for ArangoDbConnection {
         .boxed()
     }
 
-    fn upsert_resource(
-        &self,
-        resource_name: &str,
-        mut data: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
-        let db = self.db.clone();
-        let key = resource_name.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Resources.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-
-            if let Some(obj) = data.as_object_mut() {
-                obj.insert("_key".to_string(), Value::String(key));
-            } else {
-                return Err(ArangoError("Resource data is not a JSON object".into()));
-            }
-
-            let options = InsertOptions::builder().overwrite(true).build();
-            col.create_document(data, options)
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
-    }
-
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>> {
         let db = self.db.clone();
         async move {
@@ -295,6 +203,60 @@ impl DatabaseConnection for ArangoDbConnection {
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn execute_transaction(
+        &self,
+        operations: Vec<TransactionOperation>,
+    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>> {
+        let db = self.db.clone();
+        async move {
+            let ent = Collection::Entities.to_string();
+            let res = Collection::Resources.to_string();
+            let collections = TransactionCollections::builder()
+                .write(vec![ent.clone(), res.clone()])
+                .build();
+            let settings = TransactionSettings::builder()
+                .collections(collections)
+                .build();
+
+            let trx = db
+                .begin_transaction(settings)
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            let mut new_keys = Vec::new();
+
+            for op in operations {
+                match op {
+                    TransactionOperation::CreateDocument(doc) => {
+                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
+                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| ArangoError(e.to_string()))?;
+                        let key = meta.header().ok_or_else(|| ArangoError("Missing header".into()))?._key.clone();
+                        new_keys.push(key);
+                    }
+                    TransactionOperation::UpdateDocument(key, patch) => {
+                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
+                        col.update_document(&key, patch, Default::default()).await.map_err(|e| ArangoError(e.to_string()))?;
+                    }
+                    TransactionOperation::DeleteDocument(key) => {
+                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
+                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| ArangoError(e.to_string()))?;
+                    }
+                    TransactionOperation::UpsertResource(key, mut data) => {
+                        let col = trx.collection(&res).await.map_err(|e| ArangoError(e.to_string()))?;
+                        if let Some(map) = data.as_object_mut() {
+                            map.insert("_key".to_string(), Value::String(key));
+                        }
+                        let opts = InsertOptions::builder().overwrite(true).build();
+                        col.create_document(data, opts).await.map_err(|e| ArangoError(e.to_string()))?;
+                    }
+                }
+            }
+
+            trx.commit().await.map_err(|e| ArangoError(e.to_string()))?;
+            Ok(new_keys)
         }
         .boxed()
     }
