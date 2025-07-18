@@ -11,7 +11,24 @@ use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use crate::{DatabaseConnection, ArangoError, Collection};
+use crate::{arango_session::ArangoError, DatabaseConnection};
+
+/// An enum representing the collections used by this library.
+pub enum Collection {
+    /// The collection where all Bevy entities are stored as documents.
+    Entities,
+    /// The special document key for storing Bevy resources.
+    Resources,
+}
+
+impl std::fmt::Display for Collection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Collection::Entities => write!(f, "entities"),
+            Collection::Resources => write!(f, "resources"),
+        }
+    }
+}
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
@@ -78,10 +95,15 @@ impl DatabaseConnection for ArangoDbConnection {
                 .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            let doc_meta = col.create_document(data, Default::default())
+            let doc_meta = col
+                .create_document(data, Default::default())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(doc_meta.header().unwrap()._key.clone())
+
+            doc_meta
+                .header()
+                .map(|h| h._key.clone())
+                .ok_or_else(|| ArangoError("Failed to get document key from header".to_string()))
         }
         .boxed()
     }
@@ -117,11 +139,10 @@ impl DatabaseConnection for ArangoDbConnection {
                 .collection(&Collection::Entities.to_string())
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
-            // remove_document<T>: specify Value as the document type
             col.remove_document::<Value>(
                 &key_owned,
                 Default::default(),
-                None, // no specific revision
+                None
             )
             .await
             .map_err(|e| ArangoError(e.to_string()))?;

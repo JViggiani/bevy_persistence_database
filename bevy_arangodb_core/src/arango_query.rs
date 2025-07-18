@@ -42,17 +42,17 @@ impl ArangoQuery {
     /// Construct the AQL and bind-variables tuple.
     fn build_aql(&self) -> (String, HashMap<String, Value>) {
         let mut bind_vars = HashMap::new();
-        // base FOR clause
         let mut aql = format!("FOR doc IN {}", Collection::Entities);
 
         let mut filters = Vec::new();
+
         if !self.component_names.is_empty() {
-            let presences = self.component_names
+            let component_filter = self.component_names
                 .iter()
                 .map(|name| format!("doc.`{}` != null", name))
                 .collect::<Vec<_>>()
                 .join(" AND ");
-            filters.push(format!("({})", presences));
+            filters.push(format!("({})", component_filter));
         }
 
         if let Some(expr) = &self.filter_expr {
@@ -60,7 +60,7 @@ impl ArangoQuery {
         }
 
         if filters.is_empty() {
-             aql.push_str("\n  FILTER true");
+            aql.push_str("\n  FILTER true");
         } else {
             aql.push_str("\n  FILTER ");
             aql.push_str(&filters.join(" AND "));
@@ -141,17 +141,17 @@ impl ArangoQuery {
 mod tests {
     use super::*;
     use crate::arango_session::MockDatabaseConnection;
-    use crate::{ArangoSession, DatabaseConnection, ArangoError, Persist};
-    use bevy_arangodb_derive::Persist;
-    use serde::{Deserialize, Serialize};
+    use crate::{ArangoSession, DatabaseConnection, Persist};
+    use bevy_arangodb_derive::persist;
     use serde_json::json;
     use std::sync::Arc;
+    use futures::executor::block_on;
     use bevy::prelude::World;
 
     // Dummy components for skeleton tests
-    #[derive(Component, Serialize, Deserialize, Persist)]
+    #[persist(component)]
     struct A { value: i32 }
-    #[derive(Component, Serialize, Deserialize, Persist)]
+    #[persist(component)]
     struct B { name: String }
 
     #[test]
@@ -173,9 +173,9 @@ mod tests {
     }
 
     // Real component types for fetch_into
-    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize, Persist)]
+    #[persist(component)]
     struct Health { value: i32 }
-    #[derive(bevy::prelude::Component, serde::Deserialize, Serialize, Persist)]
+    #[persist(component)]
     struct Position { x: f32, y: f32, z: f32 }
 
     #[tokio::test]
@@ -216,15 +216,16 @@ mod tests {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db
             .expect_query()
-            .returning(|_, _| Box::pin(async { Err(ArangoError("fail".into())) }));
-        let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
-        futures::executor::block_on(ArangoQuery::new(db).fetch_ids());
+            .returning(|_, _| Box::pin(async { Err(crate::ArangoError("db error".into())) }));
+        let db = Arc::new(mock_db);
+        let query = ArangoQuery::new(db);
+        block_on(query.fetch_ids());
     }
 
     // dummy components for mix tests
-    #[derive(Component, Serialize, Deserialize, Persist)]
+    #[persist(component)]
     struct H;
-    #[derive(Component, Serialize, Deserialize, Persist)]
+    #[persist(component)]
     struct P;
 
     #[test]
