@@ -1,6 +1,7 @@
 use bevy::app::App;
 use bevy::reflect::Reflect;
 use bevy_arangodb::{commit, DatabaseConnection, Guid, ArangoPlugin, ArangoDbConnection, ArangoQuery};
+use bevy_arangodb::Persist;
 use std::process::Command;
 use std::sync::Arc;
 use testcontainers::{core::WaitFor, runners::AsyncRunner, GenericImage, ImageExt, ContainerAsync};
