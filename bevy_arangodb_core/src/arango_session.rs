@@ -287,7 +287,18 @@ fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData,
 }
 
 /// Persist new, changed, or despawned entities to the database.
-pub(crate) async fn commit(session: &mut ArangoSession, world: &mut World) -> Result<(), ArangoError> {
+pub(crate) async fn commit(
+    session: &mut ArangoSession,
+    world: &mut World,
+) -> Result<(), ArangoError> {
+    // short‐circuit if nothing to do
+    if session.dirty_entities.is_empty()
+        && session.despawned_entities.is_empty()
+        && session.dirty_resources.is_empty()
+    {
+        return Ok(());
+    }
+
     // Step 1: Serialize all dirty data from the World.
     // This is done first to ensure that if serialization fails, we haven't
     // made any changes to the database yet.
@@ -349,9 +360,7 @@ pub async fn commit_app(app: &mut App) -> Result<(), ArangoError> {
     let mut session = app.world.remove_resource::<ArangoSession>().unwrap();
     let world_ptr = &mut app.world as *mut _;
 
-    // SAFETY: We have removed the ArangoSession, so we can now safely get a mutable
-    // reference to the world. The session resource is not accessed by any other
-    // part of the app while it's removed.
+    // SAFETY: We removed the session, so it's safe to get &mut World
     let world = unsafe { &mut *world_ptr };
     let result = commit(&mut session, world).await;
 
