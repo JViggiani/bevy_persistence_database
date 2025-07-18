@@ -18,12 +18,7 @@ pub use bevy_arangodb_core::*;
 
 // Re-export the persist attribute macro
 pub use bevy_arangodb_derive::persist;
-
 // Re-export core API
 pub use bevy_arangodb_core::{
-    commit,
-    DatabaseConnection,
-    Guid,
-    ArangoPlugin,
-    ArangoDbConnection,
+    commit, ArangoDbConnection, ArangoPlugin, ArangoQuery, DatabaseConnection, Guid, Persist,
 };
