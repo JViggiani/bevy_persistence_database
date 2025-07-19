@@ -212,3 +212,67 @@ async fn test_delete_persisted_entity() {
         "Component should be gone after delete commit"
     );
 }
+
+#[tokio::test]
+async fn test_commit_with_no_changes() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // GIVEN a committed app in a synchronized state with the database
+    app.world.spawn(Health { value: 100 });
+    app.update();
+    commit(&mut app).await.expect("Initial commit should succeed");
+
+    // WHEN the app is committed again with no changes made to any entities or resources
+    let result = commit(&mut app).await;
+
+    // THEN the commit operation succeeds without error
+    // AND no database write operations are performed (this is handled by an early return in the commit function)
+    assert!(
+        result.is_ok(),
+        "Commit with no changes should succeed without error"
+    );
+}
+
+#[tokio::test]
+async fn test_add_new_component_to_existing_entity() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // 1. GIVEN a committed entity with only a Health component
+    let entity_id = app.world.spawn(Health { value: 100 }).id();
+    app.update();
+    commit(&mut app).await.expect("Initial commit failed");
+
+    let guid = app.world.get::<Guid>(entity_id).unwrap().id().to_string();
+
+    // Verify initial state: Health exists, Position does not.
+    let health_before = db.fetch_component(&guid, Health::name()).await.unwrap();
+    assert!(health_before.is_some(), "Health should exist after first commit");
+    let position_before = db.fetch_component(&guid, Position::name()).await.unwrap();
+    assert!(position_before.is_none(), "Position should not exist after first commit");
+
+    // 2. WHEN a Position component is added to that entity
+    app.world.entity_mut(entity_id).insert(Position { x: 10.0, y: 20.0 });
+    app.update(); // This will mark the entity as dirty due to the added component
+
+    // 3. AND the app is committed again
+    commit(&mut app).await.expect("Second commit failed");
+
+    // 4. THEN the document in the database is updated to include the new Position data
+    //    while retaining the existing Health data.
+    let health_after_json = db.fetch_component(&guid, Health::name()).await.unwrap().unwrap();
+    let health_after: Health = serde_json::from_value(health_after_json).unwrap();
+    assert_eq!(health_after.value, 100, "Health data was not retained");
+
+    let position_after_json = db.fetch_component(&guid, Position::name()).await.unwrap().unwrap();
+    let position_after: Position = serde_json::from_value(position_after_json).unwrap();
+    assert_eq!(position_after.x, 10.0, "Position.x was not added correctly");
+    assert_eq!(position_after.y, 20.0, "Position.y was not added correctly");
+}
