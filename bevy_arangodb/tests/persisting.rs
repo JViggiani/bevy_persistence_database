@@ -81,7 +81,57 @@ async fn test_create_new_resource() {
 }
 
 #[tokio::test]
-async fn test_entity_delete() {
+async fn test_update_existing_entity() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // 1. GIVEN a committed entity with a Health component of value 100
+    let entity_id = app.world.spawn(Health { value: 100 }).id();
+    app.update();
+    commit(&mut app).await.expect("Initial commit failed");
+
+    // Get the Guid to use for direct DB verification later
+    let guid = app.world.get::<Guid>(entity_id).unwrap().id().to_string();
+
+    // Verify initial state in DB
+    let health_json_before = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .unwrap()
+        .unwrap();
+    let fetched_health_before: Health = serde_json::from_value(health_json_before).unwrap();
+    assert_eq!(fetched_health_before.value, 100);
+
+    // 2. WHEN the entity's Health value is changed to 50
+    let mut health = app.world.get_mut::<Health>(entity_id).unwrap();
+    health.value = 50;
+
+    app.update(); // This will mark the component as Changed
+
+    // 3. AND the app is committed again
+    commit(&mut app).await.expect("Second commit failed");
+
+    // 4. THEN the Health data in the database for that entity's Guid reflects the new value of 50.
+    let health_json_after = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .expect("Failed to fetch component from DB")
+        .expect("Component should exist in DB");
+
+    let fetched_health_after: Health =
+        serde_json::from_value(health_json_after).expect("Failed to deserialize Health component");
+
+    assert_eq!(
+        fetched_health_after.value, 50,
+        "The health value in the database was not updated correctly"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_persisted_entity() {
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
