@@ -276,3 +276,32 @@ async fn test_add_new_component_to_existing_entity() {
     assert_eq!(position_after.x, 10.0, "Position.x was not added correctly");
     assert_eq!(position_after.y, 20.0, "Position.y was not added correctly");
 }
+
+// A component that does NOT implement `Persist`
+#[derive(bevy::prelude::Component)]
+struct NonPersisted;
+
+#[tokio::test]
+async fn test_commit_entity_with_no_persisted_components() {
+    // GIVEN a new Bevy app with the ArangoPlugin
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // WHEN an entity is spawned with only non-persisted components
+    let entity_id = app.world.spawn(NonPersisted).id();
+
+    app.update();
+
+    // AND the app is committed
+    commit(&mut app).await.expect("Commit should succeed");
+
+    // THEN no document is created in the database for that entity.
+    // The entity should not have a Guid, as it was never persisted.
+    assert!(
+        app.world.get::<Guid>(entity_id).is_none(),
+        "Entity with only non-persisted components should not get a Guid"
+    );
+}
