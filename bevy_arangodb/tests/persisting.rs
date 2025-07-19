@@ -131,6 +131,48 @@ async fn test_update_existing_entity() {
 }
 
 #[tokio::test]
+async fn test_update_existing_resource() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // 1. GIVEN a committed GameSettings resource
+    let initial_settings = GameSettings {
+        difficulty: 0.8,
+        map_name: "level_1".into(),
+    };
+    app.insert_resource(initial_settings);
+    app.update(); // Run schedule to trigger change detection
+    commit(&mut app).await.expect("Initial commit failed");
+
+    // 2. WHEN the GameSettings resource is modified in the app
+    let mut settings = app.world.resource_mut::<GameSettings>();
+    settings.difficulty = 0.5;
+    settings.map_name = "level_2".into();
+
+    app.update(); // Run schedule to trigger change detection on the resource
+
+    // 3. AND the app is committed again
+    commit(&mut app).await.expect("Second commit failed");
+
+    // 4. THEN the GameSettings data in the database reflects the new values.
+    let resource_name = GameSettings::name();
+    let resource_json_after = db
+        .fetch_resource(resource_name)
+        .await
+        .expect("Failed to fetch resource from DB")
+        .expect("Resource should exist in DB");
+
+    let fetched_settings_after: GameSettings =
+        serde_json::from_value(resource_json_after).expect("Failed to deserialize resource");
+
+    assert_eq!(fetched_settings_after.difficulty, 0.5);
+    assert_eq!(fetched_settings_after.map_name, "level_2");
+}
+
+#[tokio::test]
 async fn test_delete_persisted_entity() {
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
