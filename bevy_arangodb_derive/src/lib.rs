@@ -113,7 +113,11 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     let impl_persist = quote! {
         impl #crate_path::Persist for #name {
             fn name() -> &'static str {
-                std::any::type_name::<#name>()
+                static NAME: #crate_path::once_cell::sync::Lazy<String> = #crate_path::once_cell::sync::Lazy::new(|| {
+                    std::any::type_name::<#name>()
+                        .replace("::", "-") // very important - to avoid issues with ArangoDB's key format when serializing components with namespaces
+                });
+                &NAME
             }
         }
     };

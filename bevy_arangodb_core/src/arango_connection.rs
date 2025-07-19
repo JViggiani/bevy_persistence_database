@@ -3,7 +3,7 @@
 
 use arangors::{
     client::reqwest::ReqwestClient,
-    document::options::InsertOptions,
+    transaction::{TransactionCollections, TransactionSettings},
     AqlQuery, ClientError, Connection, Database,
 };
 use crate::DatabaseConnection;
@@ -13,7 +13,6 @@ use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use arangors::transaction::{TransactionCollections, TransactionSettings};
 
 /// An enum representing the collections used by this library.
 pub enum Collection {
@@ -244,13 +243,36 @@ impl DatabaseConnection for ArangoDbConnection {
                         let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
                         col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| ArangoError(e.to_string()))?;
                     }
-                    TransactionOperation::UpsertResource(key, mut data) => {
-                        let col = trx.collection(&res).await.map_err(|e| ArangoError(e.to_string()))?;
-                        if let Some(map) = data.as_object_mut() {
-                            map.insert("_key".to_string(), Value::String(key));
+                    TransactionOperation::UpsertResource(key, data) => {
+                        // An AQL UPSERT is the robust way to handle create-or-replace logic.
+                        let aql = format!("UPSERT {{ _key: @key }} INSERT @doc REPLACE @doc IN {}", res);
+
+                        // The document for INSERT must contain the _key.
+                        let mut doc_with_key = data;
+                        if let Some(obj) = doc_with_key.as_object_mut() {
+                            obj.insert("_key".to_string(), Value::String(key.clone()));
                         }
-                        let opts = InsertOptions::builder().overwrite(true).build();
-                        col.create_document(data, opts).await.map_err(|e| ArangoError(e.to_string()))?;
+
+                        let mut bind_vars_map = HashMap::new();
+                        bind_vars_map.insert("key".to_string(), Value::String(key));
+                        bind_vars_map.insert("doc".to_string(), doc_with_key);
+
+                        let bind_refs: HashMap<&'static str, Value> = bind_vars_map
+                            .into_iter()
+                            .map(|(k, v)| {
+                                let s: &'static str = Box::leak(k.into_boxed_str());
+                                (s, v)
+                            })
+                            .collect();
+
+                        let query = AqlQuery::builder()
+                            .query(&aql)
+                            .bind_vars(bind_refs)
+                            .build();
+
+                        trx.aql_query::<Value>(query)
+                            .await
+                            .map_err(|e| ArangoError(e.to_string()))?;
                     }
                 }
             }

@@ -277,7 +277,7 @@ fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData,
     for &tid in &session.dirty_resources {
         if let Some(ser) = session.resource_serializers.get(&tid) {
             if let Some((n, v)) = ser(world, session)? {
-                operations.push(TransactionOperation::UpsertResource(n, v));
+                operations.push(TransactionOperation::UpsertResource(n.to_string(), v));
             }
         }
     }

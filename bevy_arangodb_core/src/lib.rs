@@ -14,6 +14,10 @@ pub mod prelude {
     pub use bevy::prelude::Component;
 }
 
+// Re-export for macro use
+#[doc(hidden)]
+pub use once_cell;
+
 pub use arango_session::{ArangoSession, DatabaseConnection, ArangoError, commit_app as commit};
 pub use arango_query::ArangoQuery;
 pub use arango_connection::{ArangoDbConnection, Collection};
