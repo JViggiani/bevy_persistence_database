@@ -62,6 +62,12 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
         bind_vars: std::collections::HashMap<String, Value>,
     ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>>;
 
+    /// Fetch the entire document for an entity.
+    fn fetch_document(
+        &self,
+        entity_key: &str,
+    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
+
     /// Fetch a single component’s JSON blob (or `None` if missing).
     fn fetch_component(
         &self,
@@ -247,7 +253,10 @@ impl ArangoSession {
 }
 
 /// Serialize all data. This will fail early if any serialization fails.
-fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData, ArangoError> {
+fn _prepare_commit(
+    session: &ArangoSession,
+    world: &World,
+) -> Result<CommitData, ArangoError> {
     let mut operations = Vec::new();
     let mut new_entities = Vec::new();
 
@@ -265,12 +274,20 @@ fn _prepare_commit(session: &ArangoSession, world: &World) -> Result<CommitData,
                 map.insert(n, v);
             }
         }
+
+        if map.is_empty() {
+            continue; // Nothing to persist for this entity.
+        }
+
         let doc = Value::Object(map);
         if let Some(key) = session.entity_keys.get(&e) {
             operations.push(TransactionOperation::UpdateDocument(key.clone(), doc));
         } else {
-            operations.push(TransactionOperation::CreateDocument(doc));
-            new_entities.push(e);
+            // For new entities, only create a document if there's something to persist.
+            if !doc.as_object().unwrap().is_empty() {
+                operations.push(TransactionOperation::CreateDocument(doc));
+                new_entities.push(e);
+            }
         }
     }
     // Resources

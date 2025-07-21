@@ -279,10 +279,12 @@ async fn test_add_new_component_to_existing_entity() {
 
 // A component that does NOT implement `Persist`
 #[derive(bevy::prelude::Component)]
-struct NonPersisted;
+struct NonPersisted {
+    _ignored: bool,
+}
 
 #[tokio::test]
-async fn test_commit_entity_with_no_persisted_components() {
+async fn test_commit_entity_with_non_persisted_component() {
     // GIVEN a new Bevy app with the ArangoPlugin
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
@@ -290,18 +292,54 @@ async fn test_commit_entity_with_no_persisted_components() {
     let mut app = App::new();
     app.add_plugins(ArangoPlugin::new(db.clone()));
 
-    // WHEN an entity is spawned with only non-persisted components
-    let entity_id = app.world.spawn(NonPersisted).id();
+    // WHEN an entity is spawned with a mix of persisted and non-persisted components
+    let entity_id = app
+        .world
+        .spawn((Health { value: 50 }, NonPersisted { _ignored: true }))
+        .id();
 
     app.update();
 
     // AND the app is committed
     commit(&mut app).await.expect("Commit should succeed");
 
-    // THEN no document is created in the database for that entity.
-    // The entity should not have a Guid, as it was never persisted.
-    assert!(
-        app.world.get::<Guid>(entity_id).is_none(),
-        "Entity with only non-persisted components should not get a Guid"
+    // THEN a document is created, but it only contains the persisted component's data.
+    let guid = app
+        .world
+        .get::<Guid>(entity_id)
+        .expect("Entity should get a Guid because it has a persisted component")
+        .id();
+
+    // Verify the document in the database only contains the `Health` component.
+    let doc = db
+        .fetch_document(guid)
+        .await
+        .unwrap()
+        .expect("Document should exist in the database");
+
+    let obj = doc.as_object().unwrap();
+
+    // Filter out ArangoDB metadata fields before checking the component count.
+    let component_fields: Vec<_> = obj
+        .keys()
+        .filter(|k| !k.starts_with('_'))
+        .collect();
+
+    // It should have exactly one key: the name of the Health component.
+    assert_eq!(
+        component_fields.len(),
+        1,
+        "Document should only have one persisted component, but it had {}. Document: {:?}",
+        component_fields.len(),
+        obj
     );
+    assert!(
+        obj.contains_key(Health::name()),
+        "The only persisted component should be Health"
+    );
+
+    // And the value of that component should be correct.
+    let health_val = obj.get(Health::name()).unwrap();
+    let fetched_health: Health = serde_json::from_value(health_val.clone()).unwrap();
+    assert_eq!(fetched_health.value, 50);
 }

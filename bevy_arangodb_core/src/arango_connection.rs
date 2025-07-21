@@ -120,6 +120,33 @@ impl DatabaseConnection for ArangoDbConnection {
         .boxed()
     }
 
+    fn fetch_document(
+        &self,
+        entity_key: &str,
+    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+        let db = self.db.clone();
+        let key = entity_key.to_string();
+        async move {
+            let col = db
+                .collection(&Collection::Entities.to_string())
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            match col.document::<Value>(&key).await {
+                Ok(doc) => Ok(Some(doc.document)),
+                Err(e) => {
+                    if let ClientError::Arango(api_err) = &e {
+                        if api_err.error_num() == 1202 {
+                            // entity not found
+                            return Ok(None);
+                        }
+                    }
+                    Err(ArangoError(e.to_string()))
+                }
+            }
+        }
+        .boxed()
+    }
+
     fn fetch_component(
         &self,
         entity_key: &str,
