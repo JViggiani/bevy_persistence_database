@@ -22,3 +22,8 @@ pub struct Creature {
 pub struct Inventory {
     pub items: Vec<String>,
 }
+
+#[bevy_arangodb::persist(component)]
+pub struct OptionalData {
+    pub data: Option<String>,
+}

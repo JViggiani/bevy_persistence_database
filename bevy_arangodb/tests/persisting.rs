@@ -384,3 +384,43 @@ async fn test_persist_component_with_empty_vec() {
         "The fetched inventory should have an empty items vec"
     );
 }
+
+#[tokio::test]
+async fn test_persist_component_with_option_none() {
+    // GIVEN a new Bevy app with the ArangoPlugin
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // WHEN an entity is spawned with a component that has an `Option<T>` field set to `None`
+    let optional_data = OptionalData { data: None };
+    let entity_id = app.world.spawn(optional_data).id();
+
+    app.update();
+
+    // AND the app is committed
+    commit(&mut app).await.expect("Commit should succeed");
+
+    // THEN the commit succeeds and the data can be fetched and correctly deserialized.
+    let guid = app
+        .world
+        .get::<Guid>(entity_id)
+        .expect("Entity should have a Guid after commit")
+        .id();
+
+    let data_json = db
+        .fetch_component(guid, OptionalData::name())
+        .await
+        .expect("Failed to fetch component from DB")
+        .expect("Component should exist in DB");
+
+    let fetched_data: OptionalData =
+        serde_json::from_value(data_json).expect("Failed to deserialize OptionalData component");
+
+    assert!(
+        fetched_data.data.is_none(),
+        "The fetched OptionalData should have a None value"
+    );
+}
