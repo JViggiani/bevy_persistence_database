@@ -17,3 +17,8 @@ pub struct Position {
 pub struct Creature {
     pub is_screaming: bool,
 }
+
+#[bevy_arangodb::persist(component)]
+pub struct Inventory {
+    pub items: Vec<String>,
+}

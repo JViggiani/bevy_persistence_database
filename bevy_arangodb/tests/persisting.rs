@@ -343,3 +343,44 @@ async fn test_commit_entity_with_non_persisted_component() {
     let fetched_health: Health = serde_json::from_value(health_val.clone()).unwrap();
     assert_eq!(fetched_health.value, 50);
 }
+
+#[tokio::test]
+async fn test_persist_component_with_empty_vec() {
+    // GIVEN a new Bevy app with the ArangoPlugin
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
+
+    let mut app = App::new();
+    app.add_plugins(ArangoPlugin::new(db.clone()));
+
+    // WHEN an entity is spawned with a component that contains an empty `Vec`
+    let inventory = Inventory { items: vec![] };
+    let entity_id = app.world.spawn(inventory).id();
+
+    app.update();
+
+    // AND the app is committed
+    commit(&mut app).await.expect("Commit should succeed");
+
+    // THEN the commit succeeds and the data can be fetched and correctly deserialized
+    // back into a component with an empty `Vec`.
+    let guid = app
+        .world
+        .get::<Guid>(entity_id)
+        .expect("Entity should have a Guid after commit")
+        .id();
+
+    let inventory_json = db
+        .fetch_component(guid, Inventory::name())
+        .await
+        .expect("Failed to fetch component from DB")
+        .expect("Component should exist in DB");
+
+    let fetched_inventory: Inventory =
+        serde_json::from_value(inventory_json).expect("Failed to deserialize Inventory component");
+
+    assert!(
+        fetched_inventory.items.is_empty(),
+        "The fetched inventory should have an empty items vec"
+    );
+}
