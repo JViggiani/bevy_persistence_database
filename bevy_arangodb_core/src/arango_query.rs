@@ -35,6 +35,27 @@ impl ArangoQuery {
 
     /// Sets the filter for the query using a `query_dsl::Expression`.
     pub fn filter(mut self, expression: query_dsl::Expression) -> Self {
+        // Collect any component names referenced in the filter expression
+        fn collect(expr: &query_dsl::Expression, names: &mut Vec<&'static str>) {
+            use query_dsl::Expression::*;
+            match expr {
+                Field { component_name, .. } => {
+                    if !names.contains(component_name) {
+                        names.push(component_name);
+                    }
+                }
+                BinaryOp { lhs, rhs, .. } => {
+                    collect(lhs, names);
+                    collect(rhs, names);
+                }
+                _ => {}
+            }
+        }
+        // Update component_names to include filter‐referenced types
+        let mut names = self.component_names.clone();
+        collect(&expression, &mut names);
+        self.component_names = names;
+
         self.filter_expr = Some(expression);
         self
     }
@@ -109,10 +130,12 @@ impl ArangoQuery {
                 existing.insert(key.clone(), new_e);
                 new_e
             };
+            // Attempt to load each requested component; panic on error
             session
                 .fetch_and_insert_components(&*self.db, world, &key, e, &self.component_names)
                 .await
                 .expect("component deserialization failed");
+
             result.push(e);
         }
 
@@ -150,15 +173,25 @@ mod tests {
         let db = Arc::new(MockDatabaseConnection::new());
         let q = ArangoQuery::new(db.clone())
             .with::<A>()
-            .filter(A::value().gt(10).and(B::name().eq("test")));
+            .filter(
+                A::value().gt(10)
+                .and(B::name().eq("test"))
+            );
 
         let (aql, bind_vars) = q.build_aql();
 
-        let expected_filter = format!(
-            "FILTER (doc.`{}` != null) AND ((doc.`{}`.`value` > @bevy_arangodb_bind_0) AND (doc.`{}`.`name` == @bevy_arangodb_bind_1))",
-            <A as Persist>::name(), <A as Persist>::name(), <B as Persist>::name()
+        // Should require presence of both components by their Persist::name()
+        assert!(aql.contains(&format!("doc.`{}` != null", <A as Persist>::name())));
+        assert!(aql.contains(&format!("doc.`{}` != null", <B as Persist>::name())));
+
+        // Should contain the filter expression using Persist::name()
+        let expected_expr = format!(
+            "((doc.`{}`.`value` > @bevy_arangodb_bind_0) AND (doc.`{}`.`name` == @bevy_arangodb_bind_1))",
+            <A as Persist>::name(),
+            <B as Persist>::name()
         );
-        assert!(aql.contains(&expected_filter));
+        assert!(aql.contains(&expected_expr));
+
         assert_eq!(bind_vars.get("bevy_arangodb_bind_0").unwrap(), &json!(10));
         assert_eq!(bind_vars.get("bevy_arangodb_bind_1").unwrap(), &json!("test"));
     }

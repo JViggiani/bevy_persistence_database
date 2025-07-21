@@ -18,7 +18,7 @@ pub mod prelude {
 #[doc(hidden)]
 pub use once_cell;
 
-pub use arango_session::{ArangoSession, DatabaseConnection, ArangoError, commit_app as commit};
+pub use arango_session::{ArangoSession, DatabaseConnection, ArangoError, commit_app as commit, TransactionOperation};
 pub use arango_query::ArangoQuery;
 pub use arango_connection::{ArangoDbConnection, Collection};
 pub use guid::Guid;

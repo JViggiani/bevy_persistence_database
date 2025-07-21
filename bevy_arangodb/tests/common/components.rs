@@ -27,3 +27,8 @@ pub struct Inventory {
 pub struct OptionalData {
     pub data: Option<String>,
 }
+
+#[bevy_arangodb::persist(component)]
+pub struct PlayerName {
+    pub name: String,
+}
