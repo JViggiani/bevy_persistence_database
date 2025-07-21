@@ -1,115 +1,84 @@
 # bevy_arangodb
 
-A plugin that transparently bridges Bevy's in-memory ECS with ArangoDB persistence.
-Use a **Unit-of-Work** (`ArangoSession`) for fast in-memory updates and commit changes
-(create/update/delete) back to ArangoDB, and an **AQL builder** (`ArangoQuery`) for loading data.
+A Bevy plugin that bridges in-memory ECS with ArangoDB persistence.  
+Define persisted components/resources with the `#[persist(...)]` macro, add the `ArangoPlugin`,  
+call `commit(&mut app).await` to save changes, and use `ArangoQuery` to load data back.
 
 ## Features
 
-• Local cache with `bevy_ecs::World`  
-• Dirty tracking + `commit()` for create/update/delete  
-• AQL query builder: `.with::<T>()` + `.filter(...)`  
-• Serde-powered component/resource serialization  
-• Pluggable backend: real (`arangors`) or mockable (`MockDatabaseConnection`)
+- Declarative persistence via `#[persist(component)]` and `#[persist(resource)]`
+- Automatic dirty‐tracking and unit‐of‐work (`commit`) to batch create/update/delete
+- Async API powered by Tokio
+- Type-safe query DSL: `.with::<T>()` + `.filter(...)` + `.fetch_into(&mut app)`
+- Reusable mock connection (`MockDatabaseConnection`) for fast unit tests
 
-## Installation
+## Usage
 
-Add to your `Cargo.toml`:
+1. Derive persisted types:
 
-```toml
-[dependencies]
-bevy_arangodb = "0.1"
-arangors       = "0.6"
-tokio          = { version = "1", features = ["rt-multi-thread", "macros"] }
-serde          = { version = "1.0", features = ["derive"] }
-serde_json     = "1.0"
-```
+    ```rust
+    use bevy_arangodb::Persist;
 
-## Getting Started
+    #[persist(component)]
+    pub struct Health {
+        pub value: i32,
+    }
 
-Derive your components for persistence:
+    #[persist(resource)]
+    pub struct GameSettings {
+        pub difficulty: f32,
+        pub map_name: String,
+    }
+    ```
 
-```rust
-use serde::{Serialize, Deserialize};
-use bevy::prelude::Component;
+2. Configure your Bevy `App`:
 
-#[derive(Component, Serialize, Deserialize)]
-struct Health { value: i32 }
-```
+    ```rust
+    use bevy::prelude::*;
+    use bevy_arangodb::{ArangoPlugin, ArangoDbConnection, commit};
 
-Establish a session and load data:
-
-```rust
-use bevy_arangodb::{ArangoSession, ArangoQuery, ArangoDbConnection};
-use std::sync::Arc;
-
-async fn run() {
-    let db = ArangoDbConnection::connect("http://127.0.0.1:8529", "root", "password", "mydb")
+    #[tokio::main]
+    async fn main() {
+        // 1) Connect to ArangoDB
+        let db = ArangoDbConnection::connect(
+            "http://127.0.0.1:8529", "root", "password", "mydb"
+        )
         .await
         .unwrap();
-    let mut session = ArangoSession::new(db); // uses real backend
 
-    // Load all entities with Health and Position
-    let entities = ArangoQuery::new(session.db.clone())
-        .with::<Health>()
-        .with::<Position>()
-        .filter("doc.value > 10")
-        .fetch_into(&mut session);
+        // 2) Build Bevy app with plugin
+        let mut app = App::new();
+        app.add_plugins(DefaultPlugins);
+        app.add_plugins(ArangoPlugin::new(db.clone()));
 
-    // Operate in-memory via `session.local_world`...
-    // Then persist changes:
-    session.commit();
-}
-```
+        // 3) Spawn entities or insert resources
+        app.world.spawn(Health { value: 42 });
+        app.insert_resource(GameSettings { difficulty: 1.0, map_name: "level1".into() });
 
-## Testing
+        // 4) Run one tick to detect changes
+        app.update();
 
-A mock backend lets you mock persistence logic:
+        // 5) Persist all changes
+        commit(&mut app).await.unwrap();
+    }
+    ```
 
-```rust
-let mut mock_db = MockDatabaseConnection::new();
-mock_db.expect_create_document()
-    .withf(|key, data| key=="0" && data.get("Health").is_some())
-    .returning(|_, _| Box::pin(async { Ok(()) }));
+3. Query persisted data:
 
-let mut session = ArangoSession::new_mocked(Arc::new(mock_db));
-// spawn & mark_dirty...
-session.commit();
-```
+    ```rust
+    use bevy_arangodb::{ArangoQuery, commit};
 
-## Troubleshooting
+    async fn load_data(db: Arc<dyn DatabaseConnection>) {
+        let mut app = App::new();
+        app.add_plugins(ArangoPlugin::new(db.clone()));
 
-### Missing `Serialize`/`Deserialize` impl
+        // Only fetch Health > 10, also load Position if present
+        let entities = ArangoQuery::new(db.clone())
+            .with::<Position>()
+            .filter(Health::value().gt(10))
+            .fetch_into(&mut app)
+            .await;
 
-If you see a compiler error like:
-
-```
-error[E0277]: the trait bound `Position: serde::ser::Serialize` is not satisfied
- --> src/main.rs:10:6
-  |
-10 |     Position,
-  |      ^^^^^^^ the trait `serde::ser::Serialize` is not implemented for `Position`
-  |
-  = note: add `#[derive(Serialize)]` or manually implement `serde::ser::Serialize` for `Position`
-```
-
-Ensure all nested components of your Bevy components implement `Serialize`/`Deserialize`.
-
-## Best Practices
-
-• All persisted components and resources **must** derive  
-  `serde::Serialize` + `serde::Deserialize`.  
-  Otherwise `commit()` will return a serialization error.
-
-• Avoid storing non-Serde types (e.g. raw pointers) in your components.  
-  Serialization failures at runtime will cause `commit()` to return an `ArangoError`.
-
-• Prefer simple, flat data structures (`i32`, `String`, simple `struct`s) for best performance.  
-  Nested `Vec<T>` and `HashMap<K,V>` are supported but can produce large JSON payloads.
-
-• Handle `commit()` errors gracefully:
-  ```rust
-  if let Err(e) = session.commit() {
-    eprintln!("Failed to persist data: {}", e);
-  }
-  ```
+        println!("Loaded {} entities", entities.len());
+    }
+    ```
