@@ -3,15 +3,33 @@
 
 use arangors::{
     client::reqwest::ReqwestClient,
-    document::options::InsertOptions,
+    transaction::{TransactionCollections, TransactionSettings},
     AqlQuery, ClientError, Connection, Database,
 };
+use crate::DatabaseConnection;
+use crate::arango_session::{ArangoError, TransactionOperation};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use crate::{DatabaseConnection, ArangoError, Collection};
+
+/// An enum representing the collections used by this library.
+pub enum Collection {
+    /// The collection where all Bevy entities are stored as documents.
+    Entities,
+    /// The special document key for storing Bevy resources.
+    Resources,
+}
+
+impl std::fmt::Display for Collection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Collection::Entities => write!(f, "entities"),
+            Collection::Resources => write!(f, "resources"),
+        }
+    }
+}
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
@@ -68,68 +86,6 @@ impl ArangoDbConnection {
 }
 
 impl DatabaseConnection for ArangoDbConnection {
-    fn create_document(
-        &self,
-        data: Value,
-    ) -> BoxFuture<'static, Result<String, ArangoError>> {
-        let db = self.db.clone();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            let doc_meta = col.create_document(data, Default::default())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(doc_meta.header().unwrap()._key.clone())
-        }
-        .boxed()
-    }
-
-    fn update_document(
-        &self,
-        entity_key: &str,
-        patch: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
-        let db = self.db.clone();
-        let key_owned = entity_key.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            col.update_document(&key_owned, patch, Default::default())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
-    }
-
-    fn delete_document(
-        &self,
-        entity_key: &str,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
-        let db = self.db.clone();
-        let key_owned = entity_key.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            // remove_document<T>: specify Value as the document type
-            col.remove_document::<Value>(
-                &key_owned,
-                Default::default(),
-                None, // no specific revision
-            )
-            .await
-            .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
-    }
-
     fn query(
         &self,
         aql: String,
@@ -160,6 +116,33 @@ impl DatabaseConnection for ArangoDbConnection {
                 .filter_map(|v| v.as_str().map(ToOwned::to_owned))
                 .collect();
             Ok(keys)
+        }
+        .boxed()
+    }
+
+    fn fetch_document(
+        &self,
+        entity_key: &str,
+    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+        let db = self.db.clone();
+        let key = entity_key.to_string();
+        async move {
+            let col = db
+                .collection(&Collection::Entities.to_string())
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            match col.document::<Value>(&key).await {
+                Ok(doc) => Ok(Some(doc.document)),
+                Err(e) => {
+                    if let ClientError::Arango(api_err) = &e {
+                        if api_err.error_num() == 1202 {
+                            // entity not found
+                            return Ok(None);
+                        }
+                    }
+                    Err(ArangoError(e.to_string()))
+                }
+            }
         }
         .boxed()
     }
@@ -220,34 +203,6 @@ impl DatabaseConnection for ArangoDbConnection {
         .boxed()
     }
 
-    fn upsert_resource(
-        &self,
-        resource_name: &str,
-        mut data: Value,
-    ) -> BoxFuture<'static, Result<(), ArangoError>> {
-        let db = self.db.clone();
-        let key = resource_name.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Resources.to_string())
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-
-            if let Some(obj) = data.as_object_mut() {
-                obj.insert("_key".to_string(), Value::String(key));
-            } else {
-                return Err(ArangoError("Resource data is not a JSON object".into()));
-            }
-
-            let options = InsertOptions::builder().overwrite(true).build();
-            col.create_document(data, options)
-                .await
-                .map_err(|e| ArangoError(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
-    }
-
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>> {
         let db = self.db.clone();
         async move {
@@ -274,6 +229,83 @@ impl DatabaseConnection for ArangoDbConnection {
                 .await
                 .map_err(|e| ArangoError(e.to_string()))?;
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn execute_transaction(
+        &self,
+        operations: Vec<TransactionOperation>,
+    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>> {
+        let db = self.db.clone();
+        async move {
+            let ent = Collection::Entities.to_string();
+            let res = Collection::Resources.to_string();
+            let collections = TransactionCollections::builder()
+                .write(vec![ent.clone(), res.clone()])
+                .build();
+            let settings = TransactionSettings::builder()
+                .collections(collections)
+                .build();
+
+            let trx = db
+                .begin_transaction(settings)
+                .await
+                .map_err(|e| ArangoError(e.to_string()))?;
+            let mut new_keys = Vec::new();
+
+            for op in operations {
+                match op {
+                    TransactionOperation::CreateDocument(doc) => {
+                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
+                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| ArangoError(e.to_string()))?;
+                        let key = meta.header().ok_or_else(|| ArangoError("Missing header".into()))?._key.clone();
+                        new_keys.push(key);
+                    }
+                    TransactionOperation::UpdateDocument(key, patch) => {
+                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
+                        col.update_document(&key, patch, Default::default()).await.map_err(|e| ArangoError(e.to_string()))?;
+                    }
+                    TransactionOperation::DeleteDocument(key) => {
+                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
+                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| ArangoError(e.to_string()))?;
+                    }
+                    TransactionOperation::UpsertResource(key, data) => {
+                        // An AQL UPSERT is the robust way to handle create-or-replace logic.
+                        let aql = format!("UPSERT {{ _key: @key }} INSERT @doc REPLACE @doc IN {}", res);
+
+                        // The document for INSERT must contain the _key.
+                        let mut doc_with_key = data;
+                        if let Some(obj) = doc_with_key.as_object_mut() {
+                            obj.insert("_key".to_string(), Value::String(key.clone()));
+                        }
+
+                        let mut bind_vars_map = HashMap::new();
+                        bind_vars_map.insert("key".to_string(), Value::String(key));
+                        bind_vars_map.insert("doc".to_string(), doc_with_key);
+
+                        let bind_refs: HashMap<&'static str, Value> = bind_vars_map
+                            .into_iter()
+                            .map(|(k, v)| {
+                                let s: &'static str = Box::leak(k.into_boxed_str());
+                                (s, v)
+                            })
+                            .collect();
+
+                        let query = AqlQuery::builder()
+                            .query(&aql)
+                            .bind_vars(bind_refs)
+                            .build();
+
+                        trx.aql_query::<Value>(query)
+                            .await
+                            .map_err(|e| ArangoError(e.to_string()))?;
+                    }
+                }
+            }
+
+            trx.commit().await.map_err(|e| ArangoError(e.to_string()))?;
+            Ok(new_keys)
         }
         .boxed()
     }
