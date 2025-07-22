@@ -1,8 +1,7 @@
 use bevy::app::App;
 use bevy_arangodb::{commit, ArangoPlugin, ArangoQuery, Guid, Persist, TransactionOperation};
 
-mod common;
-use common::*;
+use crate::common::*;
 
 #[tokio::test]
 async fn test_load_specific_entities_into_new_session() {

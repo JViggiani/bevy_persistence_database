@@ -1,9 +1,7 @@
 use bevy::app::App;
-use bevy_arangodb::{commit, Guid, ArangoPlugin};
-use bevy_arangodb::Persist;
+use bevy_arangodb::{commit, Guid, ArangoPlugin, Persist};
 
-mod common;
-use common::*;
+use crate::common::*;
 
 #[tokio::test]
 async fn test_create_new_entity() {

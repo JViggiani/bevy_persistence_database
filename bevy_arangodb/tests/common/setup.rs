@@ -19,6 +19,20 @@ pub static DB_LOCK: Mutex<()> = Mutex::const_new(());
 fn teardown() {
     if let Some(container) = DOCKER_CONTAINER.get() {
         let id = container.id();
+        
+        let status = Command::new("docker")
+            .arg("stop")
+            .arg(id)
+            .status()
+            .expect("Failed to execute docker stop command");
+
+        if !status.success() {
+            eprintln!(
+                "Error stopping container '{}': command exited with status {}",
+                id, status
+            );
+        }
+
         let status = Command::new("docker")
             .arg("rm")
             .arg("--force")
