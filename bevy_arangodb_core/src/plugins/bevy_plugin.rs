@@ -3,7 +3,8 @@
 //! This plugin simplifies the setup process by managing the `ArangoSession`
 //! as a resource and automatically adding systems for change detection.
 
-use crate::{registration, ArangoSession, DatabaseConnection, Guid, Persist};
+use crate::registration::COMPONENT_REGISTRY;
+use crate::{ArangoSession, DatabaseConnection, Guid, Persist};
 use bevy::{
     app::{App, Plugin, PostUpdate},
     ecs::{
@@ -76,7 +77,7 @@ impl Plugin for ArangoPlugin {
 
         // Drain the registration functions from the global registry to ensure they are only
         // processed once per plugin instance.
-        let registry = registration::COMPONENT_REGISTRY.lock().unwrap();
+        let registry = COMPONENT_REGISTRY.lock().unwrap();
         // Clone the registry so that each App/Plugin instance gets all registrations.
         let registrations = registry.clone();
         // Drop the lock before iterating

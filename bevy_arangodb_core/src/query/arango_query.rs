@@ -7,14 +7,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid, Collection, Persist, query_dsl};
+use crate::{DatabaseConnection, Guid, Persist, ArangoSession};
+use crate::Collection;
+use crate::query_dsl::{Expression, translate_expression};
 use bevy::prelude::{Component, World, App};
 
 /// AQL query builder: select which components and filters to apply.
 pub struct ArangoQuery {
     db: Arc<dyn DatabaseConnection>,
     pub component_names: Vec<&'static str>,
-    filter_expr: Option<query_dsl::Expression>,
+    filter_expr: Option<Expression>,
 }
 
 impl ArangoQuery {
@@ -34,17 +36,16 @@ impl ArangoQuery {
     }
 
     /// Sets the filter for the query using a `query_dsl::Expression`.
-    pub fn filter(mut self, expression: query_dsl::Expression) -> Self {
+    pub fn filter(mut self, expression: Expression) -> Self {
         // Collect any component names referenced in the filter expression
-        fn collect(expr: &query_dsl::Expression, names: &mut Vec<&'static str>) {
-            use query_dsl::Expression::*;
+        fn collect(expr: &Expression, names: &mut Vec<&'static str>) {
             match expr {
-                Field { component_name, .. } => {
+                Expression::Field { component_name, .. } => {
                     if !names.contains(component_name) {
                         names.push(component_name);
                     }
                 }
-                BinaryOp { lhs, rhs, .. } => {
+                Expression::BinaryOp { lhs, rhs, .. } => {
                     collect(lhs, names);
                     collect(rhs, names);
                 }
@@ -77,7 +78,7 @@ impl ArangoQuery {
         }
 
         if let Some(expr) = &self.filter_expr {
-            filters.push(query_dsl::translate_expression(expr, &mut bind_vars));
+            filters.push(translate_expression(expr, &mut bind_vars));
         }
 
         if filters.is_empty() {
@@ -105,7 +106,7 @@ impl ArangoQuery {
     /// operations, and then re-inserts it.
     pub async fn fetch_into(&self, app: &mut App) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
-        let session = app.world.remove_resource::<crate::ArangoSession>().unwrap();
+        let session = app.world.remove_resource::<ArangoSession>().unwrap();
 
         // SAFETY: With the session removed, it's safe to get a mutable World reference
         let world_ptr: *mut World = &mut app.world as *mut World;
@@ -154,8 +155,8 @@ impl ArangoQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::arango_session::MockDatabaseConnection;
-    use crate::{ArangoSession, DatabaseConnection, Persist, ArangoPlugin};
+    use crate::resources::MockDatabaseConnection;
+    use crate::{Persist, bevy_plugin::ArangoPlugin};
     use bevy_arangodb_derive::persist;
     use bevy::prelude::App;
     use serde_json::json;

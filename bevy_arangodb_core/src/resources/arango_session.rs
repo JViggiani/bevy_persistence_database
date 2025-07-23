@@ -350,6 +350,7 @@ pub async fn commit_app(app: &mut App) -> Result<(), ArangoError> {
 #[cfg(test)]
 mod arango_session {
     use super::*;
+    use super::MockDatabaseConnection;
     use crate::persist::Persist;
     use bevy::prelude::{Component, World, App};
     use bevy_arangodb_derive::persist;
