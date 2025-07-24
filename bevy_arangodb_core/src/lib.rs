@@ -21,9 +21,15 @@ pub use once_cell;
 pub use plugins::bevy_plugin;
 
 pub use components::Guid;
-pub use db::{DatabaseConnection, ArangoDbConnection, Collection};
+pub use db::{
+    DatabaseConnection,
+    ArangoDbConnection,
+    Collection,
+    ArangoError,
+    TransactionOperation,
+};
 pub use resources::commit_app as commit;
 pub use plugins::ArangoPlugin;
 pub use query::{ArangoQuery, query_dsl};
-pub use resources::{ArangoSession, ArangoError, TransactionOperation};
+pub use resources::ArangoSession;
 pub use persist::Persist;

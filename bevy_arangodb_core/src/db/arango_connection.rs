@@ -7,7 +7,7 @@ use arangors::{
     AqlQuery, ClientError, Connection, Database,
 };
 use crate::db::DatabaseConnection;
-use crate::resources::{ArangoError, TransactionOperation};
+use crate::db::connection::{ArangoError, TransactionOperation};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;

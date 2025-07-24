@@ -1,20 +1,12 @@
-//! Core ECS‐to‐Arango bridge: defines `ArangoSession` and the abstract
-//! `DatabaseConnection` trait.
+//! Core ECS‐to‐Arango bridge: defines `ArangoSession`.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
-// only pull in `automock` when compiling tests
-#[cfg(test)]
-use mockall::automock;
-
-use downcast_rs::{Downcast, impl_downcast};
+use crate::db::connection::{DatabaseConnection, TransactionOperation, ArangoError};
 use bevy::prelude::{Component, Entity, Resource, World, App};
-use futures::future::BoxFuture;
-use serde::Serialize;
 use serde_json::Value;
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
-    fmt,
     sync::Arc,
 };
 use crate::persist::Persist;
@@ -23,71 +15,6 @@ type ComponentSerializer   = Box<dyn Fn(Entity, &World) -> Result<Option<(String
 type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(), ArangoError> + Send + Sync>;
 type ResourceSerializer    = Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>;
 type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), ArangoError> + Send + Sync>;
-
-/// Represents one DB operation in our atomic transaction.
-#[derive(Serialize, Debug, Clone)]
-pub enum TransactionOperation {
-    CreateDocument(Value),
-    UpdateDocument(String, Value),
-    DeleteDocument(String),
-    UpsertResource(String, Value),
-}
-
-/// An error type for database operations.
-#[derive(Debug)]
-pub struct ArangoError(pub String);
-
-impl fmt::Display for ArangoError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ArangoDB Error: {}", self.0)
-    }
-}
-
-impl std::error::Error for ArangoError {}
-
-/// Abstracts database operations via async returns but remains object-safe.
-#[cfg_attr(test, automock)]
-pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
-    /// Execute all ops in one atomic, server‐side transaction.
-    /// Returns new `_key`s for any created docs.
-    fn execute_transaction(
-        &self,
-        operations: Vec<TransactionOperation>,
-    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>>;
-
-    /// Execute a raw AQL query returning document keys.
-    fn query(
-        &self,
-        aql: String,
-        bind_vars: std::collections::HashMap<String, Value>,
-    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>>;
-
-    /// Fetch the entire document for an entity.
-    fn fetch_document(
-        &self,
-        entity_key: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
-
-    /// Fetch a single component’s JSON blob (or `None` if missing).
-    fn fetch_component(
-        &self,
-        entity_key: &str,
-        comp_name: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
-
-    /// Fetch a single resource’s JSON blob (or `None` if missing).
-    fn fetch_resource(
-        &self,
-        resource_name: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>>;
-
-    /// Clear all documents from the entities collection.
-    fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>>;
-
-    /// Clear all documents from the resources collection.
-    fn clear_resources(&self) -> BoxFuture<'static, Result<(), ArangoError>>;
-}
-impl_downcast!(DatabaseConnection);
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
 #[derive(Resource)]
@@ -350,7 +277,7 @@ pub async fn commit_app(app: &mut App) -> Result<(), ArangoError> {
 #[cfg(test)]
 mod arango_session {
     use super::*;
-    use super::MockDatabaseConnection;
+    use crate::db::connection::MockDatabaseConnection;
     use crate::persist::Persist;
     use bevy::prelude::{Component, World, App};
     use bevy_arangodb_derive::persist;

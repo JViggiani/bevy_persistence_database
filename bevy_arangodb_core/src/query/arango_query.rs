@@ -155,7 +155,7 @@ impl ArangoQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resources::MockDatabaseConnection;
+    use crate::db::connection::MockDatabaseConnection;
     use crate::{Persist, bevy_plugin::ArangoPlugin};
     use bevy_arangodb_derive::persist;
     use bevy::prelude::App;
