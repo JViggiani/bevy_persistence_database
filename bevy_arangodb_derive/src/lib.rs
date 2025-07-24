@@ -129,8 +129,8 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         let methods = s.fields.iter().filter_map(|f| f.ident.as_ref()).map(|ident| {
             let field_str = LitStr::new(&ident.to_string(), proc_macro2::Span::call_site());
             quote! {
-                pub fn #ident() -> #crate_path::query_dsl::Expression {
-                    #crate_path::query_dsl::Expression::Field { component_name: <Self as #crate_path::Persist>::name(), field_name: #field_str }
+                pub fn #ident() -> #crate_path::dsl::Expression {
+                    #crate_path::dsl::Expression::Field { component_name: <Self as #crate_path::Persist>::name(), field_name: #field_str }
                 }
             }
         });

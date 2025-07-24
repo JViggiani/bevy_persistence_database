@@ -9,17 +9,17 @@ use std::sync::Arc;
 use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Persist, ArangoSession};
 use crate::Collection;
-use crate::query_dsl::{Expression, translate_expression};
+use crate::dsl::{Expression, translate_expression};
 use bevy::prelude::{Component, World, App};
 
 /// AQL query builder: select which components and filters to apply.
-pub struct ArangoQuery {
+pub struct PersistenceQuery {
     db: Arc<dyn DatabaseConnection>,
     pub component_names: Vec<&'static str>,
     filter_expr: Option<Expression>,
 }
 
-impl ArangoQuery {
+impl PersistenceQuery {
     /// Start a new query backed by a shared database connection.
     pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
         Self {
@@ -35,7 +35,7 @@ impl ArangoQuery {
         self
     }
 
-    /// Sets the filter for the query using a `query_dsl::Expression`.
+    /// Sets the filter for the query using a `dsl::Expression`.
     pub fn filter(mut self, expression: Expression) -> Self {
         // Collect any component names referenced in the filter expression
         fn collect(expr: &Expression, names: &mut Vec<&'static str>) {
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn build_query_with_dsl() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let q = ArangoQuery::new(db.clone())
+        let q = PersistenceQuery::new(db.clone())
             .with::<A>()
             .filter(
                 A::value().gt(10)
@@ -228,7 +228,7 @@ mod tests {
         session.register_component::<Health>();
         session.register_component::<Position>();
 
-        let query = ArangoQuery::new(db)
+        let query = PersistenceQuery::new(db)
             .with::<Health>()
             .with::<Position>();
 
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn build_query_empty_filters() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let (aql, _) = ArangoQuery::new(db).build_aql();
+        let (aql, _) = PersistenceQuery::new(db).build_aql();
         assert!(aql.contains("FILTER true"));
     }
 
@@ -251,7 +251,7 @@ mod tests {
             .expect_query()
             .returning(|_, _| Box::pin(async { Err(crate::ArangoError("db error".into())) }));
         let db = Arc::new(mock_db);
-        let query = ArangoQuery::new(db);
+        let query = PersistenceQuery::new(db);
         block_on(query.fetch_ids());
     }
 
@@ -264,10 +264,10 @@ mod tests {
     #[test]
     fn build_query_single_and_multi() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let (a_single, _) = ArangoQuery::new(db.clone()).with::<H>().build_aql();
+        let (a_single, _) = PersistenceQuery::new(db.clone()).with::<H>().build_aql();
         assert!(a_single.contains(&format!("doc.`{}` != null", H::name())));
 
-        let (a_multi, _) = ArangoQuery::new(db)
+        let (a_multi, _) = PersistenceQuery::new(db)
             .with::<H>()
             .with::<P>()
             .build_aql();

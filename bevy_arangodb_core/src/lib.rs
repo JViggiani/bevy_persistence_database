@@ -30,6 +30,6 @@ pub use db::{
 };
 pub use resources::commit_app as commit;
 pub use plugins::ArangoPlugin;
-pub use query::{ArangoQuery, query_dsl};
+pub use query::{PersistenceQuery, dsl};
 pub use resources::ArangoSession;
 pub use persist::Persist;

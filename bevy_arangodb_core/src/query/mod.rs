@@ -1,4 +1,4 @@
-pub use arango_query::ArangoQuery;
+pub use builder::PersistenceQuery;
 
-mod arango_query;
-pub mod query_dsl;
+mod builder;
+pub mod dsl;

@@ -1,5 +1,5 @@
 use bevy::app::App;
-use bevy_arangodb::{commit, ArangoPlugin, ArangoQuery, Guid, Persist, TransactionOperation};
+use bevy_arangodb::{commit, ArangoPlugin, PersistenceQuery, Guid, Persist, TransactionOperation};
 
 use crate::common::*;
 
@@ -31,7 +31,7 @@ async fn test_load_specific_entities_into_new_session() {
     app2.add_plugins(ArangoPlugin::new(db.clone()));
     
     // 3. Query for entities that have BOTH Health and Position, and Health > 100.
-    let query = ArangoQuery::new(db.clone())
+    let query = PersistenceQuery::new(db.clone())
         .with::<Health>()
         .with::<Position>()
         .filter(Health::value().gt(100));
@@ -72,7 +72,7 @@ async fn test_load_resources_alongside_entities() {
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();
     app2.add_plugins(ArangoPlugin::new(db.clone()));
-    let _ = ArangoQuery::new(db.clone()).fetch_into(&mut app2).await;
+    let _ = PersistenceQuery::new(db.clone()).fetch_into(&mut app2).await;
 
     // THEN the GameSettings resource is loaded
     let loaded: &GameSettings = app2.world.resource();
@@ -99,7 +99,7 @@ async fn test_load_into_world_with_existing_entities() {
     app2.update(); commit(&mut app2).await.unwrap();
 
     // WHEN we query for A
-    let loaded = ArangoQuery::new(db.clone())
+    let loaded = PersistenceQuery::new(db.clone())
         .filter(Health::value().eq(100))
         .fetch_into(&mut app2)
         .await;
@@ -127,7 +127,7 @@ async fn test_dsl_filter_by_component_presence() {
     // WHEN we query .with::<Creature>()
     let mut app2 = App::new();
     app2.add_plugins(ArangoPlugin::new(db.clone()));
-    let loaded = ArangoQuery::new(db.clone())
+    let loaded = PersistenceQuery::new(db.clone())
         .with::<Creature>()
         .fetch_into(&mut app2)
         .await;
@@ -157,21 +157,21 @@ async fn test_dsl_equality_operator() {
     app2.add_plugins(ArangoPlugin::new(db.clone()));
 
     // WHEN filtering Health == 100
-    let h = ArangoQuery::new(db.clone())
+    let h = PersistenceQuery::new(db.clone())
         .filter(Health::value().eq(100))
         .fetch_into(&mut app2)
         .await;
     assert_eq!(h.len(), 1);
 
     // WHEN filtering Creature.is_screaming == true
-    let c = ArangoQuery::new(db.clone())
+    let c = PersistenceQuery::new(db.clone())
         .filter(Creature::is_screaming().eq(true))
         .fetch_into(&mut app2)
         .await;
     assert_eq!(c.len(), 1);
 
     // WHEN filtering PlayerName == "Alice"
-    let p = ArangoQuery::new(db.clone())
+    let p = PersistenceQuery::new(db.clone())
         .filter(PlayerName::name().eq("Alice"))
         .fetch_into(&mut app2)
         .await;
@@ -195,19 +195,19 @@ async fn test_dsl_relational_operators() {
     app2.add_plugins(ArangoPlugin::new(db.clone()));
 
     assert_eq!(
-        ArangoQuery::new(db.clone()).filter(Health::value().gt(100))
+        PersistenceQuery::new(db.clone()).filter(Health::value().gt(100))
             .fetch_into(&mut app2).await.len(), 1
     );
     assert_eq!(
-        ArangoQuery::new(db.clone()).filter(Health::value().gte(100))
+        PersistenceQuery::new(db.clone()).filter(Health::value().gte(100))
             .fetch_into(&mut app2).await.len(), 2
     );
     assert_eq!(
-        ArangoQuery::new(db.clone()).filter(Health::value().lt(100))
+        PersistenceQuery::new(db.clone()).filter(Health::value().lt(100))
             .fetch_into(&mut app2).await.len(), 1
     );
     assert_eq!(
-        ArangoQuery::new(db.clone()).filter(Health::value().lte(100))
+        PersistenceQuery::new(db.clone()).filter(Health::value().lte(100))
             .fetch_into(&mut app2).await.len(), 2
     );
 }
@@ -230,13 +230,13 @@ async fn test_dsl_logical_combinations() {
     app2.add_plugins(ArangoPlugin::new(db.clone()));
 
     // AND case
-    let and_loaded = ArangoQuery::new(db.clone())
+    let and_loaded = PersistenceQuery::new(db.clone())
         .filter(Health::value().gt(100).and(Position::x().lt(100.0)))
         .fetch_into(&mut app2).await;
     assert_eq!(and_loaded.len(), 1);
 
     // OR case
-    let or_loaded = ArangoQuery::new(db.clone())
+    let or_loaded = PersistenceQuery::new(db.clone())
         .filter(Health::value().gt(100).or(Position::x().lt(100.0)))
         .fetch_into(&mut app2).await;
     assert_eq!(or_loaded.len(), 3);
@@ -262,7 +262,7 @@ async fn test_load_with_schema_mismatch() {
     // WHEN loading with .with::<Health>() – this should panic inside fetch_into
     let mut app2 = App::new();
     app2.add_plugins(ArangoPlugin::new(db.clone()));
-    ArangoQuery::new(db.clone())
+    PersistenceQuery::new(db.clone())
         .with::<Health>()
         .fetch_into(&mut app2)
         .await;

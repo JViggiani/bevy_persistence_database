@@ -20,5 +20,5 @@ pub use bevy_arangodb_core::*;
 pub use bevy_arangodb_derive::persist;
 // Re-export core API
 pub use bevy_arangodb_core::{
-    commit, ArangoDbConnection, ArangoPlugin, ArangoQuery, DatabaseConnection, Guid, Persist,
+    commit, ArangoDbConnection, ArangoPlugin, PersistenceQuery, DatabaseConnection, Guid, Persist,
 };
