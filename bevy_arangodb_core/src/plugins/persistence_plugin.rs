@@ -58,18 +58,18 @@ fn auto_despawn_tracking_system(
 }
 
 /// A Bevy `Plugin` that sets up `bevy_arangodb`.
-pub struct ArangoPlugin {
+pub struct PersistencePlugin {
     db: Arc<dyn DatabaseConnection>,
 }
 
-impl ArangoPlugin {
-    /// Creates a new `ArangoPlugin` with the given database connection.
+impl PersistencePlugin {
+    /// Creates a new `PersistencePlugin` with the given database connection.
     pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
         Self { db }
     }
 }
 
-impl Plugin for ArangoPlugin {
+impl Plugin for PersistencePlugin {
     fn build(&self, app: &mut App) {
         let session = ArangoSession::new(self.db.clone());
         app.insert_resource(session);

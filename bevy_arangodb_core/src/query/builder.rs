@@ -156,7 +156,7 @@ impl PersistenceQuery {
 mod tests {
     use super::*;
     use crate::db::connection::MockDatabaseConnection;
-    use crate::{Persist, bevy_plugin::ArangoPlugin};
+    use crate::{Persist, persistence_plugin::PersistencePlugin};
     use bevy_arangodb_derive::persist;
     use bevy::prelude::App;
     use serde_json::json;
@@ -223,7 +223,7 @@ mod tests {
 
         // build app + session
         let mut app = App::new();
-        app.add_plugins(ArangoPlugin::new(db.clone()));
+        app.add_plugins(PersistencePlugin::new(db.clone()));
         let mut session = app.world.resource_mut::<ArangoSession>();
         session.register_component::<Health>();
         session.register_component::<Position>();

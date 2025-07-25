@@ -18,7 +18,7 @@ pub mod prelude {
 pub use once_cell;
 
 // Public API 
-pub use plugins::bevy_plugin;
+pub use plugins::persistence_plugin;
 
 pub use components::Guid;
 pub use db::{
@@ -29,7 +29,8 @@ pub use db::{
     TransactionOperation,
 };
 pub use resources::commit_app as commit;
-pub use plugins::ArangoPlugin;
+pub use plugins::PersistencePlugin;
+pub use plugins::{CommitPlugin, TriggerCommit};
 pub use query::{PersistenceQuery, dsl};
 pub use resources::ArangoSession;
 pub use persist::Persist;

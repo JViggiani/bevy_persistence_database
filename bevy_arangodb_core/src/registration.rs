@@ -2,7 +2,7 @@
 //!
 //! This avoids the pitfalls of link-time static collection by using a `once_cell`
 //! global to store registration functions. The `Persist` derive macro pushes
-//! functions into this registry, and the `ArangoPlugin` consumes them.
+//! functions into this registry, and the `PersistencePlugin` consumes them.
 
 use bevy::app::App;
 use once_cell::sync::Lazy;

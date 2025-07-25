@@ -1,3 +1,5 @@
-pub mod bevy_plugin;
+pub mod persistence_plugin;
+mod commit_plugin;
 
-pub use bevy_plugin::ArangoPlugin;
+pub use persistence_plugin::PersistencePlugin;
+pub use commit_plugin::{CommitPlugin, TriggerCommit};

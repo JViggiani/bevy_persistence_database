@@ -1,5 +1,5 @@
 use bevy::app::App;
-use bevy_arangodb::{commit, ArangoPlugin, PersistenceQuery, Guid, Persist, TransactionOperation};
+use bevy_arangodb::{commit, PersistencePlugin, PersistenceQuery, Guid, Persist, TransactionOperation};
 
 use crate::common::*;
 
@@ -9,7 +9,7 @@ async fn test_load_specific_entities_into_new_session() {
     let db = setup().await;
 
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
 
     // 1. Spawn two entities, one with Health+Position, one with only Health.
     let _entity_to_load = app1
@@ -28,7 +28,7 @@ async fn test_load_specific_entities_into_new_session() {
 
     // 2. Create a new, clean session to load the data into.
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
     
     // 3. Query for entities that have BOTH Health and Position, and Health > 100.
     let query = PersistenceQuery::new(db.clone())
@@ -60,7 +60,7 @@ async fn test_load_resources_alongside_entities() {
 
     // GIVEN a database containing a committed GameSettings resource
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
     let settings = GameSettings {
         difficulty: 0.42,
         map_name: "mystic".into(),
@@ -71,7 +71,7 @@ async fn test_load_resources_alongside_entities() {
 
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
     let _ = PersistenceQuery::new(db.clone()).fetch_into(&mut app2).await;
 
     // THEN the GameSettings resource is loaded
@@ -87,14 +87,14 @@ async fn test_load_into_world_with_existing_entities() {
 
     // GIVEN entity A in DB
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
     let a = app1.world.spawn(Health { value: 100 }).id();
     app1.update(); commit(&mut app1).await.unwrap();
     let key_a = app1.world.get::<Guid>(a).unwrap().id().to_string();
 
     // AND a fresh app2 with entity B already committed
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
     let _b = app2.world.spawn(Position { x:1.0, y:1.0 }).id();
     app2.update(); commit(&mut app2).await.unwrap();
 
@@ -119,14 +119,14 @@ async fn test_dsl_filter_by_component_presence() {
 
     // GIVEN some entities with/without Creature
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
     app1.world.spawn(Creature { is_screaming: false });
     app1.world.spawn(Health { value: 100 });
     app1.update(); commit(&mut app1).await.unwrap();
 
     // WHEN we query .with::<Creature>()
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
     let loaded = PersistenceQuery::new(db.clone())
         .with::<Creature>()
         .fetch_into(&mut app2)
@@ -144,7 +144,7 @@ async fn test_dsl_equality_operator() {
 
     // GIVEN Health, Creature, PlayerName entities
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
     app1.world.spawn(Health { value: 100 });
     app1.world.spawn(Health { value: 99 });
     app1.world.spawn(Creature { is_screaming: true });
@@ -154,7 +154,7 @@ async fn test_dsl_equality_operator() {
     app1.update(); commit(&mut app1).await.unwrap();
 
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
 
     // WHEN filtering Health == 100
     let h = PersistenceQuery::new(db.clone())
@@ -185,14 +185,14 @@ async fn test_dsl_relational_operators() {
 
     // GIVEN Health 99,100,101
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
     app1.world.spawn(Health { value: 99 });
     app1.world.spawn(Health { value: 100 });
     app1.world.spawn(Health { value: 101 });
     app1.update(); commit(&mut app1).await.unwrap();
 
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
 
     assert_eq!(
         PersistenceQuery::new(db.clone()).filter(Health::value().gt(100))
@@ -219,7 +219,7 @@ async fn test_dsl_logical_combinations() {
 
     // GIVEN entities for AND/OR
     let mut app1 = App::new();
-    app1.add_plugins(ArangoPlugin::new(db.clone()));
+    app1.add_plugins(PersistencePlugin::new(db.clone()));
     app1.world.spawn((Health { value:150 }, Position { x:50.0, y:0.0 }));
     app1.world.spawn((Health { value:150 }, Position { x:150.0, y:0.0 }));
     app1.world.spawn((Health { value:50  }, Position { x:50.0, y:0.0 }));
@@ -227,7 +227,7 @@ async fn test_dsl_logical_combinations() {
     app1.update(); commit(&mut app1).await.unwrap();
 
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
 
     // AND case
     let and_loaded = PersistenceQuery::new(db.clone())
@@ -261,7 +261,7 @@ async fn test_load_with_schema_mismatch() {
 
     // WHEN loading with .with::<Health>() – this should panic inside fetch_into
     let mut app2 = App::new();
-    app2.add_plugins(ArangoPlugin::new(db.clone()));
+    app2.add_plugins(PersistencePlugin::new(db.clone()));
     PersistenceQuery::new(db.clone())
         .with::<Health>()
         .fetch_into(&mut app2)

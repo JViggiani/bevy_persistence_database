@@ -1,5 +1,5 @@
 use bevy::app::App;
-use bevy_arangodb::{commit, Guid, ArangoPlugin, Persist};
+use bevy_arangodb::{commit, Guid, PersistencePlugin, Persist};
 
 use crate::common::*;
 
@@ -9,7 +9,7 @@ async fn test_create_new_entity() {
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     let health_val = Health { value: 100 };
     let pos_val = Position { x: 1.0, y: 2.0 };
@@ -51,7 +51,7 @@ async fn test_create_new_resource() {
 
     // 1. Create a session, add a resource, and commit it
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     let settings = GameSettings {
         difficulty: 0.8,
@@ -84,7 +84,7 @@ async fn test_update_existing_entity() {
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // 1. GIVEN a committed entity with a Health component of value 100
     let entity_id = app.world.spawn(Health { value: 100 }).id();
@@ -134,7 +134,7 @@ async fn test_update_existing_resource() {
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // 1. GIVEN a committed GameSettings resource
     let initial_settings = GameSettings {
@@ -176,7 +176,7 @@ async fn test_delete_persisted_entity() {
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // 1. Spawn and commit an entity.
     let entity_id = app.world.spawn(Health { value: 100 }).id();
@@ -217,7 +217,7 @@ async fn test_commit_with_no_changes() {
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // GIVEN a committed app in a synchronized state with the database
     app.world.spawn(Health { value: 100 });
@@ -241,7 +241,7 @@ async fn test_add_new_component_to_existing_entity() {
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // 1. GIVEN a committed entity with only a Health component
     let entity_id = app.world.spawn(Health { value: 100 }).id();
@@ -283,12 +283,12 @@ struct NonPersisted {
 
 #[tokio::test]
 async fn test_commit_entity_with_non_persisted_component() {
-    // GIVEN a new Bevy app with the ArangoPlugin
+    // GIVEN a new Bevy app with the PersistencePlugin
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // WHEN an entity is spawned with a mix of persisted and non-persisted components
     let entity_id = app
@@ -344,12 +344,12 @@ async fn test_commit_entity_with_non_persisted_component() {
 
 #[tokio::test]
 async fn test_persist_component_with_empty_vec() {
-    // GIVEN a new Bevy app with the ArangoPlugin
+    // GIVEN a new Bevy app with the PersistencePlugin
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // WHEN an entity is spawned with a component that contains an empty `Vec`
     let inventory = Inventory { items: vec![] };
@@ -385,12 +385,12 @@ async fn test_persist_component_with_empty_vec() {
 
 #[tokio::test]
 async fn test_persist_component_with_option_none() {
-    // GIVEN a new Bevy app with the ArangoPlugin
+    // GIVEN a new Bevy app with the PersistencePlugin
     let _guard = DB_LOCK.lock().await;
     let db = setup().await;
 
     let mut app = App::new();
-    app.add_plugins(ArangoPlugin::new(db.clone()));
+    app.add_plugins(PersistencePlugin::new(db.clone()));
 
     // WHEN an entity is spawned with a component that has an `Option<T>` field set to `None`
     let optional_data = OptionalData { data: None };
