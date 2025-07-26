@@ -17,7 +17,7 @@ pub mod prelude {
 #[doc(hidden)]
 pub use once_cell;
 
-// Public API 
+// Public API
 pub use plugins::persistence_plugin;
 
 pub use components::Guid;
@@ -28,9 +28,11 @@ pub use db::{
     ArangoError,
     TransactionOperation,
 };
-pub use resources::commit_app as commit;
-pub use plugins::PersistencePlugin;
-pub use plugins::{CommitPlugin, TriggerCommit};
+pub use db::MockDatabaseConnection;
+pub use plugins::{
+    CommitStatus, PersistencePluginCore, TriggerCommit, CommitCompleted,
+    persistence_plugin::PersistenceSystemSet,
+};
 pub use query::{PersistenceQuery, dsl};
-pub use resources::ArangoSession;
+pub use resources::{ArangoSession, commit_and_wait as commit};
 pub use persist::Persist;

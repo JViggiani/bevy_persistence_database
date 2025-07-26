@@ -2,6 +2,7 @@
 
 use downcast_rs::{Downcast, impl_downcast};
 use futures::future::BoxFuture;
+use mockall::automock;
 use serde_json::Value;
 use std::fmt;
 
@@ -25,7 +26,7 @@ pub enum TransactionOperation {
 }
 
 /// Abstracts database operations via async returns but remains object-safe.
-#[cfg_attr(test, mockall::automock)]
+#[automock]
 pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn execute_transaction(
         &self,

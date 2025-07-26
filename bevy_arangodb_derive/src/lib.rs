@@ -59,7 +59,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => unreachable!(),
     };
     let register_fn = format_ident!("__persist_register_{}", name);
-    let ctor_fn     = format_ident!("__persist_ctor_{}", name);
+    let ctor_fn = format_ident!("__persist_ctor_{}", name);
     let crate_path  = get_crate_path();
 
     let registration = if is_comp {
@@ -67,14 +67,17 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
                 let type_id = std::any::TypeId::of::<#name>();
-                let mut registered = app.world.resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
+                let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
                 if registered.0.insert(type_id) {
-                    app.world
+                    app.world_mut()
                         .resource_mut::<#crate_path::ArangoSession>()
                         .register_component::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
-                        #crate_path::persistence_plugin::auto_dirty_tracking_entity_system::<#name>,
+                        bevy::ecs::schedule::IntoScheduleConfigs::in_set(
+                            #crate_path::persistence_plugin::auto_dirty_tracking_entity_system::<#name>,
+                            #crate_path::persistence_plugin::PersistenceSystemSet::PreCommit
+                        ),
                     );
                 }
             }
@@ -84,23 +87,26 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
                 let type_id = std::any::TypeId::of::<#name>();
-                let mut registered = app.world.resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
+                let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
                 if registered.0.insert(type_id) {
-                    app.world
+                    app.world_mut()
                         .resource_mut::<#crate_path::ArangoSession>()
                         .register_resource::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
-                        #crate_path::persistence_plugin::auto_dirty_tracking_resource_system::<#name>,
+                        bevy::ecs::schedule::IntoScheduleConfigs::in_set(
+                            #crate_path::persistence_plugin::auto_dirty_tracking_resource_system::<#name>,
+                            #crate_path::persistence_plugin::PersistenceSystemSet::PreCommit
+                        ),
                     );
                 }
             }
         }
     };
 
-    let push = quote! {
-        #[allow(non_snake_case)]
+    let ctor_registration = quote! {
         #[ctor::ctor]
+        #[allow(non_snake_case)]
         fn #ctor_fn() {
             #crate_path::registration::COMPONENT_REGISTRY
                 .lock()
@@ -113,11 +119,10 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     let impl_persist = quote! {
         impl #crate_path::Persist for #name {
             fn name() -> &'static str {
-                static NAME: #crate_path::once_cell::sync::Lazy<String> = #crate_path::once_cell::sync::Lazy::new(|| {
-                    std::any::type_name::<#name>()
-                        .replace("::", "-") // very important - to avoid issues with ArangoDB's key format when serializing components with namespaces
-                });
-                &NAME
+                // The name needs to be stable and unique. Using the type_name is a good default.
+                // We replace `::` with `-` to be safe for collection names.
+                static NAME: &str = stringify!(#name);
+                NAME
             }
         }
     };
@@ -145,7 +150,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     TokenStream::from(quote! {
         #ast
         #registration
-        #push
+        #ctor_registration
         #impl_persist
         #field_methods
     })

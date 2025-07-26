@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Persist, ArangoSession};
 use crate::Collection;
 use crate::dsl::{Expression, translate_expression};
-use bevy::prelude::{Component, World, App};
+use bevy::prelude::{Component, World};
 
 /// AQL query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
@@ -100,29 +100,25 @@ impl PersistenceQuery {
         result
     }
 
-    /// Load matching entities into the `App`'s `World`.
+    /// Load matching entities into the World.
     ///
     /// Removes the `ArangoSession` resource, performs the database
     /// operations, and then re-inserts it.
-    pub async fn fetch_into(&self, app: &mut App) -> Vec<bevy::prelude::Entity> {
+    pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
-        let session = app.world.remove_resource::<ArangoSession>().unwrap();
-
-        // SAFETY: With the session removed, it's safe to get a mutable World reference
-        let world_ptr: *mut World = &mut app.world as *mut World;
-        let world = unsafe { &mut *world_ptr };
+        let session = world.remove_resource::<ArangoSession>().unwrap();
 
         // 1) run AQL to get matching keys
         let keys = self.fetch_ids().await;
         let mut result = Vec::new();
 
-        // 2) build map of existing entities by Guid
+        // 2) map existing guid→entity
         let mut existing = std::collections::HashMap::new();
         for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
             existing.insert(guid.id().to_string(), e);
         }
 
-        // 3) for each key: spawn or reuse, then fetch & insert components
+        // 3) spawn or reuse + insert components
         for key in keys {
             let e = if let Some(&e) = existing.get(&key) {
                 e
@@ -131,23 +127,21 @@ impl PersistenceQuery {
                 existing.insert(key.clone(), new_e);
                 new_e
             };
-            // Attempt to load each requested component; panic on error
             session
                 .fetch_and_insert_components(&*self.db, world, &key, e, &self.component_names)
                 .await
                 .expect("component deserialization failed");
-
             result.push(e);
         }
 
-        // 4) Fetch all persisted resources back into the world
+        // 4) insert resources
         session
             .fetch_and_insert_resources(&*self.db, world)
             .await
             .expect("resource deserialization failed");
 
-        // 5) restore the session and return
-        app.world.insert_resource(session);
+        // 5) restore and return
+        world.insert_resource(session);
         result
     }
 }
@@ -156,7 +150,7 @@ impl PersistenceQuery {
 mod tests {
     use super::*;
     use crate::db::connection::MockDatabaseConnection;
-    use crate::{Persist, persistence_plugin::PersistencePlugin};
+    use crate::{Persist, persistence_plugin::PersistencePluginCore};
     use bevy_arangodb_derive::persist;
     use bevy::prelude::App;
     use serde_json::json;
@@ -201,7 +195,7 @@ mod tests {
     #[persist(component)]
     struct Health { value: i32 }
     #[persist(component)]
-    struct Position { x: f32, y: f32, z: f32 }
+    struct Position { x: f32, y: f32 }
 
     #[tokio::test]
     async fn fetch_into_loads_new_entities() {
@@ -213,7 +207,7 @@ mod tests {
             .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
         mock_db.expect_fetch_component()
             .withf(|k, comp| (k=="k1"||k=="k2") && comp==Position::name())
-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0,"z":3.0}))) }));
+            .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0}))) }));
         // Due to test pollution from other modules, other resource types might be registered.
         // We must expect `fetch_resource` to be called, and we can just return `None`.
         mock_db.expect_fetch_resource()
@@ -223,8 +217,8 @@ mod tests {
 
         // build app + session
         let mut app = App::new();
-        app.add_plugins(PersistencePlugin::new(db.clone()));
-        let mut session = app.world.resource_mut::<ArangoSession>();
+        app.add_plugins(PersistencePluginCore::new(db.clone()));
+        let mut session = app.world_mut().resource_mut::<ArangoSession>();
         session.register_component::<Health>();
         session.register_component::<Position>();
 
@@ -232,7 +226,7 @@ mod tests {
             .with::<Health>()
             .with::<Position>();
 
-        let loaded = block_on(query.fetch_into(&mut app));
+        let loaded = query.fetch_into(app.world_mut()).await;
         assert_eq!(loaded.len(), 2);
     }
 
