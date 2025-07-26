@@ -17,3 +17,4 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full", "macros", "rt"] }
+tracing-subscriber = "0.3.19"

@@ -39,6 +39,9 @@ async fn test_event_triggers_commit() {
     db.expect_execute_transaction()
         .times(1)
         .returning(|_| Box::pin(async { Ok(vec![]) }));
+    // The commit process also tries to load resources, so we need to expect this call.
+    db.expect_fetch_resource()
+        .returning(|_| Box::pin(async { Ok(None) }));
 
     let db = Arc::new(db);
     let mut app = App::new();
@@ -51,6 +54,7 @@ async fn test_event_triggers_commit() {
 
     // Spawn an entity to ensure there's a change to commit
     app.world_mut().spawn(Health { value: 100 });
+    app.update(); // Run change detection systems
 
     // Triggering a commit should change the state to InProgress
     commit(&mut app).await.unwrap();

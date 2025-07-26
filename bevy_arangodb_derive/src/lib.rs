@@ -66,6 +66,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
+                use bevy::prelude::IntoScheduleConfigs;
                 let type_id = std::any::TypeId::of::<#name>();
                 let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
                 if registered.0.insert(type_id) {
@@ -74,10 +75,8 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                         .register_component::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
-                        bevy::ecs::schedule::IntoScheduleConfigs::in_set(
-                            #crate_path::persistence_plugin::auto_dirty_tracking_entity_system::<#name>,
-                            #crate_path::persistence_plugin::PersistenceSystemSet::PreCommit
-                        ),
+                        #crate_path::persistence_plugin::auto_dirty_tracking_entity_system::<#name>
+                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::PreCommit),
                     );
                 }
             }
@@ -86,6 +85,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
+                use bevy::prelude::IntoScheduleConfigs;
                 let type_id = std::any::TypeId::of::<#name>();
                 let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
                 if registered.0.insert(type_id) {
@@ -94,10 +94,8 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                         .register_resource::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
-                        bevy::ecs::schedule::IntoScheduleConfigs::in_set(
-                            #crate_path::persistence_plugin::auto_dirty_tracking_resource_system::<#name>,
-                            #crate_path::persistence_plugin::PersistenceSystemSet::PreCommit
-                        ),
+                        #crate_path::persistence_plugin::auto_dirty_tracking_resource_system::<#name>
+                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::PreCommit),
                     );
                 }
             }

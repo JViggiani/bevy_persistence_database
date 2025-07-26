@@ -10,10 +10,21 @@ use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 use bevy::tasks::{IoTaskPool, Task};
 use futures_lite::future;
+use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
+
+static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
+    Arc::new(
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap(),
+    )
+});
 
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
@@ -58,6 +69,9 @@ pub enum CommitStatus {
     InProgress,
     InProgressAndDirty,
 }
+
+#[derive(Resource)]
+struct TokioRuntime(Arc<Runtime>);
 
 /// A system that handles the `TriggerCommit` event to change the `CommitStatus`.
 fn handle_commit_trigger(world: &mut World) {
@@ -107,16 +121,23 @@ fn handle_commit_trigger(world: &mut World) {
     *world.resource_mut::<CommitStatus>() = CommitStatus::InProgress;
     info!("[handle_commit_trigger] CommitStatus set to InProgress. Spawning task.");
 
+    // Get the dedicated runtime
+    let runtime = world.resource::<TokioRuntime>().0.clone();
+
     let thread_pool = IoTaskPool::get();
     let db = world.resource::<ArangoSession>().db.clone();
     let new_entities = commit_data.new_entities;
     let operations = commit_data.operations;
 
     let task = thread_pool.spawn(async move {
-        match db.execute_transaction(operations).await {
-            Ok(keys) => Ok((keys, new_entities)),
-            Err(e) => Err(e),
-        }
+        // Use `block_on` to run the async database logic on the dedicated Tokio runtime.
+        // This blocks the current thread (from Bevy's pool), but that's okay here.
+        runtime.block_on(async {
+            match db.execute_transaction(operations).await {
+                Ok(keys) => Ok((keys, new_entities)),
+                Err(e) => Err(e),
+            }
+        })
     });
 
     // Spawn a new entity to hold the task and the correlation ID.
@@ -261,6 +282,9 @@ impl Plugin for PersistencePluginCore {
         app.init_resource::<CommitStatus>();
         app.init_resource::<CommitEventListeners>();
 
+        // Insert the dedicated Tokio runtime from the global static.
+        app.insert_resource(TokioRuntime(TOKIO_RUNTIME.clone()));
+
         // Iterate over the registration functions from the global registry.
         // Using .iter() instead of .drain() prevents test pollution.
         let registry = COMPONENT_REGISTRY.lock().unwrap();
@@ -274,7 +298,7 @@ impl Plugin for PersistencePluginCore {
             (PersistenceSystemSet::PreCommit, PersistenceSystemSet::Commit).chain(),
         );
 
-        // Add the systems to their respective sets.
+        // Add both PreCommit and Commit-phase systems:
         app.add_systems(
             PostUpdate,
             (

@@ -8,7 +8,7 @@ bevy = { version = "0.16.1", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 arangors = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 futures = { workspace = true }
 downcast-rs = "2.0.1"
 once_cell.workspace = true
