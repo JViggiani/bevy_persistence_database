@@ -81,13 +81,26 @@ fn handle_commit_trigger(world: &mut World) {
     let mut correlation_id = None;
 
     world.resource_scope(|world, mut events: Mut<Events<TriggerCommit>>| {
-        let status = world.resource::<CommitStatus>();
-        if *status == CommitStatus::Idle {
-            // drain() removes all events and returns an iterator. We just need to check if it's empty.
-            if let Some(trigger) = events.drain().next() {
-                info!("[handle_commit_trigger] TriggerCommit event received. Status is Idle.");
-                should_commit = true;
-                correlation_id = trigger.correlation_id;
+        let mut status = world.resource_mut::<CommitStatus>();
+        if !events.is_empty() {
+            // Drain all events. We only care that at least one was sent.
+            // The correlation ID of the first one is taken, others are ignored for now.
+            let first_trigger = events.drain().next().unwrap();
+
+            match *status {
+                CommitStatus::Idle => {
+                    info!("[handle_commit_trigger] TriggerCommit event received. Status is Idle.");
+                    should_commit = true;
+                    correlation_id = first_trigger.correlation_id;
+                }
+                CommitStatus::InProgress => {
+                    info!("[handle_commit_trigger] TriggerCommit event received while another is in progress. Queuing.");
+                    *status = CommitStatus::InProgressAndDirty;
+                }
+                CommitStatus::InProgressAndDirty => {
+                    // A commit is already in progress and another is already queued.
+                    // We can ignore subsequent trigger events.
+                }
             }
         }
     });
@@ -155,6 +168,7 @@ fn handle_commit_completed(
     mut session: ResMut<ArangoSession>,
     mut status: ResMut<CommitStatus>,
     mut completed_events: EventWriter<CommitCompleted>,
+    mut trigger_events: EventWriter<TriggerCommit>,
 ) {
     for (task_entity, mut task, trigger_id) in &mut tasks {
         trace!("[handle_commit_completed] Polling a commit task for correlation ID {:?}.", trigger_id.0);
@@ -175,12 +189,14 @@ fn handle_commit_completed(
                         session.entity_keys.insert(*entity, key.clone());
                     }
 
-                    // Clear the dirty flags in the session
-                    session.dirty_entities.clear();
-                    session.despawned_entities.clear();
-                    session.dirty_resources.clear();
+                    // Only clear the dirty flags if we are not immediately starting another commit.
+                    if *status != CommitStatus::InProgressAndDirty {
+                        session.dirty_entities.clear();
+                        session.despawned_entities.clear();
+                        session.dirty_resources.clear();
+                        debug!("Commit successful, returning to Idle.");
+                    }
 
-                    debug!("Commit successful, returning to Idle.");
                     event_result = Ok(new_keys);
                 }
                 Err(e) => {
@@ -192,9 +208,20 @@ fn handle_commit_completed(
                     event_result = Err(PersistenceError(err_msg));
                 }
             }
-            // The task is complete, so we can change the status and despawn the task entity.
-            *status = CommitStatus::Idle;
+            // The task is complete, so we can despawn the task entity.
             commands.entity(task_entity).despawn();
+
+            // Check if another commit was requested while this one was running.
+            if *status == CommitStatus::InProgressAndDirty {
+                info!("Commit completed, but world is dirty. Triggering another commit.");
+                // Set status back to Idle and immediately trigger a new commit.
+                // The `handle_commit_trigger` system will run in the same tick.
+                *status = CommitStatus::Idle;
+                trigger_events.write(TriggerCommit::default());
+            } else {
+                // Otherwise, we are done.
+                *status = CommitStatus::Idle;
+            }
 
             // Send the completion event for any waiting `commit_and_wait` calls.
             completed_events.write(CommitCompleted(event_result, vec![], trigger_id.0));
