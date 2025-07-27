@@ -1,11 +1,11 @@
 //! A Bevy `Plugin` for integrating `bevy_arangodb`.
 //!
-//! This plugin simplifies the setup process by managing the `ArangoSession`
+//! This plugin simplifies the setup process by managing the `PersistenceSession`
 //! as a resource and automatically adding systems for change detection.
 
 use crate::registration::COMPONENT_REGISTRY;
-use crate::resources::arango_session::_prepare_commit;
-use crate::{PersistenceError, ArangoSession, DatabaseConnection, Guid, Persist};
+use crate::resources::persistence_session::_prepare_commit;
+use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist};
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 use bevy::tasks::{IoTaskPool, Task};
@@ -111,7 +111,7 @@ fn handle_commit_trigger(world: &mut World) {
 
     // --- STAGE 1: Prepare Data on Main Thread ---
     let commit_data = {
-        let session = world.resource::<ArangoSession>();
+        let session = world.resource::<PersistenceSession>();
         match _prepare_commit(session, world) {
             Ok(data) => {
                 if data.operations.is_empty() {
@@ -138,7 +138,7 @@ fn handle_commit_trigger(world: &mut World) {
     let runtime = world.resource::<TokioRuntime>().0.clone();
 
     let thread_pool = IoTaskPool::get();
-    let db = world.resource::<ArangoSession>().db.clone();
+    let db = world.resource::<PersistenceSession>().db.clone();
     let new_entities = commit_data.new_entities;
     let operations = commit_data.operations;
 
@@ -165,7 +165,7 @@ struct TriggerID(Option<u64>);
 fn handle_commit_completed(
     mut commands: Commands,
     mut tasks: Query<(Entity, &mut CommitTask, &TriggerID)>,
-    mut session: ResMut<ArangoSession>,
+    mut session: ResMut<PersistenceSession>,
     mut status: ResMut<CommitStatus>,
     mut completed_events: EventWriter<CommitCompleted>,
     mut trigger_events: EventWriter<TriggerCommit>,
@@ -231,7 +231,7 @@ fn handle_commit_completed(
 
 /// A system that automatically marks entities with changed components as dirty.
 pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
-    mut session: ResMut<ArangoSession>,
+    mut session: ResMut<PersistenceSession>,
     query: Query<Entity, Or<(Added<T>, Changed<T>)>>,
 ) {
     for entity in query.iter() {
@@ -246,7 +246,7 @@ pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
 
 /// A system that automatically marks changed resources as dirty.
 pub fn auto_dirty_tracking_resource_system<T: Resource + Persist>(
-    mut session: ResMut<ArangoSession>,
+    mut session: ResMut<PersistenceSession>,
     resource: Option<Res<T>>,
 ) {
     if let Some(resource) = resource {
@@ -258,7 +258,7 @@ pub fn auto_dirty_tracking_resource_system<T: Resource + Persist>(
 
 /// A system that automatically marks despawned entities as needing deletion.
 fn auto_despawn_tracking_system(
-    mut session: ResMut<ArangoSession>,
+    mut session: ResMut<PersistenceSession>,
     mut removed: RemovedComponents<Guid>,
 ) {
     for entity in removed.read() {
@@ -301,7 +301,7 @@ fn commit_event_listener(
 
 impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
-        let session = ArangoSession::new(self.db.clone());
+        let session = PersistenceSession::new(self.db.clone());
         app.insert_resource(session);
         app.init_resource::<RegisteredPersistTypes>();
         app.add_event::<TriggerCommit>();

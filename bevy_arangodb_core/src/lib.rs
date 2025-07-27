@@ -34,5 +34,5 @@ pub use plugins::{
     persistence_plugin::PersistenceSystemSet,
 };
 pub use query::{PersistenceQuery, dsl};
-pub use resources::{ArangoSession, commit_and_wait as commit};
+pub use resources::{PersistenceSession, commit_and_wait as commit};
 pub use persist::Persist;

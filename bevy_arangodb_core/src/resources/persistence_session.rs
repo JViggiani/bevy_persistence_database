@@ -1,4 +1,4 @@
-//! Core ECS‐to‐Arango bridge: defines `ArangoSession`.
+//! Core ECS‐to‐Arango bridge: defines `PersistenceSession`.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
 use crate::db::connection::{DatabaseConnection, TransactionOperation, PersistenceError};
@@ -22,12 +22,12 @@ static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
 type ComponentSerializer   = Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
 type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(), PersistenceError> + Send + Sync>;
-type ResourceSerializer    = Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
+type ResourceSerializer    = Box<dyn Fn(&World, &PersistenceSession) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
 type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), PersistenceError> + Send + Sync>;
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
 #[derive(Resource)]
-pub struct ArangoSession {
+pub struct PersistenceSession {
     pub db: Arc<dyn DatabaseConnection>,
     pub(crate) dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
@@ -44,7 +44,7 @@ pub(crate) struct CommitData {
     pub(crate) new_entities: Vec<Entity>,
 }
 
-impl ArangoSession {
+impl PersistenceSession {
     /// Registers a component type for persistence.
     ///
     /// This method sets up both serialization and deserialization for any
@@ -190,7 +190,7 @@ impl ArangoSession {
 
 /// Serialize all data. This will fail early if any serialization fails.
 pub(crate) fn _prepare_commit(
-    session: &ArangoSession,
+    session: &PersistenceSession,
     world: &World,
 ) -> Result<CommitData, PersistenceError> {
     let mut operations = Vec::new();
@@ -298,7 +298,7 @@ mod arango_session {
     fn new_session_is_empty() {
         setup();
         let mock_db = MockDatabaseConnection::new();
-        let session = ArangoSession::new_mocked(Arc::new(mock_db));
+        let session = PersistenceSession::new_mocked(Arc::new(mock_db));
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
     }
@@ -309,7 +309,7 @@ mod arango_session {
         let mut world = World::new();
         let entity = world.spawn_empty().id();
 
-        let mut session = ArangoSession::new(Arc::new(MockDatabaseConnection::new()));
+        let mut session = PersistenceSession::new(Arc::new(MockDatabaseConnection::new()));
         session.register_component::<MyComp>();
 
         let deserializer = session.component_deserializers.get(MyComp::name()).unwrap();
@@ -323,7 +323,7 @@ mod arango_session {
         setup();
         let mut world = World::new();
 
-        let mut session = ArangoSession::new(Arc::new(MockDatabaseConnection::new()));
+        let mut session = PersistenceSession::new(Arc::new(MockDatabaseConnection::new()));
         session.register_resource::<MyRes>();
 
         let deserializer = session.resource_deserializers.get(MyRes::name()).unwrap();

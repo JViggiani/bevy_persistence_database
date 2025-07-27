@@ -1,5 +1,5 @@
 //! Real ArangoDB backend: implements `DatabaseConnection` using `arangors`.
-//! Inject this into `ArangoSession` in production to persist components.
+//! Inject this into `PersistenceSession` in production to persist components.
 
 use arangors::{
     client::reqwest::ReqwestClient,

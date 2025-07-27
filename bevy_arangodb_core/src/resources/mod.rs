@@ -1,6 +1,6 @@
-pub mod arango_session;
+pub mod persistence_session;
 
-pub use arango_session::{
-    ArangoSession,
+pub use persistence_session::{
+    PersistenceSession,
     commit_and_wait,
 };

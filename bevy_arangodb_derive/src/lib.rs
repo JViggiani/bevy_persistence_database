@@ -71,7 +71,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
                 if registered.0.insert(type_id) {
                     app.world_mut()
-                        .resource_mut::<#crate_path::ArangoSession>()
+                        .resource_mut::<#crate_path::PersistenceSession>()
                         .register_component::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
@@ -90,7 +90,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
                 if registered.0.insert(type_id) {
                     app.world_mut()
-                        .resource_mut::<#crate_path::ArangoSession>()
+                        .resource_mut::<#crate_path::PersistenceSession>()
                         .register_resource::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,

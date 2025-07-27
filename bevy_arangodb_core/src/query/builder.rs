@@ -1,4 +1,4 @@
-//! A builder for loading entities from ArangoDB into an ArangoSession.
+//! A builder for loading entities from ArangoDB into an PersistenceSession.
 //!
 //! You call `.with::<T>()` to request components, and `.filter("…")`
 //! to inject raw AQL snippets. Later phases will construct full AQL
@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid, Persist, ArangoSession};
+use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use crate::Collection;
 use crate::dsl::{Expression, translate_expression};
 use bevy::prelude::{Component, World};
@@ -102,11 +102,11 @@ impl PersistenceQuery {
 
     /// Load matching entities into the World.
     ///
-    /// Removes the `ArangoSession` resource, performs the database
+    /// Removes the `PersistenceSession` resource, performs the database
     /// operations, and then re-inserts it.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
-        let session = world.remove_resource::<ArangoSession>().unwrap();
+        let session = world.remove_resource::<PersistenceSession>().unwrap();
 
         // 1) run AQL to get matching keys
         let keys = self.fetch_ids().await;
@@ -218,7 +218,7 @@ mod tests {
         // build app + session
         let mut app = App::new();
         app.add_plugins(PersistencePluginCore::new(db.clone()));
-        let mut session = app.world_mut().resource_mut::<ArangoSession>();
+        let mut session = app.world_mut().resource_mut::<PersistenceSession>();
         session.register_component::<Health>();
         session.register_component::<Position>();
 
