@@ -24,7 +24,9 @@ async fn test_load_specific_entities_into_new_session() {
 
     app1.update();
 
-    commit(&mut app1).await.unwrap();
+    commit(&mut app1)
+        .await
+        .expect("Initial commit failed");
 
     // 2. Create a new, clean session to load the data into.
     let mut app2 = App::new();
@@ -67,7 +69,9 @@ async fn test_load_resources_alongside_entities() {
     };
     app1.insert_resource(settings.clone());
     app1.update();
-    commit(&mut app1).await.unwrap();
+    commit(&mut app1)
+        .await
+        .expect("Initial commit failed");
 
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();
@@ -92,7 +96,9 @@ async fn test_load_into_world_with_existing_entities() {
     app1.add_plugins(PersistencePlugins(db.clone()));
     let a = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit(&mut app1).await.unwrap();
+    commit(&mut app1)
+        .await
+        .expect("Commit for app1 failed");
     let key_a = app1.world().get::<Guid>(a).unwrap().id().to_string();
 
     // AND a fresh app2 with entity B already committed
@@ -100,7 +106,9 @@ async fn test_load_into_world_with_existing_entities() {
     app2.add_plugins(PersistencePlugins(db.clone()));
     let _b = app2.world_mut().spawn(Position { x: 1.0, y: 1.0 }).id();
     app2.update();
-    commit(&mut app2).await.unwrap();
+    commit(&mut app2)
+        .await
+        .expect("Commit for app2 failed");
 
     // WHEN we query for A and load it into app2
     let loaded = PersistenceQuery::new(db.clone())
@@ -135,7 +143,9 @@ async fn test_dsl_filter_by_component_presence() {
         .spawn(Creature { is_screaming: false });
     app.world_mut().spawn(Health { value: 100 });
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Initial commit failed");
 
     // WHEN we query .with::<Creature>()
     let mut app2 = App::new();
@@ -173,7 +183,9 @@ async fn test_dsl_equality_operator() {
         .world_mut()
         .spawn(PlayerName { name: "Bob".into() });
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Initial commit failed");
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
@@ -212,7 +224,9 @@ async fn test_dsl_relational_operators() {
     app.world_mut().spawn(Health { value: 100 });
     app.world_mut().spawn(Health { value: 101 });
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Initial commit failed");
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
@@ -272,7 +286,9 @@ async fn test_dsl_logical_combinations() {
         .world_mut()
         .spawn((Health { value: 50 }, Position { x: 150.0, y: 0.0 }));
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Initial commit failed");
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
@@ -305,7 +321,7 @@ async fn test_load_with_schema_mismatch() {
     let _key = db
         .execute_transaction(vec![TransactionOperation::CreateDocument(bad_health_doc)])
         .await
-        .unwrap()
+        .expect("Transaction to create bad doc failed")
         .remove(0);
 
     // WHEN loading with .with::<Health>() – this should panic inside fetch_into

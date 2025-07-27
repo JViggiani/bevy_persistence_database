@@ -7,29 +7,12 @@ use arangors::{
     AqlQuery, ClientError, Connection, Database,
 };
 use crate::db::DatabaseConnection;
-use crate::db::connection::{ArangoError, TransactionOperation};
+use crate::db::connection::{PersistenceError, TransactionOperation, Collection};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-
-/// An enum representing the collections used by this library.
-pub enum Collection {
-    /// The collection where all Bevy entities are stored as documents.
-    Entities,
-    /// The special document key for storing Bevy resources.
-    Resources,
-}
-
-impl std::fmt::Display for Collection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Collection::Entities => write!(f, "entities"),
-            Collection::Resources => write!(f, "resources"),
-        }
-    }
-}
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
@@ -51,14 +34,14 @@ impl ArangoDbConnection {
         user: &str,
         pass: &str,
         db_name: &str,
-    ) -> Result<Self, ArangoError> {
+    ) -> Result<Self, PersistenceError> {
         let conn = Connection::establish_jwt(url, user, pass)
             .await
-            .map_err(|e| ArangoError(e.to_string()))?;
+            .map_err(|e| PersistenceError(e.to_string()))?;
         let db: Database<ReqwestClient> = conn
             .db(db_name)
             .await
-            .map_err(|e| ArangoError(e.to_string()))?;
+            .map_err(|e| PersistenceError(e.to_string()))?;
 
         // Ensure all required collections exist.
         let collections_to_ensure = vec![
@@ -72,10 +55,10 @@ impl ArangoDbConnection {
                     // If the error is "duplicate name", the collection already exists, which is fine.
                     if let ClientError::Arango(arango_error) = e {
                         if arango_error.error_num() != 1207 { // 1207 is "duplicate name"
-                            return Err(ArangoError(arango_error.to_string()));
+                            return Err(PersistenceError(arango_error.to_string()));
                         }
                     } else {
-                        return Err(ArangoError(e.to_string()));
+                        return Err(PersistenceError(e.to_string()));
                     }
                 }
             }
@@ -90,7 +73,7 @@ impl DatabaseConnection for ArangoDbConnection {
         &self,
         aql: String,
         bind_vars: HashMap<String, Value>,
-    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>> {
+    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
         let db = self.db.clone();
         async move {
             // convert String->Value into &'static str->Value
@@ -109,7 +92,7 @@ impl DatabaseConnection for ArangoDbConnection {
             let docs: Vec<Value> = db
                 .aql_query(query)
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             // extract keys as strings
             let keys = docs
                 .into_iter()
@@ -123,14 +106,14 @@ impl DatabaseConnection for ArangoDbConnection {
     fn fetch_document(
         &self,
         entity_key: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
         let db = self.db.clone();
         let key = entity_key.to_string();
         async move {
             let col = db
                 .collection(&Collection::Entities.to_string())
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             match col.document::<Value>(&key).await {
                 Ok(doc) => Ok(Some(doc.document)),
                 Err(e) => {
@@ -140,7 +123,7 @@ impl DatabaseConnection for ArangoDbConnection {
                             return Ok(None);
                         }
                     }
-                    Err(ArangoError(e.to_string()))
+                    Err(PersistenceError(e.to_string()))
                 }
             }
         }
@@ -151,7 +134,7 @@ impl DatabaseConnection for ArangoDbConnection {
         &self,
         entity_key: &str,
         comp_name: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
         let db = self.db.clone();
         let key = entity_key.to_string();
         let comp = comp_name.to_string();
@@ -159,7 +142,7 @@ impl DatabaseConnection for ArangoDbConnection {
             let col = db
                 .collection(&Collection::Entities.to_string())
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             match col.document::<Value>(&key).await {
                 Ok(doc) => Ok(doc.document.get(&comp).cloned()),
                 Err(e) => {
@@ -169,7 +152,7 @@ impl DatabaseConnection for ArangoDbConnection {
                             return Ok(None);
                         }
                     }
-                    Err(ArangoError(e.to_string()))
+                    Err(PersistenceError(e.to_string()))
                 }
             }
         }
@@ -179,14 +162,14 @@ impl DatabaseConnection for ArangoDbConnection {
     fn fetch_resource(
         &self,
         resource_name: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, ArangoError>> {
+    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
         let db = self.db.clone();
         let res_key = resource_name.to_string();
         async move {
             let col = db
                 .collection(&Collection::Resources.to_string())
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             // A document may not exist, so we handle the error.
             match col.document::<Value>(&res_key).await {
                 Ok(doc) => Ok(Some(doc.document)),
@@ -196,38 +179,38 @@ impl DatabaseConnection for ArangoDbConnection {
                             return Ok(None);
                         }
                     }
-                    Err(ArangoError(e.to_string()))
+                    Err(PersistenceError(e.to_string()))
                 }
             }
         }
         .boxed()
     }
 
-    fn clear_entities(&self) -> BoxFuture<'static, Result<(), ArangoError>> {
+    fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
         let db = self.db.clone();
         async move {
             let col = db
                 .collection(&Collection::Entities.to_string())
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             col.truncate()
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             Ok(())
         }
         .boxed()
     }
 
-    fn clear_resources(&self) -> BoxFuture<'static, Result<(), ArangoError>> {
+    fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
         let db = self.db.clone();
         async move {
             let col = db
                 .collection(&Collection::Resources.to_string())
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             col.truncate()
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             Ok(())
         }
         .boxed()
@@ -236,7 +219,7 @@ impl DatabaseConnection for ArangoDbConnection {
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
-    ) -> BoxFuture<'static, Result<Vec<String>, ArangoError>> {
+    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
         let db = self.db.clone();
         async move {
             let ent = Collection::Entities.to_string();
@@ -251,24 +234,24 @@ impl DatabaseConnection for ArangoDbConnection {
             let trx = db
                 .begin_transaction(settings)
                 .await
-                .map_err(|e| ArangoError(e.to_string()))?;
+                .map_err(|e| PersistenceError(e.to_string()))?;
             let mut new_keys = Vec::new();
 
             for op in operations {
                 match op {
                     TransactionOperation::CreateDocument(doc) => {
-                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
-                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| ArangoError(e.to_string()))?;
-                        let key = meta.header().ok_or_else(|| ArangoError("Missing header".into()))?._key.clone();
+                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
+                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| PersistenceError(e.to_string()))?;
+                        let key = meta.header().ok_or_else(|| PersistenceError("Missing header".into()))?._key.clone();
                         new_keys.push(key);
                     }
                     TransactionOperation::UpdateDocument(key, patch) => {
-                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
-                        col.update_document(&key, patch, Default::default()).await.map_err(|e| ArangoError(e.to_string()))?;
+                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
+                        col.update_document(&key, patch, Default::default()).await.map_err(|e| PersistenceError(e.to_string()))?;
                     }
                     TransactionOperation::DeleteDocument(key) => {
-                        let col = trx.collection(&ent).await.map_err(|e| ArangoError(e.to_string()))?;
-                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| ArangoError(e.to_string()))?;
+                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
+                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| PersistenceError(e.to_string()))?;
                     }
                     TransactionOperation::UpsertResource(key, data) => {
                         // An AQL UPSERT is the robust way to handle create-or-replace logic.
@@ -299,12 +282,12 @@ impl DatabaseConnection for ArangoDbConnection {
 
                         trx.aql_query::<Value>(query)
                             .await
-                            .map_err(|e| ArangoError(e.to_string()))?;
+                            .map_err(|e| PersistenceError(e.to_string()))?;
                     }
                 }
             }
 
-            trx.commit().await.map_err(|e| ArangoError(e.to_string()))?;
+            trx.commit().await.map_err(|e| PersistenceError(e.to_string()))?;
             Ok(new_keys)
         }
         .boxed()

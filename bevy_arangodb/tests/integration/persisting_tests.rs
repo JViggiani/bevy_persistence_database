@@ -17,7 +17,9 @@ async fn test_create_new_entity() {
 
     app.update(); // Run the schedule to trigger change detection
 
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Commit failed during test execution");
 
     // 4. Verify the results
     // The entity should now have a Guid component assigned by the library.
@@ -61,7 +63,9 @@ async fn test_create_new_resource() {
 
     app.update(); // Run the schedule to trigger change detection
 
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Commit failed during test execution");
 
     // 2. Verify the resource was saved correctly by fetching it directly
     let resource_name = GameSettings::name();
@@ -88,7 +92,7 @@ async fn test_update_existing_entity() {
     // 1. GIVEN a committed entity with a Health component of value 100
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Initial commit failed");
 
     // Get the Guid to use for direct DB verification later
     let guid = app
@@ -102,9 +106,10 @@ async fn test_update_existing_entity() {
     let health_json_before = db
         .fetch_component(&guid, Health::name())
         .await
-        .unwrap()
-        .unwrap();
-    let fetched_health_before: Health = serde_json::from_value(health_json_before).unwrap();
+        .expect("Fetch before update failed")
+        .expect("Component not found before update");
+    let fetched_health_before: Health =
+        serde_json::from_value(health_json_before).expect("Deserialization before update failed");
     assert_eq!(fetched_health_before.value, 100);
 
     // 2. WHEN the entity's Health value is changed to 50
@@ -117,7 +122,7 @@ async fn test_update_existing_entity() {
     app.update(); // This will mark the component as Changed
 
     // 3. AND the app is committed again
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Second commit failed");
 
     // 4. THEN the Health data in the database for that entity's Guid reflects the new value of 50.
     let health_json_after = db
@@ -149,7 +154,7 @@ async fn test_update_existing_resource() {
     };
     app.insert_resource(initial_settings);
     app.update(); // Run schedule to trigger change detection
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Initial commit failed");
 
     // 2. WHEN the GameSettings resource is modified in the app
     let mut settings = app.world_mut().resource_mut::<GameSettings>();
@@ -159,7 +164,7 @@ async fn test_update_existing_resource() {
     app.update(); // Run schedule to trigger change detection on the resource
 
     // 3. AND the app is committed again
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Second commit failed");
 
     // 4. THEN the GameSettings data in the database reflects the new values.
     let resource_name = GameSettings::name();
@@ -188,7 +193,7 @@ async fn test_delete_persisted_entity() {
 
     app.update();
 
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Initial commit failed");
 
     // 2. Verify it exists in the database.
     let guid = app
@@ -207,7 +212,7 @@ async fn test_delete_persisted_entity() {
     // 3. Despawn the entity and commit again.
     app.world_mut().entity_mut(entity_id).despawn();
     app.update(); // This runs the despawn command and our auto-despawn-tracking system
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Delete commit failed");
 
     // 4. Verify it's gone from the database.
     let component_after_delete = db
@@ -231,10 +236,14 @@ async fn test_commit_with_no_changes() {
     // GIVEN a committed app in a synchronized state with the database
     app.world_mut().spawn(Health { value: 100 });
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Initial commit failed");
 
     // WHEN the app is committed again with no changes made to any entities or resources
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Second commit with no changes failed");
 
     // THEN the commit operation succeeds without error
     // AND no database write operations are performed (this is handled by an early return in the commit function)
@@ -252,7 +261,7 @@ async fn test_add_new_component_to_existing_entity() {
     // 1. GIVEN a committed entity with only a Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Initial commit failed");
 
     let guid = app
         .world()
@@ -265,7 +274,7 @@ async fn test_add_new_component_to_existing_entity() {
     let health_before = db
         .fetch_component(&guid, Health::name())
         .await
-        .unwrap();
+        .expect("Fetch before update failed");
     assert!(
         health_before.is_some(),
         "Health should exist after first commit"
@@ -273,7 +282,7 @@ async fn test_add_new_component_to_existing_entity() {
     let position_before = db
         .fetch_component(&guid, Position::name())
         .await
-        .unwrap();
+        .expect("Fetch before update failed");
     assert!(
         position_before.is_none(),
         "Position should not exist after first commit"
@@ -287,24 +296,26 @@ async fn test_add_new_component_to_existing_entity() {
     app.update(); // This will mark the entity as dirty due to the added component
 
     // 3. AND the app is committed again
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Second commit failed");
 
     // 4. THEN the document in the database is updated to include the new Position data
     //    while retaining the existing Health data.
     let health_after_json = db
         .fetch_component(&guid, Health::name())
         .await
-        .unwrap()
-        .unwrap();
-    let health_after: Health = serde_json::from_value(health_after_json).unwrap();
+        .expect("Fetch after update failed")
+        .expect("Health component not found after update");
+    let health_after: Health =
+        serde_json::from_value(health_after_json).expect("Health deserialization failed");
     assert_eq!(health_after.value, 100, "Health data was not retained");
 
     let position_after_json = db
         .fetch_component(&guid, Position::name())
         .await
-        .unwrap()
-        .unwrap();
-    let position_after: Position = serde_json::from_value(position_after_json).unwrap();
+        .expect("Fetch after update failed")
+        .expect("Position component not found after update");
+    let position_after: Position =
+        serde_json::from_value(position_after_json).expect("Position deserialization failed");
     assert_eq!(position_after.x, 10.0, "Position.x was not added correctly");
     assert_eq!(position_after.y, 20.0, "Position.y was not added correctly");
 }
@@ -332,7 +343,7 @@ async fn test_commit_entity_with_non_persisted_component() {
     app.update();
 
     // AND the app is committed
-    commit(&mut app).await.unwrap();
+    commit(&mut app).await.expect("Commit failed");
 
     // THEN a document is created, but it only contains the persisted component's data.
     let guid = app
@@ -345,10 +356,12 @@ async fn test_commit_entity_with_non_persisted_component() {
     let doc = db
         .fetch_document(guid)
         .await
-        .unwrap()
+        .expect("Document fetch failed")
         .expect("Document should exist in the database");
 
-    let obj = doc.as_object().unwrap();
+    let obj = doc
+        .as_object()
+        .expect("Document value is not an object");
 
     // Filter out ArangoDB metadata fields before checking the component count.
     let component_fields: Vec<_> = obj.keys().filter(|k| !k.starts_with('_')).collect();
@@ -387,7 +400,9 @@ async fn test_persist_component_with_empty_vec() {
     app.update();
 
     // AND the app is committed
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Commit failed");
 
     // THEN the commit succeeds and the data can be fetched and correctly deserialized
     // back into a component with an empty `Vec`.
@@ -427,7 +442,9 @@ async fn test_persist_component_with_option_none() {
     app.update();
 
     // AND the app is committed
-    commit(&mut app).await.unwrap();
+    commit(&mut app)
+        .await
+        .expect("Commit failed");
 
     // THEN the commit succeeds and the data can be fetched and correctly deserialized.
     let guid = app
@@ -445,8 +462,6 @@ async fn test_persist_component_with_option_none() {
     let fetched_data: OptionalData =
         serde_json::from_value(data_json).expect("Failed to deserialize OptionalData component");
 
-    assert!(
-        fetched_data.data.is_none(),
-        "The fetched OptionalData should have a None value"
-    );
+    assert!(fetched_data.data.is_none(), "The fetched data should be None");
+
 }

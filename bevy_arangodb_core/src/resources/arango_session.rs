@@ -1,7 +1,7 @@
 //! Core ECS‐to‐Arango bridge: defines `ArangoSession`.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
-use crate::db::connection::{DatabaseConnection, TransactionOperation, ArangoError};
+use crate::db::connection::{DatabaseConnection, TransactionOperation, PersistenceError};
 use crate::plugins::TriggerCommit;
 use bevy::prelude::{info, App, Component, Entity, Resource, World};
 use serde_json::Value;
@@ -20,10 +20,10 @@ use tokio::sync::oneshot;
 /// A unique ID generator for correlating commit requests and responses.
 static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
-type ComponentSerializer   = Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>;
-type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(), ArangoError> + Send + Sync>;
-type ResourceSerializer    = Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, ArangoError> + Send + Sync>;
-type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), ArangoError> + Send + Sync>;
+type ComponentSerializer   = Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
+type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(), PersistenceError> + Send + Sync>;
+type ResourceSerializer    = Box<dyn Fn(&World, &ArangoSession) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
+type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), PersistenceError> + Send + Sync>;
 
 /// Manages a “unit of work”: local World cache + change tracking + async runtime.
 #[derive(Resource)]
@@ -53,11 +53,11 @@ impl ArangoSession {
         let ser_key = T::name();
         let type_id = TypeId::of::<T>();
         self.component_serializers.insert(type_id, Box::new(
-            move |entity, world| -> Result<Option<(String, Value)>, ArangoError> {
+            move |entity, world| -> Result<Option<(String, Value)>, PersistenceError> {
                 if let Some(c) = world.get::<T>(entity) {
-                    let v = serde_json::to_value(c).map_err(|_| ArangoError("Serialization failed".into()))?;
+                    let v = serde_json::to_value(c).map_err(|_| PersistenceError("Serialization failed".into()))?;
                     if v.is_null() {
-                        return Err(ArangoError("Could not serialize".into()));
+                        return Err(PersistenceError("Could not serialize".into()));
                     }
                     Ok(Some((ser_key.to_string(), v)))
                 } else {
@@ -69,7 +69,7 @@ impl ArangoSession {
         let de_key = T::name();
         self.component_deserializers.insert(de_key.to_string(), Box::new(
             |world, entity, json_val| {
-                let comp: T = serde_json::from_value(json_val).map_err(|e| ArangoError(e.to_string()))?;
+                let comp: T = serde_json::from_value(json_val).map_err(|e| PersistenceError(e.to_string()))?;
                 world.entity_mut(entity).insert(comp);
                 Ok(())
             }
@@ -91,9 +91,9 @@ impl ArangoSession {
             }
             // Fetch and serialize the resource
             if let Some(r) = world.get_resource::<R>() {
-                let v = serde_json::to_value(r).map_err(|e| ArangoError(e.to_string()))?;
+                let v = serde_json::to_value(r).map_err(|e| PersistenceError(e.to_string()))?;
                 if v.is_null() {
-                    return Err(ArangoError("Could not serialize".into()));
+                    return Err(PersistenceError("Could not serialize".into()));
                 }
                 Ok(Some((ser_key.to_string(), v)))
             } else {
@@ -104,7 +104,7 @@ impl ArangoSession {
         let de_key = R::name();
         self.resource_deserializers.insert(de_key.to_string(), Box::new(
             |world, json_val| {
-                let res: R = serde_json::from_value(json_val).map_err(|e| ArangoError(e.to_string()))?;
+                let res: R = serde_json::from_value(json_val).map_err(|e| PersistenceError(e.to_string()))?;
                 world.insert_resource(res);
                 Ok(())
             }
@@ -161,7 +161,7 @@ impl ArangoSession {
         key: &str,
         entity: Entity,
         component_names: &[&'static str],
-    ) -> Result<(), ArangoError> {
+    ) -> Result<(), PersistenceError> {
         for &comp_name in component_names {
             if let Some(val) = db.fetch_component(key, comp_name).await? {
                 if let Some(deser) = self.component_deserializers.get(comp_name) {
@@ -178,7 +178,7 @@ impl ArangoSession {
         &self,
         db: &(dyn DatabaseConnection + 'static),
         world: &mut World,
-    ) -> Result<(), ArangoError> {
+    ) -> Result<(), PersistenceError> {
         for (res_name, deser) in self.resource_deserializers.iter() {
             if let Some(val) = db.fetch_resource(res_name).await? {
                 deser(world, val)?;
@@ -192,7 +192,7 @@ impl ArangoSession {
 pub(crate) fn _prepare_commit(
     session: &ArangoSession,
     world: &World,
-) -> Result<CommitData, ArangoError> {
+) -> Result<CommitData, PersistenceError> {
     let mut operations = Vec::new();
     let mut new_entities = Vec::new();
 
@@ -241,7 +241,7 @@ pub(crate) fn _prepare_commit(
 /// This function provides a clean `await`-able interface for the event-driven
 /// commit system. It sends a `TriggerCommit` event, then waits for a
 /// `CommitCompleted` event with a matching correlation ID.
-pub async fn commit_and_wait(app: &mut App) -> Result<(), ArangoError> {
+pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
     let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = oneshot::channel();
 
@@ -263,7 +263,7 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), ArangoError> {
             biased; // Check rx first, as it's the more likely exit condition.
             res = &mut rx => {
                 info!("Received commit result for correlation ID {}", correlation_id);
-                return res.map_err(|e| ArangoError(e.to_string()))?;
+                return res.map_err(|e| PersistenceError(e.to_string()))?;
             },
             _ = tokio::task::yield_now() => {
                 // Yielding allows other tasks to run, then we update the app.

@@ -21,7 +21,7 @@ pub use bevy_arangodb_derive::persist;
 
 // Re-export core API
 pub use bevy_arangodb_core::{
-    dsl, persistence_plugin::PersistencePlugins, ArangoDbConnection, ArangoError, ArangoSession,
+    dsl, persistence_plugin::PersistencePlugins, ArangoDbConnection, PersistenceError, ArangoSession,
     Collection, CommitCompleted, CommitStatus, DatabaseConnection, Guid, MockDatabaseConnection,
     Persist, PersistencePluginCore, PersistenceQuery, PersistenceSystemSet, TransactionOperation,
     TriggerCommit,

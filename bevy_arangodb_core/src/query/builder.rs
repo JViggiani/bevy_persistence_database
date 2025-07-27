@@ -241,9 +241,9 @@ mod tests {
     #[should_panic(expected = "AQL query failed")]
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db
-            .expect_query()
-            .returning(|_, _| Box::pin(async { Err(crate::ArangoError("db error".into())) }));
+        mock_db.expect_query().returning(|_, _| {
+            Box::pin(async { Err(crate::PersistenceError("db error".into())) })
+        });
         let db = Arc::new(mock_db);
         let query = PersistenceQuery::new(db);
         block_on(query.fetch_ids());

@@ -25,7 +25,7 @@ pub use db::{
     DatabaseConnection,
     ArangoDbConnection,
     Collection,
-    ArangoError,
+    PersistenceError,
     TransactionOperation,
 };
 pub use db::MockDatabaseConnection;

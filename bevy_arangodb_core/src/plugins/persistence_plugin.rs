@@ -5,7 +5,7 @@
 
 use crate::registration::COMPONENT_REGISTRY;
 use crate::resources::arango_session::_prepare_commit;
-use crate::{ArangoError, ArangoSession, DatabaseConnection, Guid, Persist};
+use crate::{PersistenceError, ArangoSession, DatabaseConnection, Guid, Persist};
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 use bevy::tasks::{IoTaskPool, Task};
@@ -28,7 +28,7 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
 
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
-struct CommitTask(Task<Result<(Vec<String>, Vec<Entity>), ArangoError>>);
+struct CommitTask(Task<Result<(Vec<String>, Vec<Entity>), PersistenceError>>);
 
 /// A `SystemSet` for grouping the core persistence systems into ordered phases.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,7 +41,7 @@ pub enum PersistenceSystemSet {
 
 /// An event fired when a background commit task is complete.
 #[derive(Event)]
-pub struct CommitCompleted(pub Result<Vec<String>, ArangoError>, pub Vec<Entity>, pub Option<u64>);
+pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<Entity>, pub Option<u64>);
 
 /// A resource used to track which `Persist` types have been registered with an `App`.
 /// This prevents duplicate systems from being added.
@@ -157,9 +157,9 @@ fn handle_commit_completed(
     mut completed_events: EventWriter<CommitCompleted>,
 ) {
     for (task_entity, mut task, trigger_id) in &mut tasks {
-        info!("[handle_commit_completed] Polling a commit task for correlation ID {:?}.", trigger_id.0);
+        trace!("[handle_commit_completed] Polling a commit task for correlation ID {:?}.", trigger_id.0);
         if let Some(result) = future::block_on(future::poll_once(&mut task.0)) {
-            info!("[handle_commit_completed] Task is finished for correlation ID {:?}. Processing result.", trigger_id.0);
+            debug!("[handle_commit_completed] Task is finished for correlation ID {:?}. Processing result.", trigger_id.0);
             let event_result;
 
             match result {
@@ -180,7 +180,7 @@ fn handle_commit_completed(
                     session.despawned_entities.clear();
                     session.dirty_resources.clear();
 
-                    info!("Commit successful, returning to Idle.");
+                    debug!("Commit successful, returning to Idle.");
                     event_result = Ok(new_keys);
                 }
                 Err(e) => {
@@ -189,7 +189,7 @@ fn handle_commit_completed(
                         "Commit failed for correlation ID {:?}: {}",
                         trigger_id.0, err_msg
                     );
-                    event_result = Err(ArangoError(err_msg));
+                    event_result = Err(PersistenceError(err_msg));
                 }
             }
             // The task is complete, so we can change the status and despawn the task entity.
@@ -208,7 +208,7 @@ pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
     query: Query<Entity, Or<(Added<T>, Changed<T>)>>,
 ) {
     for entity in query.iter() {
-        info!(
+        debug!(
             "Marking entity {:?} as dirty due to component {}",
             entity,
             std::any::type_name::<T>()
@@ -252,7 +252,7 @@ impl PersistencePluginCore {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct CommitEventListeners(pub(crate) HashMap<u64, oneshot::Sender<Result<(), ArangoError>>>);
+pub(crate) struct CommitEventListeners(pub(crate) HashMap<u64, oneshot::Sender<Result<(), PersistenceError>>>);
 
 fn commit_event_listener(
     mut events: EventReader<CommitCompleted>,
@@ -264,7 +264,7 @@ fn commit_event_listener(
                 info!("Found listener for commit {}. Sending result.", id);
                 let result = match &event.0 {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(ArangoError(e.to_string())),
+                    Err(e) => Err(PersistenceError(e.to_string())),
                 };
                 let _ = sender.send(result);
             }

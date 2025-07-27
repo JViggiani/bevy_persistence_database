@@ -1,6 +1,7 @@
 use bevy::prelude::{App, Events};
 use bevy_arangodb::{
-    commit, CommitStatus, MockDatabaseConnection, PersistencePlugins, TriggerCommit,
+    CommitCompleted, Guid, MockDatabaseConnection, PersistencePlugins, Persist,
+    TriggerCommit,
 };
 use crate::common::*;
 use std::sync::Arc;
@@ -34,33 +35,50 @@ async fn test_trigger_commit_clears_event_queue() {
 }
 
 #[tokio::test]
-async fn test_event_triggers_commit() {
-    let mut db = MockDatabaseConnection::new();
-    db.expect_execute_transaction()
-        .times(1)
-        .returning(|_| Box::pin(async { Ok(vec![]) }));
-    // The commit process also tries to load resources, so we need to expect this call.
-    db.expect_fetch_resource()
-        .returning(|_| Box::pin(async { Ok(None) }));
-
-    let db = Arc::new(db);
+async fn test_event_triggers_commit_and_persists_data() {
+    let _guard = DB_LOCK.lock().await;
+    let db = setup().await;
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db));
+    app.add_plugins(PersistencePlugins(db.clone()));
 
+    // GIVEN an entity is spawned
+    let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
+    app.update(); // Run change detection
 
-    // Initial state should be Idle
-    let status = app.world().resource::<CommitStatus>();
-    assert_eq!(*status, CommitStatus::Idle);
+    // WHEN a TriggerCommit event is sent
+    app.world_mut().send_event(TriggerCommit::default());
 
-    // Spawn an entity to ensure there's a change to commit
-    app.world_mut().spawn(Health { value: 100 });
-    app.update(); // Run change detection systems
+    // AND we manually drive the app loop until the commit is complete
+    loop {
+        app.update();
+        if !app
+            .world()
+            .resource::<Events<CommitCompleted>>()
+            .is_empty()
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
 
-    // Triggering a commit should change the state to InProgress
-    commit(&mut app).await.unwrap();
+    // THEN the commit should have completed successfully
+    let mut events = app.world_mut().resource_mut::<Events<CommitCompleted>>();
+    assert_eq!(events.len(), 1);
+    let event = events.drain().next().unwrap();
+    assert!(event.0.is_ok());
 
-    // The mock DB's expectations are verified when it's dropped.
-    // We also assert the final state is Idle.
-    let status = app.world().resource::<CommitStatus>();
-    assert_eq!(*status, CommitStatus::Idle);
+    // AND the entity should have a Guid
+    let guid = app
+        .world()
+        .get::<Guid>(entity_id)
+        .expect("Entity should have a Guid after commit");
+
+    // AND the data should be in the database
+    let health_json = db
+        .fetch_component(guid.id(), Health::name())
+        .await
+        .expect("DB fetch failed")
+        .expect("Component not found in DB");
+    let fetched_health: Health = serde_json::from_value(health_json).unwrap();
+    assert_eq!(fetched_health.value, 100);
 }
