@@ -30,9 +30,9 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Derive Component/Resource and serde for non-unit types, skip serde for unit structs to allow manual impls
     if let Item::Struct(s) = &mut ast {
         let derive_list = if is_comp {
-            quote! { ::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize }
+            quote! { ::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize, ::core::cmp::PartialEq }
         } else {
-            quote! { ::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize }
+            quote! { ::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize, ::core::cmp::PartialEq }
         };
         s.attrs.push(syn::parse_quote!(#[derive(#derive_list)]));
 
@@ -45,9 +45,9 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     } else if let Item::Enum(e) = &mut ast {
         // enums always derive serde
         let derive_list = if is_comp {
-            quote! { ::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize }
+            quote! { ::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize, ::core::cmp::PartialEq }
         } else {
-            quote! { ::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize }
+            quote! { ::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize, ::core::cmp::PartialEq }
         };
         e.attrs.push(syn::parse_quote!(#[derive(#derive_list)]));
     }
@@ -114,13 +114,43 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
 
     // Implement the Persist trait, providing the name() method
-    let impl_persist = quote! {
-        impl #crate_path::Persist for #name {
-            fn name() -> &'static str {
-                // The name needs to be stable and unique. Using the type_name is a good default.
-                // We replace `::` with `-` to be safe for collection names.
-                static NAME: &str = stringify!(#name);
-                NAME
+    let impl_persist = if is_comp {
+        quote! {
+            impl #crate_path::Persist for #name {
+                fn name() -> &'static str {
+                    // The name needs to be stable and unique. Using the type_name is a good default.
+                    // We replace `::` with `-` to be safe for collection names.
+                    static NAME: &str = stringify!(#name);
+                    NAME
+                }
+
+                fn insert_bypassing_change_detection(world: &mut ::bevy::prelude::World, entity: ::bevy::prelude::Entity, component: Self) {
+                    use ::bevy::prelude::DetectChangesMut;
+                    // The entity is guaranteed to exist by the calling context (`fetch_into`), so we can unwrap.
+                    let mut entity_mut = world.get_entity_mut(entity).unwrap();
+                    if let Some(mut c) = entity_mut.get_mut::<Self>() {
+                        // If it exists, update it while bypassing change detection.
+                        *c.bypass_change_detection() = component;
+                    } else {
+                        // If it doesn't exist, insert it.
+                        entity_mut.insert(component);
+                    }
+                }
+            }
+        }
+    } else { // is_res
+        quote! {
+            impl #crate_path::Persist for #name {
+                fn name() -> &'static str {
+                    // The name needs to be stable and unique. Using the type_name is a good default.
+                    // We replace `::` with `-` to be safe for collection names.
+                    static NAME: &str = stringify!(#name);
+                    NAME
+                }
+
+                fn insert_bypassing_change_detection(_world: &mut ::bevy::prelude::World, _entity: ::bevy::prelude::Entity, _component: Self) {
+                    unimplemented!("`insert_bypassing_change_detection` is not applicable to Resources.");
+                }
             }
         }
     };

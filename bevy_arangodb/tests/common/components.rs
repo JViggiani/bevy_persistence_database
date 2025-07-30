@@ -1,12 +1,13 @@
 use bevy::reflect::Reflect;
 
 // Example component which derives additional traits - not required for the tests, but shows how to use the derive macro.
-#[derive(Debug, Reflect)]
+#[derive(Clone, Debug, Reflect)]
 #[bevy_arangodb::persist(component)]
 pub struct Health {
     pub value: i32,
 }
 
+#[derive(Clone)]
 #[bevy_arangodb::persist(component)]
 pub struct Position {
     pub x: f32,

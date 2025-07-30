@@ -8,9 +8,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
+use crate::db::connection::DocumentKey;
+use crate::resources::persistence_session::EntityMetadata;
 use crate::Collection;
 use crate::dsl::{Expression, translate_expression};
 use bevy::prelude::{Component, World};
+use tracing::trace;
 
 /// AQL query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
@@ -93,7 +96,7 @@ impl PersistenceQuery {
     }
 
     /// Run the AQL, fetch matching keys, and return them.
-    pub async fn fetch_ids(&self) -> Vec<String> {
+    pub async fn fetch_ids(&self) -> Vec<DocumentKey> {
         let (aql, bind_vars) = self.build_aql();
         let result = self.db.query(aql, bind_vars).await
             .expect("AQL query failed");
@@ -106,32 +109,51 @@ impl PersistenceQuery {
     /// operations, and then re-inserts it.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
-        let session = world.remove_resource::<PersistenceSession>().unwrap();
+        let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
         // 1) run AQL to get matching keys
         let keys = self.fetch_ids().await;
-        let mut result = Vec::new();
+        let mut result_entities = Vec::new();
 
         // 2) map existing guid→entity
-        let mut existing = std::collections::HashMap::new();
-        for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
-            existing.insert(guid.id().to_string(), e);
-        }
+        let mut existing_entities_by_key: HashMap<DocumentKey, bevy::prelude::Entity> = world
+            .query::<(bevy::prelude::Entity, &Guid)>()
+            .iter(world)
+            .map(|(e, guid)| (guid.id().to_string(), e))
+            .collect();
 
-        // 3) spawn or reuse + insert components
+        // Track which entities we fetched
+        let mut fetched_entities = Vec::new();
+
+        // 3) For each key, fetch the full document and deserialize components.
+        //    If an entity with the Guid already exists, update it. Otherwise, spawn a new one.
         for key in keys {
-            let e = if let Some(&e) = existing.get(&key) {
-                e
-            } else {
-                let new_e = world.spawn(Guid::new(key.clone())).id();
-                existing.insert(key.clone(), new_e);
-                new_e
-            };
-            session
-                .fetch_and_insert_components(&*self.db, world, &key, e, &self.component_names)
-                .await
-                .expect("component deserialization failed");
-            result.push(e);
+            if let Some((doc, rev)) = self.db.fetch_document(&key).await.unwrap() {
+                let entity = *existing_entities_by_key.entry(key.clone()).or_insert_with(|| {
+                    // Entity does not exist in the world, spawn a new one.
+                    world.spawn(Guid::new(key.clone())).id()
+                });
+
+                // Insert/update all components for this entity.
+                for &comp_name in &self.component_names {
+                    if let Some(val) = doc.get(comp_name) {
+                        if let Some(deser) = session.component_deserializers.get(comp_name) {
+                            deser(world, entity, val.clone()).expect("component deserialization failed");
+                        }
+                    }
+                }
+
+                // Update metadata for the entity. This is crucial for conflict resolution.
+                trace!(
+                    "Fetched entity {:?} (key: {}), updating metadata with rev: {}",
+                    entity,
+                    key,
+                    rev
+                );
+                session.entity_meta.insert(entity, EntityMetadata { key: key.clone(), rev });
+                fetched_entities.push(entity);
+                result_entities.push(entity);
+            }
         }
 
         // 4) insert resources
@@ -140,9 +162,24 @@ impl PersistenceQuery {
             .await
             .expect("resource deserialization failed");
 
-        // 5) restore and return
+        // 5) Clear our library's dirty flags for fetched entities BEFORE re-inserting session
+        // This ensures the updated metadata is preserved
+        for entity in &fetched_entities {
+            session.dirty_entities.remove(entity);
+            session.despawned_entities.remove(entity);
+            session.component_changes.remove(entity);
+        }
+        
+        // 6) Re-insert the session resource with updated metadata
         world.insert_resource(session);
-        result
+        
+        // 7) Clear Bevy's change trackers LAST.
+        // This "ages" all the `Added` and `Changed` flags from the loading process,
+        // so they won't be picked up by the auto-dirty systems in the next `app.update()`.
+        // This is crucial for allowing a clean "reload-then-modify" workflow for conflict resolution.
+        world.clear_trackers();
+        
+        result_entities
     }
 }
 
@@ -200,17 +237,27 @@ mod tests {
     #[tokio::test]
     async fn fetch_into_loads_new_entities() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db.expect_query()
+        mock_db
+            .expect_query()
             .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
-        mock_db.expect_fetch_component()
-            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Health::name())
-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
-        mock_db.expect_fetch_component()
-            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Position::name())
-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0}))) }));
+        mock_db
+            .expect_fetch_document()
+            .withf(|k| k == "k1" || k == "k2")
+            .returning(|_| {
+                Box::pin(async {
+                    Ok(Some((
+                        json!({
+                            "Health": {"value": 10},
+                            "Position": {"x": 1.0, "y": 2.0}
+                        }),
+                        "rev1".to_string(),
+                    )))
+                })
+            });
         // Due to test pollution from other modules, other resource types might be registered.
         // We must expect `fetch_resource` to be called, and we can just return `None`.
-        mock_db.expect_fetch_resource()
+        mock_db
+            .expect_fetch_resource()
             .returning(|_| Box::pin(async { Ok(None) }));
 
         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
@@ -218,14 +265,11 @@ mod tests {
         // build app + session
         let mut app = App::new();
         app.add_plugins(PersistencePluginCore::new(db.clone()));
-        let mut session = app.world_mut().resource_mut::<PersistenceSession>();
-        session.register_component::<Health>();
-        session.register_component::<Position>();
+        
+        let query = PersistenceQuery::new(db).with::<Health>().with::<Position>();
 
-        let query = PersistenceQuery::new(db)
-            .with::<Health>()
-            .with::<Position>();
-
+        // The #[persist] macro on Health and Position should auto-register them.
+        // We can now call fetch_into directly.
         let loaded = query.fetch_into(app.world_mut()).await;
         assert_eq!(loaded.len(), 2);
     }
@@ -242,7 +286,7 @@ mod tests {
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_query().returning(|_, _| {
-            Box::pin(async { Err(crate::PersistenceError("db error".into())) })
+            Box::pin(async { Err(crate::PersistenceError::Generic("db error".into())) })
         });
         let db = Arc::new(mock_db);
         let query = PersistenceQuery::new(db);

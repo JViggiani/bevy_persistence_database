@@ -7,6 +7,7 @@ edition.workspace = true
 bevy = "0.16.1"
 bevy_arangodb_core = { path = "../bevy_arangodb_core", version = "0.1.0" }
 bevy_arangodb_derive = { path = "../bevy_arangodb_derive", version = "0.1.0" }
+tracing = "0.1.41"
 
 [dev-dependencies]
 bevy = { workspace = true }
@@ -17,4 +18,5 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 testcontainers.workspace = true
 tokio = { workspace = true, features = ["full", "macros", "rt"] }
+tracing = "0.1.41"
 tracing-subscriber = "0.3.19"

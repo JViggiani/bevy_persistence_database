@@ -664,6 +664,7 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -685,6 +686,7 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

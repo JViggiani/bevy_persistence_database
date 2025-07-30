@@ -15,6 +15,7 @@ once_cell.workspace = true
 bevy-tokio-tasks = "0.16.0"
 mockall.workspace = true
 futures-lite = "2.6.0"
+tracing = "0.1.41"
 
 [dev-dependencies]
 once_cell = { workspace = true }

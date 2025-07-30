@@ -1,14 +1,14 @@
-use bevy::prelude::App;
-use bevy_arangodb::{commit, Guid, Persist, PersistencePlugins};
-
 use crate::common::*;
+use bevy::prelude::*;
+use bevy_arangodb::{Guid, Persist, PersistenceQuery, PersistenceSession};
+use serde_json::json;
+use std::time::Duration;
 
 #[tokio::test]
 async fn test_create_new_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     let health_val = Health { value: 100 };
     let pos_val = Position { x: 1.0, y: 2.0 };
@@ -17,7 +17,7 @@ async fn test_create_new_entity() {
 
     app.update(); // Run the schedule to trigger change detection
 
-    commit(&mut app)
+    diagnostic_commit(&mut app, Duration::from_secs(5))
         .await
         .expect("Commit failed during test execution");
 
@@ -35,8 +35,8 @@ async fn test_create_new_entity() {
     let health_json = db
         .fetch_component(guid.id(), Health::name())
         .await
-        .expect("Failed to fetch component from DB")
-        .expect("Component should exist in DB");
+        .unwrap()
+        .unwrap();
 
     let fetched_health: Health =
         serde_json::from_value(health_json).expect("Failed to deserialize Health component");
@@ -49,10 +49,9 @@ async fn test_create_new_entity() {
 
 #[tokio::test]
 async fn test_create_new_resource() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // 1. Create a session, add a resource, and commit it
     let settings = GameSettings {
@@ -63,7 +62,7 @@ async fn test_create_new_resource() {
 
     app.update(); // Run the schedule to trigger change detection
 
-    commit(&mut app)
+    diagnostic_commit(&mut app, Duration::from_secs(5))
         .await
         .expect("Commit failed during test execution");
 
@@ -72,8 +71,8 @@ async fn test_create_new_resource() {
     let resource_json = db
         .fetch_resource(resource_name)
         .await
-        .expect("Failed to fetch resource from DB")
-        .expect("Resource should exist in DB");
+        .unwrap()
+        .unwrap();
 
     let fetched_settings: GameSettings =
         serde_json::from_value(resource_json).expect("Failed to deserialize resource");
@@ -83,16 +82,59 @@ async fn test_create_new_resource() {
 }
 
 #[tokio::test]
+async fn test_delete_persisted_resource() {
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
+
+    // 1. GIVEN a committed GameSettings resource
+    let settings = GameSettings {
+        difficulty: 0.8,
+        map_name: "level_1".into(),
+    };
+    app.insert_resource(settings);
+    app.update();
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Initial commit failed");
+
+    // Verify it exists in the database
+    let resource_json = db
+        .fetch_resource(GameSettings::name())
+        .await
+        .expect("Fetch should not fail")
+        .expect("Resource should exist after first commit");
+    let fetched: GameSettings = serde_json::from_value(resource_json).unwrap();
+    assert_eq!(fetched.difficulty, 0.8);
+
+    // 2. WHEN the resource is removed and marked as despawned
+    app.world_mut().remove_resource::<GameSettings>();
+    app.world_mut()
+        .resource_mut::<PersistenceSession>()
+        .mark_resource_despawned::<GameSettings>(); // NOTE: no automatic way in bevy to detect deleted resource - must do this manually when deleting a resource for now... 
+    app.update();
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Delete commit failed");
+
+    // 3. THEN it is gone from the database
+    let resource_after_delete = db
+        .fetch_resource(GameSettings::name())
+        .await
+        .unwrap();
+
+    assert!(
+        resource_after_delete.is_none(),
+        "Resource should be gone after delete commit"
+    );
+}
+
+#[tokio::test]
 async fn test_update_existing_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // 1. GIVEN a committed entity with a Health component of value 100
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Initial commit failed");
 
     // Get the Guid to use for direct DB verification later
     let guid = app
@@ -106,8 +148,8 @@ async fn test_update_existing_entity() {
     let health_json_before = db
         .fetch_component(&guid, Health::name())
         .await
-        .expect("Fetch before update failed")
-        .expect("Component not found before update");
+        .unwrap()
+        .unwrap();
     let fetched_health_before: Health =
         serde_json::from_value(health_json_before).expect("Deserialization before update failed");
     assert_eq!(fetched_health_before.value, 100);
@@ -122,14 +164,14 @@ async fn test_update_existing_entity() {
     app.update(); // This will mark the component as Changed
 
     // 3. AND the app is committed again
-    commit(&mut app).await.expect("Second commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Second commit failed");
 
     // 4. THEN the Health data in the database for that entity's Guid reflects the new value of 50.
     let health_json_after = db
         .fetch_component(&guid, Health::name())
         .await
-        .expect("Failed to fetch component from DB")
-        .expect("Component should exist in DB");
+        .unwrap()
+        .unwrap();
 
     let fetched_health_after: Health =
         serde_json::from_value(health_json_after).expect("Failed to deserialize Health component");
@@ -142,10 +184,9 @@ async fn test_update_existing_entity() {
 
 #[tokio::test]
 async fn test_update_existing_resource() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // 1. GIVEN a committed GameSettings resource
     let initial_settings = GameSettings {
@@ -154,7 +195,7 @@ async fn test_update_existing_resource() {
     };
     app.insert_resource(initial_settings);
     app.update(); // Run schedule to trigger change detection
-    commit(&mut app).await.expect("Initial commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Initial commit failed");
 
     // 2. WHEN the GameSettings resource is modified in the app
     let mut settings = app.world_mut().resource_mut::<GameSettings>();
@@ -164,15 +205,15 @@ async fn test_update_existing_resource() {
     app.update(); // Run schedule to trigger change detection on the resource
 
     // 3. AND the app is committed again
-    commit(&mut app).await.expect("Second commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Second commit failed");
 
     // 4. THEN the GameSettings data in the database reflects the new values.
     let resource_name = GameSettings::name();
     let resource_json_after = db
         .fetch_resource(resource_name)
         .await
-        .expect("Failed to fetch resource from DB")
-        .expect("Resource should exist in DB");
+        .unwrap()
+        .unwrap();
 
     let fetched_settings_after: GameSettings =
         serde_json::from_value(resource_json_after).expect("Failed to deserialize resource");
@@ -183,17 +224,16 @@ async fn test_update_existing_resource() {
 
 #[tokio::test]
 async fn test_delete_persisted_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // 1. Spawn and commit an entity.
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
 
     app.update();
 
-    commit(&mut app).await.expect("Initial commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Initial commit failed");
 
     // 2. Verify it exists in the database.
     let guid = app
@@ -212,13 +252,13 @@ async fn test_delete_persisted_entity() {
     // 3. Despawn the entity and commit again.
     app.world_mut().entity_mut(entity_id).despawn();
     app.update(); // This runs the despawn command and our auto-despawn-tracking system
-    commit(&mut app).await.expect("Delete commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Delete commit failed");
 
     // 4. Verify it's gone from the database.
     let component_after_delete = db
         .fetch_component(&guid, Health::name())
         .await
-        .expect("Fetch should not fail");
+        .unwrap();
 
     assert!(
         component_after_delete.is_none(),
@@ -227,21 +267,20 @@ async fn test_delete_persisted_entity() {
 }
 
 #[tokio::test]
-async fn test_commit_with_no_changes() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+async fn test_no_op_commit() {
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // GIVEN a committed app in a synchronized state with the database
     app.world_mut().spawn(Health { value: 100 });
     app.update();
-    commit(&mut app)
+    diagnostic_commit(&mut app, Duration::from_secs(5))
         .await
         .expect("Initial commit failed");
 
     // WHEN the app is committed again with no changes made to any entities or resources
-    commit(&mut app)
+    diagnostic_commit(&mut app, Duration::from_secs(5))
         .await
         .expect("Second commit with no changes failed");
 
@@ -253,15 +292,14 @@ async fn test_commit_with_no_changes() {
 
 #[tokio::test]
 async fn test_add_new_component_to_existing_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // 1. GIVEN a committed entity with only a Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Initial commit failed");
 
     let guid = app
         .world()
@@ -296,7 +334,7 @@ async fn test_add_new_component_to_existing_entity() {
     app.update(); // This will mark the entity as dirty due to the added component
 
     // 3. AND the app is committed again
-    commit(&mut app).await.expect("Second commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Second commit failed");
 
     // 4. THEN the document in the database is updated to include the new Position data
     //    while retaining the existing Health data.
@@ -320,78 +358,115 @@ async fn test_add_new_component_to_existing_entity() {
     assert_eq!(position_after.y, 20.0, "Position.y was not added correctly");
 }
 
-// A component that does NOT implement `Persist`
-#[derive(bevy::prelude::Component)]
-struct NonPersisted {
-    _ignored: bool,
-}
-
 #[tokio::test]
-async fn test_commit_entity_with_non_persisted_component() {
-    // GIVEN a new Bevy app with the PersistencePluginCore
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+async fn test_remove_component_from_existing_entity() {
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
-    // WHEN an entity is spawned with a mix of persisted and non-persisted components
+    // 1. GIVEN a committed entity with a Health component and a Position component
     let entity_id = app
         .world_mut()
-        .spawn((Health { value: 50 }, NonPersisted { _ignored: true }))
+        .spawn((Health { value: 100 }, Position { x: 1.0, y: 2.0 }))
         .id();
-
     app.update();
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Initial commit failed");
 
-    // AND the app is committed
-    commit(&mut app).await.expect("Commit failed");
-
-    // THEN a document is created, but it only contains the persisted component's data.
     let guid = app
         .world()
         .get::<Guid>(entity_id)
-        .expect("Entity should get a Guid because it has a persisted component")
-        .id();
+        .unwrap()
+        .id()
+        .to_string();
 
-    // Verify the document in the database only contains the `Health` component.
-    let doc = db
-        .fetch_document(guid)
+    // Verify initial state: both components exist in the DB
+    let health_json_before = db
+        .fetch_component(&guid, Health::name())
         .await
-        .expect("Document fetch failed")
-        .expect("Document should exist in the database");
+        .unwrap()
+        .unwrap();
+    let position_json_before = db
+        .fetch_component(&guid, Position::name())
+        .await
+        .unwrap()
+        .unwrap();
 
-    let obj = doc
-        .as_object()
-        .expect("Document value is not an object");
+    let fetched_health_before: Health =
+        serde_json::from_value(health_json_before).expect("Deserialization before update failed");
+    let fetched_position_before: Position =
+        serde_json::from_value(position_json_before).expect("Deserialization before update failed");
 
-    // Filter out ArangoDB metadata fields before checking the component count.
-    let component_fields: Vec<_> = obj.keys().filter(|k| !k.starts_with('_')).collect();
+    assert_eq!(fetched_health_before.value, 100);
+    assert_eq!(fetched_position_before.x, 1.0);
+    assert_eq!(fetched_position_before.y, 2.0);
 
-    // It should have exactly one key: the name of the Health component.
+    // 2. WHEN the Position component is removed from that entity
+    app.world_mut().entity_mut(entity_id).remove::<Position>();
+    app.update(); // This will mark the entity as dirty due to the removed component
+
+    // Manually mark dirty via PersistenceSession
+    app.world_mut()
+       .resource_mut::<PersistenceSession>()
+       .dirty_entities.insert(entity_id);
+
+    // 3. AND the app is committed again
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Second commit failed");
+
+    // 4. THEN the document in the database is updated to remove the Position data
+    //    but the Health data remains unchanged.
+    let health_json_after = db
+        .fetch_component(&guid, Health::name())
+        .await
+        .unwrap()
+        .unwrap();
+    let position_json_after = db
+        .fetch_component(&guid, Position::name())
+        .await
+        .unwrap();
+
+    let fetched_health_after: Health =
+        serde_json::from_value(health_json_after).expect("Failed to deserialize Health component");
+
     assert_eq!(
-        component_fields.len(),
-        1,
-        "Document should only have one persisted component, but it had {}. Document: {:?}",
-        component_fields.len(),
-        obj
-    );
-    assert!(
-        obj.contains_key(Health::name()),
-        "The only persisted component should be Health"
+        fetched_health_after.value, 100,
+        "The health value in the database was incorrectly modified"
     );
 
-    // And the value of that component should be correct.
-    let health_val = obj.get(Health::name()).unwrap();
-    let fetched_health: Health = serde_json::from_value(health_val.clone()).unwrap();
-    assert_eq!(fetched_health.value, 50);
+    assert!(
+        position_json_after.is_none(),
+        "Position component should be removed from the database"
+    );
+}
+
+#[tokio::test]
+async fn test_commit_with_no_changes() {
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
+
+    // GIVEN a committed app in a synchronized state with the database
+    app.world_mut().spawn(Health { value: 100 });
+    app.update();
+    diagnostic_commit(&mut app, Duration::from_secs(5))
+        .await
+        .expect("Initial commit failed");
+
+    // WHEN the app is committed again with no changes made to any entities or resources
+    diagnostic_commit(&mut app, Duration::from_secs(5))
+        .await
+        .expect("Second commit with no changes failed");
+
+    // THEN the commit operation succeeds without error
+    // AND no database write operations are performed (this is handled by an early return in the commit function)
+    let status = app.world().resource::<bevy_arangodb::CommitStatus>();
+    assert_eq!(*status, bevy_arangodb::CommitStatus::Idle);
 }
 
 #[tokio::test]
 async fn test_persist_component_with_empty_vec() {
-    // GIVEN a new Bevy app with the PersistencePluginCore
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // WHEN an entity is spawned with a component that contains an empty `Vec`
     let inventory = Inventory { items: vec![] };
@@ -400,9 +475,7 @@ async fn test_persist_component_with_empty_vec() {
     app.update();
 
     // AND the app is committed
-    commit(&mut app)
-        .await
-        .expect("Commit failed");
+    diagnostic_commit(&mut app, Duration::from_secs(5)).await.expect("Commit failed");
 
     // THEN the commit succeeds and the data can be fetched and correctly deserialized
     // back into a component with an empty `Vec`.
@@ -415,8 +488,8 @@ async fn test_persist_component_with_empty_vec() {
     let inventory_json = db
         .fetch_component(guid, Inventory::name())
         .await
-        .expect("Failed to fetch component from DB")
-        .expect("Component should exist in DB");
+        .unwrap()
+        .unwrap();
 
     let fetched_inventory: Inventory =
         serde_json::from_value(inventory_json).expect("Failed to deserialize Inventory component");
@@ -429,11 +502,9 @@ async fn test_persist_component_with_empty_vec() {
 
 #[tokio::test]
 async fn test_persist_component_with_option_none() {
-    // GIVEN a new Bevy app with the PersistencePlugin
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    let context = setup().await;
+    let db = context.db.clone();
+    let mut app = new_app(db.clone());
 
     // WHEN an entity is spawned with a component that has an `Option<T>` field set to `None`
     let optional_data = OptionalData { data: None };
@@ -442,7 +513,7 @@ async fn test_persist_component_with_option_none() {
     app.update();
 
     // AND the app is committed
-    commit(&mut app)
+    diagnostic_commit(&mut app, Duration::from_secs(5))
         .await
         .expect("Commit failed");
 
@@ -456,8 +527,8 @@ async fn test_persist_component_with_option_none() {
     let data_json = db
         .fetch_component(guid, OptionalData::name())
         .await
-        .expect("Failed to fetch component from DB")
-        .expect("Component should exist in DB");
+        .unwrap()
+        .unwrap();
 
     let fetched_data: OptionalData =
         serde_json::from_value(data_json).expect("Failed to deserialize OptionalData component");

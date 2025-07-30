@@ -1,0 +1,1425 @@
+diff --git a/bevy_arangodb/tests/common/components.rs b/bevy_arangodb/tests/common/components.rs
+index 19c6c7f..75ea076 100644
+--- a/bevy_arangodb/tests/common/components.rs
++++ b/bevy_arangodb/tests/common/components.rs
+@@ -7,6 +7,7 @@ pub struct Health {
+     pub value: i32,
+ }
+ 
++#[derive(Clone)]
+ #[bevy_arangodb::persist(component)]
+ pub struct Position {
+     pub x: f32,
+diff --git a/bevy_arangodb/tests/common/setup.rs b/bevy_arangodb/tests/common/setup.rs
+index b86a351..f106510 100644
+--- a/bevy_arangodb/tests/common/setup.rs
++++ b/bevy_arangodb/tests/common/setup.rs
+@@ -1,5 +1,6 @@
++use bevy::prelude::App;
+ use bevy_arangodb::{
+-    ArangoDbConnection, DatabaseConnection, 
++    ArangoDbConnection, DatabaseConnection, PersistencePlugins,
+ };
+ use std::process::Command;
+ use std::sync::Arc;
+@@ -98,3 +99,10 @@ pub async fn setup() -> Arc<dyn DatabaseConnection> {
+     db.clear_resources().await.unwrap();
+     db
+ }
++
++/// Helper to create a new app with the persistence plugin.
++pub fn new_app(db: Arc<dyn DatabaseConnection>) -> App {
++    let mut app = App::new();
++    app.add_plugins(PersistencePlugins(db));
++    app
++}
+diff --git a/bevy_arangodb/tests/integration/mod.rs b/bevy_arangodb/tests/integration/mod.rs
+index 407a8e6..4b34bf3 100644
+--- a/bevy_arangodb/tests/integration/mod.rs
++++ b/bevy_arangodb/tests/integration/mod.rs
+@@ -1,5 +1,6 @@
+ // declare tests in here to ensure they are compiled and run in a single binary
+ 
++pub mod concurrency_tests;
+ pub mod persisting_tests;
+ pub mod querying_tests;
+ pub mod plugin_tests;
+diff --git a/bevy_arangodb/tests/integration/persisting_tests.rs b/bevy_arangodb/tests/integration/persisting_tests.rs
+index 80b41c8..58fdd1f 100644
+--- a/bevy_arangodb/tests/integration/persisting_tests.rs
++++ b/bevy_arangodb/tests/integration/persisting_tests.rs
+@@ -1,5 +1,4 @@
+-use bevy::prelude::App;
+-use bevy_arangodb::{commit, Guid, Persist, PersistencePlugins};
++use bevy_arangodb::{commit, Guid, Persist, PersistenceSession};
+ 
+ use crate::common::*;
+ 
+@@ -7,8 +6,7 @@ use crate::common::*;
+ async fn test_create_new_entity() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     let health_val = Health { value: 100 };
+     let pos_val = Position { x: 1.0, y: 2.0 };
+@@ -51,8 +49,7 @@ async fn test_create_new_entity() {
+ async fn test_create_new_resource() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // 1. Create a session, add a resource, and commit it
+     let settings = GameSettings {
+@@ -82,12 +79,55 @@ async fn test_create_new_resource() {
+     assert_eq!(fetched_settings.map_name, "level_1");
+ }
+ 
++#[tokio::test]
++async fn test_delete_persisted_resource() {
++    let _guard = DB_LOCK.lock().await;
++    let db = setup().await;
++    let mut app = new_app(db.clone());
++
++    // 1. GIVEN a committed GameSettings resource
++    let settings = GameSettings {
++        difficulty: 0.8,
++        map_name: "level_1".into(),
++    };
++    app.insert_resource(settings);
++    app.update();
++    commit(&mut app).await.expect("Initial commit failed");
++
++    // Verify it exists in the database
++    let resource_json = db
++        .fetch_resource(GameSettings::name())
++        .await
++        .expect("Fetch should not fail")
++        .expect("Resource should exist after first commit");
++    let fetched: GameSettings = serde_json::from_value(resource_json).unwrap();
++    assert_eq!(fetched.difficulty, 0.8);
++
++    // 2. WHEN the resource is removed and marked as despawned
++    app.world_mut().remove_resource::<GameSettings>();
++    app.world_mut()
++        .resource_mut::<PersistenceSession>()
++        .mark_resource_despawned::<GameSettings>(); // NOTE: no automatic way in bevy to detect deleted resource - must do this manually when deleting a resource for now... 
++    app.update();
++    commit(&mut app).await.expect("Delete commit failed");
++
++    // 3. THEN it is gone from the database
++    let resource_after_delete = db
++        .fetch_resource(GameSettings::name())
++        .await
++        .expect("Fetch after delete should not fail");
++
++    assert!(
++        resource_after_delete.is_none(),
++        "Resource should be gone after delete commit"
++    );
++}
++
+ #[tokio::test]
+ async fn test_update_existing_entity() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // 1. GIVEN a committed entity with a Health component of value 100
+     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
+@@ -144,8 +184,7 @@ async fn test_update_existing_entity() {
+ async fn test_update_existing_resource() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // 1. GIVEN a committed GameSettings resource
+     let initial_settings = GameSettings {
+@@ -185,8 +224,7 @@ async fn test_update_existing_resource() {
+ async fn test_delete_persisted_entity() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // 1. Spawn and commit an entity.
+     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
+@@ -230,8 +268,7 @@ async fn test_delete_persisted_entity() {
+ async fn test_commit_with_no_changes() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN a committed app in a synchronized state with the database
+     app.world_mut().spawn(Health { value: 100 });
+@@ -255,8 +292,7 @@ async fn test_commit_with_no_changes() {
+ async fn test_add_new_component_to_existing_entity() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // 1. GIVEN a committed entity with only a Health component
+     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
+@@ -331,8 +367,7 @@ async fn test_commit_entity_with_non_persisted_component() {
+     // GIVEN a new Bevy app with the PersistencePluginCore
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // WHEN an entity is spawned with a mix of persisted and non-persisted components
+     let entity_id = app
+@@ -353,7 +388,7 @@ async fn test_commit_entity_with_non_persisted_component() {
+         .id();
+ 
+     // Verify the document in the database only contains the `Health` component.
+-    let doc = db
++    let (doc, _rev) = db
+         .fetch_document(guid)
+         .await
+         .expect("Document fetch failed")
+@@ -390,8 +425,7 @@ async fn test_persist_component_with_empty_vec() {
+     // GIVEN a new Bevy app with the PersistencePluginCore
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // WHEN an entity is spawned with a component that contains an empty `Vec`
+     let inventory = Inventory { items: vec![] };
+@@ -432,8 +466,7 @@ async fn test_persist_component_with_option_none() {
+     // GIVEN a new Bevy app with the PersistencePlugin
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // WHEN an entity is spawned with a component that has an `Option<T>` field set to `None`
+     let optional_data = OptionalData { data: None };
+diff --git a/bevy_arangodb/tests/integration/plugin_tests.rs b/bevy_arangodb/tests/integration/plugin_tests.rs
+index 0e505a0..6a69475 100644
+--- a/bevy_arangodb/tests/integration/plugin_tests.rs
++++ b/bevy_arangodb/tests/integration/plugin_tests.rs
+@@ -1,6 +1,6 @@
+-use bevy::prelude::{App, Events};
++use bevy::prelude::Events;
+ use bevy_arangodb::{
+-    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, PersistencePlugins, Persist,
++    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, Persist,
+     TriggerCommit,
+ };
+ use crate::common::*;
+@@ -8,16 +8,16 @@ use std::sync::Arc;
+ 
+ #[tokio::test]
+ async fn test_trigger_commit_clears_event_queue() {
++    let _guard = DB_LOCK.lock().await;
+     let mut db = MockDatabaseConnection::new();
+     // Expect a transaction because sending events makes the world dirty,
+     // which might trigger a commit if there are registered persistable types.
+     // We allow it to be called any number of times.
+     db.expect_execute_transaction()
+-        .returning(|_| Box::pin(async { Ok(vec![]) }));
++        .returning(|_| Box::pin(async { Ok(Default::default()) }));
+ 
+     let db = Arc::new(db);
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db));
++    let mut app = new_app(db);
+ 
+     // GIVEN multiple TriggerCommit events are sent
+     app.world_mut().send_event(TriggerCommit::default());
+@@ -38,8 +38,7 @@ async fn test_trigger_commit_clears_event_queue() {
+ async fn test_event_triggers_commit_and_persists_data() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN an entity is spawned
+     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
+@@ -87,8 +86,7 @@ async fn test_event_triggers_commit_and_persists_data() {
+ async fn test_queued_commit_persists_all_changes() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN an initial entity is created and a commit is triggered
+     let entity_a = app.world_mut().spawn(Health { value: 100 }).id();
+diff --git a/bevy_arangodb/tests/integration/querying_tests.rs b/bevy_arangodb/tests/integration/querying_tests.rs
+index 5d2e44f..f17ebf5 100644
+--- a/bevy_arangodb/tests/integration/querying_tests.rs
++++ b/bevy_arangodb/tests/integration/querying_tests.rs
+@@ -1,6 +1,5 @@
+-use bevy::prelude::App;
+ use bevy_arangodb::{
+-    commit, Guid, Persist, PersistencePlugins, PersistenceQuery, TransactionOperation,
++    commit, Guid, Persist, PersistenceQuery, TransactionOperation,
+ };
+ 
+ use crate::common::*;
+@@ -9,8 +8,7 @@ use crate::common::*;
+ async fn test_load_specific_entities_into_new_session() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app1 = App::new();
+-    app1.add_plugins(PersistencePlugins(db.clone()));
++    let mut app1 = new_app(db.clone());
+ 
+     // 1. Spawn two entities, one with Health+Position, one with only Health.
+     let _entity_to_load = app1
+@@ -29,8 +27,7 @@ async fn test_load_specific_entities_into_new_session() {
+         .expect("Initial commit failed");
+ 
+     // 2. Create a new, clean session to load the data into.
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+ 
+     // 3. Query for entities that have BOTH Health and Position, and Health > 100.
+     let query = PersistenceQuery::new(db.clone())
+@@ -59,8 +56,7 @@ async fn test_load_specific_entities_into_new_session() {
+ async fn test_load_resources_alongside_entities() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app1 = App::new();
+-    app1.add_plugins(PersistencePlugins(db.clone()));
++    let mut app1 = new_app(db.clone());
+ 
+     // GIVEN a database containing a committed GameSettings resource
+     let settings = GameSettings {
+@@ -74,8 +70,7 @@ async fn test_load_resources_alongside_entities() {
+         .expect("Initial commit failed");
+ 
+     // WHEN any query is fetched into a new app
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+     let _ = PersistenceQuery::new(db.clone())
+         .fetch_into(app2.world_mut())
+         .await;
+@@ -92,8 +87,7 @@ async fn test_load_into_world_with_existing_entities() {
+     let db = setup().await;
+ 
+     // GIVEN entity A in DB, created by app1
+-    let mut app1 = App::new();
+-    app1.add_plugins(PersistencePlugins(db.clone()));
++    let mut app1 = new_app(db.clone());
+     let a = app1.world_mut().spawn(Health { value: 100 }).id();
+     app1.update();
+     commit(&mut app1)
+@@ -102,8 +96,7 @@ async fn test_load_into_world_with_existing_entities() {
+     let key_a = app1.world().get::<Guid>(a).unwrap().id().to_string();
+ 
+     // AND a fresh app2 with entity B already committed
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+     let _b = app2.world_mut().spawn(Position { x: 1.0, y: 1.0 }).id();
+     app2.update();
+     commit(&mut app2)
+@@ -134,8 +127,7 @@ async fn test_load_into_world_with_existing_entities() {
+ async fn test_dsl_filter_by_component_presence() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN some entities with/without Creature
+     app
+@@ -148,8 +140,7 @@ async fn test_dsl_filter_by_component_presence() {
+         .expect("Initial commit failed");
+ 
+     // WHEN we query .with::<Creature>()
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+     let loaded = PersistenceQuery::new(db.clone())
+         .with::<Creature>()
+         .fetch_into(app2.world_mut())
+@@ -164,8 +155,7 @@ async fn test_dsl_filter_by_component_presence() {
+ async fn test_dsl_equality_operator() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN Health, Creature, PlayerName entities
+     app.world_mut().spawn(Health { value: 100 });
+@@ -187,8 +177,7 @@ async fn test_dsl_equality_operator() {
+         .await
+         .expect("Initial commit failed");
+ 
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+ 
+     // WHEN filtering Health == 100
+     let h = PersistenceQuery::new(db.clone())
+@@ -216,8 +205,7 @@ async fn test_dsl_equality_operator() {
+ async fn test_dsl_relational_operators() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN Health 99,100,101
+     app.world_mut().spawn(Health { value: 99 });
+@@ -228,8 +216,7 @@ async fn test_dsl_relational_operators() {
+         .await
+         .expect("Initial commit failed");
+ 
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+ 
+     assert_eq!(
+         PersistenceQuery::new(db.clone())
+@@ -269,8 +256,7 @@ async fn test_dsl_relational_operators() {
+ async fn test_dsl_logical_combinations() {
+     let _guard = DB_LOCK.lock().await;
+     let db = setup().await;
+-    let mut app = App::new();
+-    app.add_plugins(PersistencePlugins(db.clone()));
++    let mut app = new_app(db.clone());
+ 
+     // GIVEN entities for AND/OR
+     app
+@@ -290,8 +276,7 @@ async fn test_dsl_logical_combinations() {
+         .await
+         .expect("Initial commit failed");
+ 
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+ 
+     // AND case
+     let and_loaded = PersistenceQuery::new(db.clone())
+@@ -322,11 +307,11 @@ async fn test_load_with_schema_mismatch() {
+         .execute_transaction(vec![TransactionOperation::CreateDocument(bad_health_doc)])
+         .await
+         .expect("Transaction to create bad doc failed")
++        .created
+         .remove(0);
+ 
+     // WHEN loading with .with::<Health>() – this should panic inside fetch_into
+-    let mut app2 = App::new();
+-    app2.add_plugins(PersistencePlugins(db.clone()));
++    let mut app2 = new_app(db.clone());
+     PersistenceQuery::new(db.clone())
+         .with::<Health>()
+         .fetch_into(app2.world_mut())
+diff --git a/bevy_arangodb_core/src/db/arango_connection.rs b/bevy_arangodb_core/src/db/arango_connection.rs
+index cb96cc5..442fa30 100644
+--- a/bevy_arangodb_core/src/db/arango_connection.rs
++++ b/bevy_arangodb_core/src/db/arango_connection.rs
+@@ -3,11 +3,15 @@
+ 
+ use arangors::{
+     client::reqwest::ReqwestClient,
++    document::options::UpdateOptions,
+     transaction::{TransactionCollections, TransactionSettings},
+     AqlQuery, ClientError, Connection, Database,
+ };
+ use crate::db::DatabaseConnection;
+-use crate::db::connection::{PersistenceError, TransactionOperation, Collection};
++use crate::db::connection::{
++    Collection, DocumentId, DocumentKey, DocumentRev, PersistenceError, TransactionOperation,
++    TransactionResult,
++};
+ use futures::future::BoxFuture;
+ use futures::FutureExt;
+ use serde_json::Value;
+@@ -37,11 +41,11 @@ impl ArangoDbConnection {
+     ) -> Result<Self, PersistenceError> {
+         let conn = Connection::establish_jwt(url, user, pass)
+             .await
+-            .map_err(|e| PersistenceError(e.to_string()))?;
++            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+         let db: Database<ReqwestClient> = conn
+             .db(db_name)
+             .await
+-            .map_err(|e| PersistenceError(e.to_string()))?;
++            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+ 
+         // Ensure all required collections exist.
+         let collections_to_ensure = vec![
+@@ -55,10 +59,10 @@ impl ArangoDbConnection {
+                     // If the error is "duplicate name", the collection already exists, which is fine.
+                     if let ClientError::Arango(arango_error) = e {
+                         if arango_error.error_num() != 1207 { // 1207 is "duplicate name"
+-                            return Err(PersistenceError(arango_error.to_string()));
++                            return Err(PersistenceError::Generic(arango_error.to_string()));
+                         }
+                     } else {
+-                        return Err(PersistenceError(e.to_string()));
++                        return Err(PersistenceError::Generic(e.to_string()));
+                     }
+                 }
+             }
+@@ -73,7 +77,7 @@ impl DatabaseConnection for ArangoDbConnection {
+         &self,
+         aql: String,
+         bind_vars: HashMap<String, Value>,
+-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
++    ) -> BoxFuture<'static, Result<Vec<DocumentKey>, PersistenceError>> {
+         let db = self.db.clone();
+         async move {
+             // convert String->Value into &'static str->Value
+@@ -92,7 +96,7 @@ impl DatabaseConnection for ArangoDbConnection {
+             let docs: Vec<Value> = db
+                 .aql_query(query)
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             // extract keys as strings
+             let keys = docs
+                 .into_iter()
+@@ -106,16 +110,19 @@ impl DatabaseConnection for ArangoDbConnection {
+     fn fetch_document(
+         &self,
+         entity_key: &str,
+-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
++    ) -> BoxFuture<'static, Result<Option<(Value, DocumentRev)>, PersistenceError>> {
+         let db = self.db.clone();
+         let key = entity_key.to_string();
+         async move {
+             let col = db
+                 .collection(&Collection::Entities.to_string())
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             match col.document::<Value>(&key).await {
+-                Ok(doc) => Ok(Some(doc.document)),
++                Ok(doc) => {
++                    let rev = doc.header._rev.clone();
++                    Ok(Some((doc.document, rev)))
++                }
+                 Err(e) => {
+                     if let ClientError::Arango(api_err) = &e {
+                         if api_err.error_num() == 1202 {
+@@ -123,7 +130,7 @@ impl DatabaseConnection for ArangoDbConnection {
+                             return Ok(None);
+                         }
+                     }
+-                    Err(PersistenceError(e.to_string()))
++                    Err(PersistenceError::Generic(e.to_string()))
+                 }
+             }
+         }
+@@ -142,7 +149,7 @@ impl DatabaseConnection for ArangoDbConnection {
+             let col = db
+                 .collection(&Collection::Entities.to_string())
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             match col.document::<Value>(&key).await {
+                 Ok(doc) => Ok(doc.document.get(&comp).cloned()),
+                 Err(e) => {
+@@ -152,7 +159,7 @@ impl DatabaseConnection for ArangoDbConnection {
+                             return Ok(None);
+                         }
+                     }
+-                    Err(PersistenceError(e.to_string()))
++                    Err(PersistenceError::Generic(e.to_string()))
+                 }
+             }
+         }
+@@ -169,7 +176,7 @@ impl DatabaseConnection for ArangoDbConnection {
+             let col = db
+                 .collection(&Collection::Resources.to_string())
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             // A document may not exist, so we handle the error.
+             match col.document::<Value>(&res_key).await {
+                 Ok(doc) => Ok(Some(doc.document)),
+@@ -179,7 +186,7 @@ impl DatabaseConnection for ArangoDbConnection {
+                             return Ok(None);
+                         }
+                     }
+-                    Err(PersistenceError(e.to_string()))
++                    Err(PersistenceError::Generic(e.to_string()))
+                 }
+             }
+         }
+@@ -192,10 +199,10 @@ impl DatabaseConnection for ArangoDbConnection {
+             let col = db
+                 .collection(&Collection::Entities.to_string())
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             col.truncate()
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             Ok(())
+         }
+         .boxed()
+@@ -207,10 +214,10 @@ impl DatabaseConnection for ArangoDbConnection {
+             let col = db
+                 .collection(&Collection::Resources.to_string())
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             col.truncate()
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             Ok(())
+         }
+         .boxed()
+@@ -219,7 +226,7 @@ impl DatabaseConnection for ArangoDbConnection {
+     fn execute_transaction(
+         &self,
+         operations: Vec<TransactionOperation>,
+-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
++    ) -> BoxFuture<'static, Result<TransactionResult, PersistenceError>> {
+         let db = self.db.clone();
+         async move {
+             let ent = Collection::Entities.to_string();
+@@ -234,28 +241,84 @@ impl DatabaseConnection for ArangoDbConnection {
+             let trx = db
+                 .begin_transaction(settings)
+                 .await
+-                .map_err(|e| PersistenceError(e.to_string()))?;
+-            let mut new_keys = Vec::new();
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++            let mut created_ids = Vec::new();
++            let mut updated_ids = Vec::new();
+ 
+             for op in operations {
+                 match op {
+                     TransactionOperation::CreateDocument(doc) => {
+-                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
+-                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| PersistenceError(e.to_string()))?;
+-                        let key = meta.header().ok_or_else(|| PersistenceError("Missing header".into()))?._key.clone();
+-                        new_keys.push(key);
++                        let col = trx
++                            .collection(&ent)
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++                        let meta = col
++                            .create_document(doc, Default::default())
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++                        let header = meta
++                            .header()
++                            .ok_or_else(|| PersistenceError::Generic("Missing header".into()))?;
++                        created_ids.push(DocumentId {
++                            key: header._key.clone(),
++                            rev: header._rev.clone(),
++                        });
+                     }
+-                    TransactionOperation::UpdateDocument(key, patch) => {
+-                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
+-                        col.update_document(&key, patch, Default::default()).await.map_err(|e| PersistenceError(e.to_string()))?;
++                    TransactionOperation::UpdateDocument { key, rev, mut patch } => {
++                        let col = trx
++                            .collection(&ent)
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++                        let options = UpdateOptions::builder().ignore_revs(false).build();
++                        // Add the required `_rev` field to the patch for conditional update.
++                        if let Some(obj) = patch.as_object_mut() {
++                            obj.insert("_rev".to_string(), Value::String(rev));
++                        }
++                        match col.update_document::<Value>(&key, patch, options).await {
++                            Ok(meta) => {
++                                let header = meta.header().ok_or_else(|| {
++                                    PersistenceError::Generic("Missing header on update".into())
++                                })?;
++                                updated_ids.push(DocumentId {
++                                    key: header._key.clone(),
++                                    rev: header._rev.clone(),
++                                });
++                            }
++                            Err(e) => {
++                                if let ClientError::Arango(api_err) = &e {
++                                    if api_err.error_num() == 1200 {
++                                        // 1200 is "precondition failed"
++                                        return Err(PersistenceError::Conflict { key });
++                                    }
++                                }
++                                return Err(PersistenceError::Generic(e.to_string()));
++                            }
++                        }
+                     }
+                     TransactionOperation::DeleteDocument(key) => {
+-                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
+-                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| PersistenceError(e.to_string()))?;
++                        let col = trx
++                            .collection(&ent)
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++                        col.remove_document::<Value>(&key, Default::default(), None)
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++                    }
++                    TransactionOperation::DeleteResource(key) => {
++                        let col = trx
++                            .collection(&res)
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++                        col.remove_document::<Value>(&key, Default::default(), None)
++                            .await
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+                     }
+                     TransactionOperation::UpsertResource(key, data) => {
+                         // An AQL UPSERT is the robust way to handle create-or-replace logic.
+-                        let aql = format!("UPSERT {{ _key: @key }} INSERT @doc REPLACE @doc IN {}", res);
++                        let aql = format!(
++                            "UPSERT {{ _key: @key }} INSERT @doc REPLACE @doc IN {}",
++                            res
++                        );
+ 
+                         // The document for INSERT must contain the _key.
+                         let mut doc_with_key = data;
+@@ -282,13 +345,18 @@ impl DatabaseConnection for ArangoDbConnection {
+ 
+                         trx.aql_query::<Value>(query)
+                             .await
+-                            .map_err(|e| PersistenceError(e.to_string()))?;
++                            .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+                     }
+                 }
+             }
+ 
+-            trx.commit().await.map_err(|e| PersistenceError(e.to_string()))?;
+-            Ok(new_keys)
++            trx.commit()
++                .await
++                .map_err(|e| PersistenceError::Generic(e.to_string()))?;
++            Ok(TransactionResult {
++                created: created_ids,
++                updated: updated_ids,
++            })
+         }
+         .boxed()
+     }
+diff --git a/bevy_arangodb_core/src/db/connection.rs b/bevy_arangodb_core/src/db/connection.rs
+index 4c6c71d..70a360a 100644
+--- a/bevy_arangodb_core/src/db/connection.rs
++++ b/bevy_arangodb_core/src/db/connection.rs
+@@ -6,6 +6,25 @@ use mockall::automock;
+ use serde_json::Value;
+ use std::fmt;
+ 
++/// A type alias for a document's key (`_key`).
++pub type DocumentKey = String;
++/// A type alias for a document's revision (`_rev`).
++pub type DocumentRev = String;
++
++/// A struct holding the key and revision of a newly created document.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub struct DocumentId {
++    pub key: DocumentKey,
++    pub rev: DocumentRev,
++}
++
++/// The result of a transaction, separating created and updated document IDs.
++#[derive(Debug, Clone, PartialEq, Eq, Default)]
++pub struct TransactionResult {
++    pub created: Vec<DocumentId>,
++    pub updated: Vec<DocumentId>,
++}
++
+ /// An enum representing the collections used by this library.
+ pub enum Collection {
+     /// The collection where all Bevy entities are stored as documents.
+@@ -24,11 +43,22 @@ impl std::fmt::Display for Collection {
+ }
+ 
+ /// An error type for database operations.
+-#[derive(Debug)]
+-pub struct PersistenceError(pub String);
++#[derive(Debug, PartialEq, Clone)]
++pub enum PersistenceError {
++    /// A generic error message.
++    Generic(String),
++    /// A concurrency conflict, indicating that the document was modified by another process.
++    Conflict { key: String },
++}
++
+ impl fmt::Display for PersistenceError {
+     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+-        write!(f, "Persistence Error: {}", self.0)
++        match self {
++            PersistenceError::Generic(s) => write!(f, "Persistence Error: {}", s),
++            PersistenceError::Conflict { key } => {
++                write!(f, "Concurrency conflict for document key '{}'", key)
++            }
++        }
+     }
+ }
+ impl std::error::Error for PersistenceError {}
+@@ -37,9 +67,14 @@ impl std::error::Error for PersistenceError {}
+ #[derive(serde::Serialize, Debug, Clone)]
+ pub enum TransactionOperation {
+     CreateDocument(Value),
+-    UpdateDocument(String, Value),
+-    DeleteDocument(String),
+-    UpsertResource(String, Value),
++    UpdateDocument {
++        key: DocumentKey,
++        rev: DocumentRev,
++        patch: Value,
++    },
++    DeleteDocument(DocumentKey),
++    DeleteResource(DocumentKey),
++    UpsertResource(DocumentKey, Value),
+ }
+ 
+ /// Abstracts database operations via async returns but remains object-safe.
+@@ -48,18 +83,18 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
+     fn execute_transaction(
+         &self,
+         operations: Vec<TransactionOperation>,
+-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
++    ) -> BoxFuture<'static, Result<TransactionResult, PersistenceError>>;
+ 
+     fn query(
+         &self,
+         aql: String,
+         bind_vars: std::collections::HashMap<String, Value>,
+-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
++    ) -> BoxFuture<'static, Result<Vec<DocumentKey>, PersistenceError>>;
+ 
+     fn fetch_document(
+         &self,
+         entity_key: &str,
+-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>>;
++    ) -> BoxFuture<'static, Result<Option<(Value, DocumentRev)>, PersistenceError>>;
+ 
+     fn fetch_component(
+         &self,
+diff --git a/bevy_arangodb_core/src/db/mod.rs b/bevy_arangodb_core/src/db/mod.rs
+index 5e91263..6bec4a2 100644
+--- a/bevy_arangodb_core/src/db/mod.rs
++++ b/bevy_arangodb_core/src/db/mod.rs
+@@ -1,7 +1,10 @@
+ pub mod connection;
+ mod arango_connection;
+ 
+-pub use connection::{DatabaseConnection, PersistenceError, TransactionOperation, Collection};
++pub use connection::{
++    DatabaseConnection, DocumentId, PersistenceError, TransactionOperation, Collection,
++    TransactionResult,
++};
+ pub use arango_connection::{ArangoDbConnection};
+ 
+ pub use connection::MockDatabaseConnection;
+diff --git a/bevy_arangodb_core/src/lib.rs b/bevy_arangodb_core/src/lib.rs
+index f2d275f..3986f29 100644
+--- a/bevy_arangodb_core/src/lib.rs
++++ b/bevy_arangodb_core/src/lib.rs
+@@ -27,6 +27,8 @@ pub use db::{
+     Collection,
+     PersistenceError,
+     TransactionOperation,
++    DocumentId,
++    TransactionResult,
+ };
+ pub use db::MockDatabaseConnection;
+ pub use plugins::{
+diff --git a/bevy_arangodb_core/src/plugins/persistence_plugin.rs b/bevy_arangodb_core/src/plugins/persistence_plugin.rs
+index ac29bf0..e2d4eab 100644
+--- a/bevy_arangodb_core/src/plugins/persistence_plugin.rs
++++ b/bevy_arangodb_core/src/plugins/persistence_plugin.rs
+@@ -4,8 +4,11 @@
+ //! as a resource and automatically adding systems for change detection.
+ 
+ use crate::registration::COMPONENT_REGISTRY;
+-use crate::resources::persistence_session::_prepare_commit;
+-use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist};
++use crate::resources::persistence_session::{_prepare_commit, EntityMetadata};
++use crate::{
++    db::TransactionResult, DatabaseConnection, DocumentId, Guid, Persist, PersistenceError,
++    PersistenceSession,
++};
+ use bevy::app::PluginGroupBuilder;
+ use bevy::prelude::*;
+ use bevy::tasks::{IoTaskPool, Task};
+@@ -26,9 +29,16 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
+     )
+ });
+ 
++/// The final, processed result of a commit, ready to be applied to the World.
++struct CommitOutcome {
++    created: Vec<(Entity, DocumentId)>,
++    updated: Vec<(Entity, DocumentId)>,
++    deleted: Vec<Entity>,
++}
++
+ /// A component holding the future result of a commit operation.
+ #[derive(Component)]
+-struct CommitTask(Task<Result<(Vec<String>, Vec<Entity>), PersistenceError>>);
++struct CommitTask(Task<Result<CommitOutcome, PersistenceError>>);
+ 
+ /// A `SystemSet` for grouping the core persistence systems into ordered phases.
+ #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+@@ -41,7 +51,11 @@ pub enum PersistenceSystemSet {
+ 
+ /// An event fired when a background commit task is complete.
+ #[derive(Event)]
+-pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<Entity>, pub Option<u64>);
++pub struct CommitCompleted(
++    pub Result<TransactionResult, PersistenceError>,
++    pub Vec<Entity>,
++    pub Option<u64>,
++);
+ 
+ /// A resource used to track which `Persist` types have been registered with an `App`.
+ /// This prevents duplicate systems from being added.
+@@ -117,7 +131,11 @@ fn handle_commit_trigger(world: &mut World) {
+                 if data.operations.is_empty() {
+                     // If there are no operations, we still need to send a completion event
+                     // to unblock any waiting `commit_and_wait` calls.
+-                    world.send_event(CommitCompleted(Ok(vec![]), vec![], correlation_id));
++                    world.send_event(CommitCompleted(
++                        Ok(TransactionResult::default()),
++                        vec![],
++                        correlation_id,
++                    ));
+                     return;
+                 }
+                 data
+@@ -140,15 +158,38 @@ fn handle_commit_trigger(world: &mut World) {
+     let thread_pool = IoTaskPool::get();
+     let db = world.resource::<PersistenceSession>().db.clone();
+     let new_entities = commit_data.new_entities;
++    let updated_entities = commit_data.updated_entities;
++    let deleted_entities = commit_data.deleted_entities;
+     let operations = commit_data.operations;
+ 
+     let task = thread_pool.spawn(async move {
+         // Use `block_on` to run the async database logic on the dedicated Tokio runtime.
+         // This blocks the current thread (from Bevy's pool), but that's okay here.
+         runtime.block_on(async {
++            debug!("Executing transaction for commit...");
+             match db.execute_transaction(operations).await {
+-                Ok(keys) => Ok((keys, new_entities)),
+-                Err(e) => Err(e),
++                Ok(result) => {
++                    debug!("Transaction successful. Processing results.");
++                    // Zip the results back together into a clean structure.
++                    let created = new_entities
++                        .into_iter()
++                        .zip(result.created.into_iter())
++                        .collect();
++                    let updated = updated_entities
++                        .into_iter()
++                        .zip(result.updated.into_iter())
++                        .collect();
++
++                    Ok(CommitOutcome {
++                        created,
++                        updated,
++                        deleted: deleted_entities,
++                    })
++                }
++                Err(e) => {
++                    error!("Transaction failed: {}", e);
++                    Err(e)
++                }
+             }
+         })
+     });
+@@ -177,16 +218,44 @@ fn handle_commit_completed(
+             let event_result;
+ 
+             match result {
+-                Ok((new_keys, new_entities)) => {
++                Ok(outcome) => {
+                     info!(
+-                        "Commit successful for correlation ID {:?}. Assigning {} new keys.",
++                        "Commit successful for correlation ID {:?}. Created: {}, Updated: {}, Deleted: {}.",
+                         trigger_id.0,
+-                        new_keys.len()
++                        outcome.created.len(),
++                        outcome.updated.len(),
++                        outcome.deleted.len()
+                     );
+-                    // Assign new GUIDs to newly created entities
+-                    for (entity, key) in new_entities.iter().zip(new_keys.iter()) {
+-                        commands.entity(*entity).insert(Guid::new(key.clone()));
+-                        session.entity_keys.insert(*entity, key.clone());
++
++                    // Handle newly created entities
++                    for (entity, doc_id) in outcome.created.iter() {
++                        debug!("Assigning new Guid to entity {:?}: key={}, rev={}", entity, doc_id.key, doc_id.rev);
++                        commands.entity(*entity).insert(Guid::new(doc_id.key.clone()));
++                        session.entity_meta.insert(
++                            *entity,
++                            EntityMetadata {
++                                key: doc_id.key.clone(),
++                                rev: doc_id.rev.clone(),
++                            },
++                        );
++                    }
++
++                    // Handle updated entities by updating their revisions in the cache
++                    for (entity, doc_id) in outcome.updated.iter() {
++                        if let Some(meta) = session.entity_meta.get_mut(entity) {
++                            debug!("Updating rev for entity {:?}: key={}, old_rev={}, new_rev={}", entity, doc_id.key, meta.rev, doc_id.rev);
++                            // The key should match, but we update the revision.
++                            assert_eq!(meta.key, doc_id.key);
++                            meta.rev = doc_id.rev.clone();
++                        } else {
++                            warn!("Could not find metadata for updated entity {:?} to update its revision.", entity);
++                        }
++                    }
++
++                    // Handle deleted entities by removing them from the metadata cache
++                    for entity in outcome.deleted.iter() {
++                        debug!("Removing metadata for deleted entity {:?}", entity);
++                        session.entity_meta.remove(entity);
+                     }
+ 
+                     // Only clear the dirty flags if we are not immediately starting another commit.
+@@ -197,7 +266,10 @@ fn handle_commit_completed(
+                         debug!("Commit successful, returning to Idle.");
+                     }
+ 
+-                    event_result = Ok(new_keys);
++                    event_result = Ok(TransactionResult {
++                        created: outcome.created.into_iter().map(|(_, id)| id).collect(),
++                        updated: outcome.updated.into_iter().map(|(_, id)| id).collect(),
++                    });
+                 }
+                 Err(e) => {
+                     let err_msg = e.to_string();
+@@ -205,7 +277,7 @@ fn handle_commit_completed(
+                         "Commit failed for correlation ID {:?}: {}",
+                         trigger_id.0, err_msg
+                     );
+-                    event_result = Err(PersistenceError(err_msg));
++                    event_result = Err(e);
+                 }
+             }
+             // The task is complete, so we can despawn the task entity.
+@@ -217,9 +289,8 @@ fn handle_commit_completed(
+                 // Set status back to Idle and immediately trigger a new commit.
+                 // The `handle_commit_trigger` system will run in the same tick.
+                 *status = CommitStatus::Idle;
+-                trigger_events.write(TriggerCommit::default());
++                trigger_events.write( TriggerCommit { correlation_id: trigger_id.0 } );
+             } else {
+-                // Otherwise, we are done.
+                 *status = CommitStatus::Idle;
+             }
+ 
+@@ -291,7 +362,7 @@ fn commit_event_listener(
+                 info!("Found listener for commit {}. Sending result.", id);
+                 let result = match &event.0 {
+                     Ok(_) => Ok(()),
+-                    Err(e) => Err(PersistenceError(e.to_string())),
++                    Err(e) => Err(e.clone()),
+                 };
+                 let _ = sender.send(result);
+             }
+diff --git a/bevy_arangodb_core/src/query/builder.rs b/bevy_arangodb_core/src/query/builder.rs
+index 3357230..99c43c2 100644
+--- a/bevy_arangodb_core/src/query/builder.rs
++++ b/bevy_arangodb_core/src/query/builder.rs
+@@ -8,6 +8,8 @@ use std::collections::HashMap;
+ use std::sync::Arc;
+ use serde_json::Value;
+ use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
++use crate::db::connection::DocumentKey;
++use crate::resources::persistence_session::EntityMetadata;
+ use crate::Collection;
+ use crate::dsl::{Expression, translate_expression};
+ use bevy::prelude::{Component, World};
+@@ -93,7 +95,7 @@ impl PersistenceQuery {
+     }
+ 
+     /// Run the AQL, fetch matching keys, and return them.
+-    pub async fn fetch_ids(&self) -> Vec<String> {
++    pub async fn fetch_ids(&self) -> Vec<DocumentKey> {
+         let (aql, bind_vars) = self.build_aql();
+         let result = self.db.query(aql, bind_vars).await
+             .expect("AQL query failed");
+@@ -106,7 +108,7 @@ impl PersistenceQuery {
+     /// operations, and then re-inserts it.
+     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
+         // remove the session resource
+-        let session = world.remove_resource::<PersistenceSession>().unwrap();
++        let mut session = world.remove_resource::<PersistenceSession>().unwrap();
+ 
+         // 1) run AQL to get matching keys
+         let keys = self.fetch_ids().await;
+@@ -123,14 +125,25 @@ impl PersistenceQuery {
+             let e = if let Some(&e) = existing.get(&key) {
+                 e
+             } else {
+-                let new_e = world.spawn(Guid::new(key.clone())).id();
++                let new_e = world.spawn_empty().id();
+                 existing.insert(key.clone(), new_e);
+                 new_e
+             };
+-            session
+-                .fetch_and_insert_components(&*self.db, world, &key, e, &self.component_names)
+-                .await
+-                .expect("component deserialization failed");
++
++            if let Some((doc, rev)) = self.db.fetch_document(&key).await.unwrap() {
++                session.entity_meta.insert(e, EntityMetadata { key: key.clone(), rev });
++                if world.get::<Guid>(e).is_none() {
++                    world.entity_mut(e).insert(Guid::new(key.clone()));
++                }
++
++                for &comp_name in &self.component_names {
++                    if let Some(val) = doc.get(comp_name) {
++                        if let Some(deser) = session.component_deserializers.get(comp_name) {
++                            deser(world, e, val.clone()).expect("component deserialization failed");
++                        }
++                    }
++                }
++            }
+             result.push(e);
+         }
+ 
+@@ -200,17 +213,27 @@ mod tests {
+     #[tokio::test]
+     async fn fetch_into_loads_new_entities() {
+         let mut mock_db = MockDatabaseConnection::new();
+-        mock_db.expect_query()
++        mock_db
++            .expect_query()
+             .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
+-        mock_db.expect_fetch_component()
+-            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Health::name())
+-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
+-        mock_db.expect_fetch_component()
+-            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Position::name())
+-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0}))) }));
++        mock_db
++            .expect_fetch_document()
++            .withf(|k| k == "k1" || k == "k2")
++            .returning(|_| {
++                Box::pin(async {
++                    Ok(Some((
++                        json!({
++                            "Health": {"value": 10},
++                            "Position": {"x": 1.0, "y": 2.0}
++                        }),
++                        "rev1".to_string(),
++                    )))
++                })
++            });
+         // Due to test pollution from other modules, other resource types might be registered.
+         // We must expect `fetch_resource` to be called, and we can just return `None`.
+-        mock_db.expect_fetch_resource()
++        mock_db
++            .expect_fetch_resource()
+             .returning(|_| Box::pin(async { Ok(None) }));
+ 
+         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
+@@ -222,9 +245,7 @@ mod tests {
+         session.register_component::<Health>();
+         session.register_component::<Position>();
+ 
+-        let query = PersistenceQuery::new(db)
+-            .with::<Health>()
+-            .with::<Position>();
++        let query = PersistenceQuery::new(db).with::<Health>().with::<Position>();
+ 
+         let loaded = query.fetch_into(app.world_mut()).await;
+         assert_eq!(loaded.len(), 2);
+@@ -242,7 +263,7 @@ mod tests {
+     fn fetch_ids_panics_on_error() {
+         let mut mock_db = MockDatabaseConnection::new();
+         mock_db.expect_query().returning(|_, _| {
+-            Box::pin(async { Err(crate::PersistenceError("db error".into())) })
++            Box::pin(async { Err(crate::PersistenceError::Generic("db error".into())) })
+         });
+         let db = Arc::new(mock_db);
+         let query = PersistenceQuery::new(db);
+diff --git a/bevy_arangodb_core/src/resources/persistence_session.rs b/bevy_arangodb_core/src/resources/persistence_session.rs
+index 4243ba3..abe52c7 100644
+--- a/bevy_arangodb_core/src/resources/persistence_session.rs
++++ b/bevy_arangodb_core/src/resources/persistence_session.rs
+@@ -1,7 +1,9 @@
+ //! Core ECS‐to‐Arango bridge: defines `PersistenceSession`.
+ //! Handles local cache, change tracking, and commit logic (create/update/delete).
+ 
+-use crate::db::connection::{DatabaseConnection, TransactionOperation, PersistenceError};
++use crate::db::connection::{
++    DatabaseConnection, DocumentKey, DocumentRev, PersistenceError, TransactionOperation,
++};
+ use crate::plugins::TriggerCommit;
+ use bevy::prelude::{info, App, Component, Entity, Resource, World};
+ use serde_json::Value;
+@@ -25,23 +27,34 @@ type ComponentDeserializer = Box<dyn Fn(&mut World, Entity, Value) -> Result<(),
+ type ResourceSerializer    = Box<dyn Fn(&World, &PersistenceSession) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
+ type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), PersistenceError> + Send + Sync>;
+ 
++/// Holds the database key and revision for a cached entity.
++#[derive(Clone, Debug)]
++pub(crate) struct EntityMetadata {
++    pub(crate) key: DocumentKey,
++    pub(crate) rev: DocumentRev,
++}
++
+ /// Manages a “unit of work”: local World cache + change tracking + async runtime.
+ #[derive(Resource)]
+ pub struct PersistenceSession {
+     pub db: Arc<dyn DatabaseConnection>,
+     pub(crate) dirty_entities: HashSet<Entity>,
+-    pub despawned_entities: HashSet<Entity>,
+-    pub entity_keys: HashMap<Entity, String>,
+-    pub dirty_resources: HashSet<TypeId>,
++    pub(crate) despawned_entities: HashSet<Entity>,
++    pub(crate) entity_meta: HashMap<Entity, EntityMetadata>,
++    pub(crate) dirty_resources: HashSet<TypeId>,
++    pub(crate) despawned_resources: HashSet<TypeId>,
+     component_serializers: HashMap<TypeId, ComponentSerializer>,
+-    component_deserializers: HashMap<String, ComponentDeserializer>,
++    pub(crate) component_deserializers: HashMap<String, ComponentDeserializer>,
+     resource_serializers: HashMap<TypeId, ResourceSerializer>,
+     resource_deserializers: HashMap<String, ResourceDeserializer>,
++    resource_names: HashMap<TypeId, DocumentKey>,
+ }
+ 
+ pub(crate) struct CommitData {
+     pub(crate) operations: Vec<TransactionOperation>,
+     pub(crate) new_entities: Vec<Entity>,
++    pub(crate) updated_entities: Vec<Entity>,
++    pub(crate) deleted_entities: Vec<Entity>,
+ }
+ 
+ impl PersistenceSession {
+@@ -55,9 +68,10 @@ impl PersistenceSession {
+         self.component_serializers.insert(type_id, Box::new(
+             move |entity, world| -> Result<Option<(String, Value)>, PersistenceError> {
+                 if let Some(c) = world.get::<T>(entity) {
+-                    let v = serde_json::to_value(c).map_err(|_| PersistenceError("Serialization failed".into()))?;
++                    let v = serde_json::to_value(c)
++                        .map_err(|_| PersistenceError::Generic("Serialization failed".into()))?;
+                     if v.is_null() {
+-                        return Err(PersistenceError("Could not serialize".into()));
++                        return Err(PersistenceError::Generic("Could not serialize".into()));
+                     }
+                     Ok(Some((ser_key.to_string(), v)))
+                 } else {
+@@ -69,10 +83,11 @@ impl PersistenceSession {
+         let de_key = T::name();
+         self.component_deserializers.insert(de_key.to_string(), Box::new(
+             |world, entity, json_val| {
+-                let comp: T = serde_json::from_value(json_val).map_err(|e| PersistenceError(e.to_string()))?;
++                let comp: T = serde_json::from_value(json_val)
++                    .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+                 world.entity_mut(entity).insert(comp);
+                 Ok(())
+-            }
++            },
+         ));
+     }
+ 
+@@ -83,6 +98,7 @@ impl PersistenceSession {
+     pub fn register_resource<R: Resource + Persist>(&mut self) {
+         let ser_key = R::name();
+         let type_id = std::any::TypeId::of::<R>();
++        self.resource_names.insert(type_id, ser_key.to_string());
+         // Insert serializer into map keyed by TypeId
+         self.resource_serializers.insert(type_id, Box::new(move |world, session| {
+             // Only serialize if resource marked dirty
+@@ -91,9 +107,10 @@ impl PersistenceSession {
+             }
+             // Fetch and serialize the resource
+             if let Some(r) = world.get_resource::<R>() {
+-                let v = serde_json::to_value(r).map_err(|e| PersistenceError(e.to_string()))?;
++                let v = serde_json::to_value(r)
++                    .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+                 if v.is_null() {
+-                    return Err(PersistenceError("Could not serialize".into()));
++                    return Err(PersistenceError::Generic("Could not serialize".into()));
+                 }
+                 Ok(Some((ser_key.to_string(), v)))
+             } else {
+@@ -104,10 +121,11 @@ impl PersistenceSession {
+         let de_key = R::name();
+         self.resource_deserializers.insert(de_key.to_string(), Box::new(
+             |world, json_val| {
+-                let res: R = serde_json::from_value(json_val).map_err(|e| PersistenceError(e.to_string()))?;
++                let res: R = serde_json::from_value(json_val)
++                    .map_err(|e| PersistenceError::Generic(e.to_string()))?;
+                 world.insert_resource(res);
+                 Ok(())
+-            }
++            },
+         ));
+     }
+ 
+@@ -121,6 +139,14 @@ impl PersistenceSession {
+         self.despawned_entities.insert(entity);
+     }
+ 
++    /// Manually mark a resource as having been removed from the world.
++    ///
++    /// This is necessary because, unlike with components, Bevy does not provide
++    /// a built-in way to automatically detect when a resource has been removed.
++    pub fn mark_resource_despawned<R: Resource + Persist>(&mut self) {
++        self.despawned_resources.insert(TypeId::of::<R>());
++    }
++
+     /// Testing constructor w/ mock DB.
+     #[cfg(test)]
+     pub fn new_mocked(db: Arc<dyn DatabaseConnection>) -> Self {
+@@ -133,7 +159,9 @@ impl PersistenceSession {
+             dirty_entities: HashSet::new(),
+             despawned_entities: HashSet::new(),
+             dirty_resources: HashSet::new(),
+-            entity_keys: HashMap::new(),
++            despawned_resources: HashSet::new(),
++            entity_meta: HashMap::new(),
++            resource_names: HashMap::new(),
+         }
+     }
+ 
+@@ -148,7 +176,9 @@ impl PersistenceSession {
+             dirty_entities: HashSet::new(),
+             despawned_entities: HashSet::new(),
+             dirty_resources: HashSet::new(),
+-            entity_keys: HashMap::new(),
++            despawned_resources: HashSet::new(),
++            entity_meta: HashMap::new(),
++            resource_names: HashMap::new(),
+         }
+     }
+ 
+@@ -193,13 +223,18 @@ pub(crate) fn _prepare_commit(
+     session: &PersistenceSession,
+     world: &World,
+ ) -> Result<CommitData, PersistenceError> {
+-    let mut operations = Vec::new();
++    let mut delete_ops = Vec::new();
++    let mut create_ops = Vec::new();
++    let mut update_ops = Vec::new();
+     let mut new_entities = Vec::new();
++    let mut updated_entities = Vec::new();
++    let mut deleted_entities = Vec::new();
+ 
+     // Deletions
+     for &e in &session.despawned_entities {
+-        if let Some(key) = session.entity_keys.get(&e) {
+-            operations.push(TransactionOperation::DeleteDocument(key.clone()));
++        if let Some(meta) = session.entity_meta.get(&e) {
++            delete_ops.push(TransactionOperation::DeleteDocument(meta.key.clone()));
++            deleted_entities.push(e);
+         }
+     }
+     // Creations & Updates
+@@ -216,16 +251,26 @@ pub(crate) fn _prepare_commit(
+         }
+ 
+         let doc = Value::Object(map);
+-        if let Some(key) = session.entity_keys.get(&e) {
+-            operations.push(TransactionOperation::UpdateDocument(key.clone(), doc));
++        if let Some(meta) = session.entity_meta.get(&e) {
++            // This is an existing entity that we have metadata for, so update it.
++            update_ops.push(TransactionOperation::UpdateDocument {
++                key: meta.key.clone(),
++                rev: meta.rev.clone(),
++                patch: doc,
++            });
++            updated_entities.push(e);
+         } else {
+-            // For new entities, only create a document if there's something to persist.
+-            if !doc.as_object().unwrap().is_empty() {
+-                operations.push(TransactionOperation::CreateDocument(doc));
+-                new_entities.push(e);
+-            }
++            // This is a new entity (no metadata yet), so create it.
++            create_ops.push(TransactionOperation::CreateDocument(doc));
++            new_entities.push(e);
+         }
+     }
++
++    let mut operations = Vec::new();
++    operations.extend(delete_ops);
++    operations.extend(create_ops);
++    operations.extend(update_ops);
++
+     // Resources
+     for &tid in &session.dirty_resources {
+         if let Some(ser) = session.resource_serializers.get(&tid) {
+@@ -234,8 +279,19 @@ pub(crate) fn _prepare_commit(
+             }
+         }
+     }
++    // Resource Deletions
++    for &tid in &session.despawned_resources {
++        if let Some(name) = session.resource_names.get(&tid) {
++            operations.push(TransactionOperation::DeleteResource(name.clone()));
++        }
++    }
+     info!("[_prepare_commit] Prepared {} operations.", operations.len());
+-    Ok(CommitData { operations, new_entities })
++    Ok(CommitData {
++        operations,
++        new_entities,
++        updated_entities,
++        deleted_entities,
++    })
+ }
+ 
+ /// This function provides a clean `await`-able interface for the event-driven
+@@ -256,17 +312,19 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
+         correlation_id: Some(correlation_id),
+     });
+ 
+-    // Loop, calling app.update() and checking the receiver, but yield to the
+-    // executor each time to avoid blocking.
++    // Loop, calling app.update() and checking the receiver.
++    // A small sleep is crucial here to avoid a busy-wait that can starve
++    // the background I/O task, leading to a deadlock.
+     loop {
+         tokio::select! {
+-            biased; // Check rx first, as it's the more likely exit condition.
++            biased;
+             res = &mut rx => {
+                 info!("Received commit result for correlation ID {}", correlation_id);
+-                return res.map_err(|e| PersistenceError(e.to_string()))?;
++                // Ensure any systems reacting to CommitCompleted have run before we return.
++                app.update();
++                return res.map_err(|e| PersistenceError::Generic(e.to_string()))?;
+             },
+-            _ = tokio::task::yield_now() => {
+-                // Yielding allows other tasks to run, then we update the app.
++            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
+                 app.update();
+             }
+         }
+@@ -274,7 +332,7 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
+ }
+ 
+ #[cfg(test)]
+-mod arango_session {
++mod tests {
+     use super::*;
+     use crate::db::connection::MockDatabaseConnection;
+     use crate::persist::Persist;

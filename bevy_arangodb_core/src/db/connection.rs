@@ -6,6 +6,25 @@ use mockall::automock;
 use serde_json::Value;
 use std::fmt;
 
+/// A type alias for a document's key (`_key`).
+pub type DocumentKey = String;
+/// A type alias for a document's revision (`_rev`).
+pub type DocumentRev = String;
+
+/// A struct holding the key and revision of a newly created document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentId {
+    pub key: DocumentKey,
+    pub rev: DocumentRev,
+}
+
+/// The result of a transaction, separating created and updated document IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TransactionResult {
+    pub created: Vec<DocumentId>,
+    pub updated: Vec<DocumentId>,
+}
+
 /// An enum representing the collections used by this library.
 pub enum Collection {
     /// The collection where all Bevy entities are stored as documents.
@@ -24,11 +43,22 @@ impl std::fmt::Display for Collection {
 }
 
 /// An error type for database operations.
-#[derive(Debug)]
-pub struct PersistenceError(pub String);
+#[derive(Debug, PartialEq, Clone)]
+pub enum PersistenceError {
+    /// A generic error message.
+    Generic(String),
+    /// A concurrency conflict, indicating that the document was modified by another process.
+    Conflict { key: String },
+}
+
 impl fmt::Display for PersistenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Persistence Error: {}", self.0)
+        match self {
+            PersistenceError::Generic(s) => write!(f, "Persistence Error: {}", s),
+            PersistenceError::Conflict { key } => {
+                write!(f, "Concurrency conflict for document key '{}'", key)
+            }
+        }
     }
 }
 impl std::error::Error for PersistenceError {}
@@ -37,9 +67,17 @@ impl std::error::Error for PersistenceError {}
 #[derive(serde::Serialize, Debug, Clone)]
 pub enum TransactionOperation {
     CreateDocument(Value),
-    UpdateDocument(String, Value),
-    DeleteDocument(String),
-    UpsertResource(String, Value),
+    UpdateDocument {
+        key: DocumentKey,
+        rev: DocumentRev,
+        patch: std::collections::HashMap<String, Value>,
+    },
+    DeleteDocument {
+        key: DocumentKey,
+        rev: DocumentRev,
+    },
+    DeleteResource(DocumentKey),
+    UpsertResource(DocumentKey, Value),
 }
 
 /// Abstracts database operations via async returns but remains object-safe.
@@ -48,18 +86,18 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<TransactionResult, PersistenceError>>;
 
     fn query(
         &self,
         aql: String,
         bind_vars: std::collections::HashMap<String, Value>,
-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<Vec<DocumentKey>, PersistenceError>>;
 
     fn fetch_document(
         &self,
         entity_key: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<Option<(Value, DocumentRev)>, PersistenceError>>;
 
     fn fetch_component(
         &self,
