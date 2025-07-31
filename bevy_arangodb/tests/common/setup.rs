@@ -25,6 +25,14 @@ fn initialize_logging() {
 /// This function will be executed when the test program exits.
 #[ctor::dtor]
 fn teardown() {
+    if std::env::var("KEEP_CONTAINER_ALIVE").is_ok() {
+        println!("KEEP_CONTAINER_ALIVE is set, not tearing down Docker container.");
+        if let Some(container) = DOCKER_CONTAINER.get() {
+            println!("Container '{}' is still running.", container.id());
+        }
+        return;
+    }
+
     if let Some(container) = DOCKER_CONTAINER.get() {
         let id = container.id();
         
@@ -67,6 +75,11 @@ async fn get_db_connection() -> Arc<dyn DatabaseConnection> {
     let container = GenericImage::new("arangodb", "3.12.5")
         .with_wait_for(WaitFor::message_on_stdout("is ready for business"))
         .with_env_var("ARANGO_ROOT_PASSWORD", "password")
+        .with_cmd([
+            "--query.collection-logger-enabled=true",
+            "--query.collection-logger-probability=100",
+            "--query.collection-logger-include-system-database=true",
+        ])
         .start()
         .await
         .expect("Failed to start ArangoDB container");

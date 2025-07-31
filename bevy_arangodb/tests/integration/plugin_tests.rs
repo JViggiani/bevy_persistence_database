@@ -1,7 +1,7 @@
 use bevy::prelude::{App, Events};
 use bevy_arangodb::{
     CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, PersistencePlugins, Persist,
-    TriggerCommit,
+    TransactionResult, TriggerCommit,
 };
 use crate::common::*;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ async fn test_trigger_commit_clears_event_queue() {
     // which might trigger a commit if there are registered persistable types.
     // We allow it to be called any number of times.
     db.expect_execute_transaction()
-        .returning(|_| Box::pin(async { Ok(vec![]) }));
+        .returning(|_| Box::pin(async { Ok(TransactionResult::default()) }));
 
     let db = Arc::new(db);
     let mut app = App::new();

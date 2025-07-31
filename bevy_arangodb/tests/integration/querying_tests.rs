@@ -322,7 +322,9 @@ async fn test_load_with_schema_mismatch() {
         .execute_transaction(vec![TransactionOperation::CreateDocument(bad_health_doc)])
         .await
         .expect("Transaction to create bad doc failed")
-        .remove(0);
+        .created
+        .remove(0)
+        .0;
 
     // WHEN loading with .with::<Health>() – this should panic inside fetch_into
     let mut app2 = App::new();

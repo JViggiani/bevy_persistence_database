@@ -360,6 +360,7 @@ async fn test_commit_entity_with_non_persisted_component() {
         .expect("Document should exist in the database");
 
     let obj = doc
+        .0
         .as_object()
         .expect("Document value is not an object");
 

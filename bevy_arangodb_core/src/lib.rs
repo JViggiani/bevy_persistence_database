@@ -27,6 +27,7 @@ pub use db::{
     Collection,
     PersistenceError,
     TransactionOperation,
+    TransactionResult,
 };
 pub use db::MockDatabaseConnection;
 pub use plugins::{
@@ -36,3 +37,4 @@ pub use plugins::{
 pub use query::{PersistenceQuery, dsl};
 pub use resources::{PersistenceSession, commit_and_wait as commit};
 pub use persist::Persist;
+pub use serde_json::Value;

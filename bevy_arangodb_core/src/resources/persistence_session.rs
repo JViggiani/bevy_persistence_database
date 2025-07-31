@@ -3,7 +3,7 @@
 
 use crate::db::connection::{DatabaseConnection, TransactionOperation, PersistenceError};
 use crate::plugins::TriggerCommit;
-use bevy::prelude::{info, App, Component, Entity, Resource, World};
+use bevy::prelude::{info, trace, App, Component, Entity, Resource, World};
 use serde_json::Value;
 use std::{
     any::TypeId,
@@ -29,9 +29,11 @@ type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), Persist
 #[derive(Resource)]
 pub struct PersistenceSession {
     pub db: Arc<dyn DatabaseConnection>,
-    pub(crate) dirty_entities: HashSet<Entity>,
+    pub dirty_components: HashMap<Entity, HashSet<TypeId>>,
     pub despawned_entities: HashSet<Entity>,
     pub entity_keys: HashMap<Entity, String>,
+    pub entity_revs: HashMap<Entity, String>,
+    pub entity_ids: HashMap<Entity, String>,
     pub dirty_resources: HashSet<TypeId>,
     component_serializers: HashMap<TypeId, ComponentSerializer>,
     component_deserializers: HashMap<String, ComponentDeserializer>,
@@ -55,9 +57,9 @@ impl PersistenceSession {
         self.component_serializers.insert(type_id, Box::new(
             move |entity, world| -> Result<Option<(String, Value)>, PersistenceError> {
                 if let Some(c) = world.get::<T>(entity) {
-                    let v = serde_json::to_value(c).map_err(|_| PersistenceError("Serialization failed".into()))?;
+                    let v = serde_json::to_value(c).map_err(|_| PersistenceError::Other("Serialization failed".into()))?;
                     if v.is_null() {
-                        return Err(PersistenceError("Could not serialize".into()));
+                        return Err(PersistenceError::Other("Could not serialize".into()));
                     }
                     Ok(Some((ser_key.to_string(), v)))
                 } else {
@@ -69,7 +71,7 @@ impl PersistenceSession {
         let de_key = T::name();
         self.component_deserializers.insert(de_key.to_string(), Box::new(
             |world, entity, json_val| {
-                let comp: T = serde_json::from_value(json_val).map_err(|e| PersistenceError(e.to_string()))?;
+                let comp: T = serde_json::from_value(json_val).map_err(|e| PersistenceError::Other(e.to_string()))?;
                 world.entity_mut(entity).insert(comp);
                 Ok(())
             }
@@ -91,9 +93,9 @@ impl PersistenceSession {
             }
             // Fetch and serialize the resource
             if let Some(r) = world.get_resource::<R>() {
-                let v = serde_json::to_value(r).map_err(|e| PersistenceError(e.to_string()))?;
+                let v = serde_json::to_value(r).map_err(|e| PersistenceError::Other(e.to_string()))?;
                 if v.is_null() {
-                    return Err(PersistenceError("Could not serialize".into()));
+                    return Err(PersistenceError::Other("Could not serialize".into()));
                 }
                 Ok(Some((ser_key.to_string(), v)))
             } else {
@@ -104,7 +106,7 @@ impl PersistenceSession {
         let de_key = R::name();
         self.resource_deserializers.insert(de_key.to_string(), Box::new(
             |world, json_val| {
-                let res: R = serde_json::from_value(json_val).map_err(|e| PersistenceError(e.to_string()))?;
+                let res: R = serde_json::from_value(json_val).map_err(|e| PersistenceError::Other(e.to_string()))?;
                 world.insert_resource(res);
                 Ok(())
             }
@@ -130,10 +132,12 @@ impl PersistenceSession {
             component_deserializers: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
-            dirty_entities: HashSet::new(),
+            dirty_components: HashMap::new(),
             despawned_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
             entity_keys: HashMap::new(),
+            entity_revs: HashMap::new(),
+            entity_ids: HashMap::new(),
         }
     }
 
@@ -145,27 +149,34 @@ impl PersistenceSession {
             component_deserializers: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
-            dirty_entities: HashSet::new(),
+            dirty_components: HashMap::new(),
             despawned_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
             entity_keys: HashMap::new(),
+            entity_revs: HashMap::new(),
+            entity_ids: HashMap::new(),
         }
     }
 
     /// Fetch each named component from `db` for the given document `key` and
     /// run the registered deserializer to insert it into `world` for `entity`.
     pub async fn fetch_and_insert_components(
-        &self,
+        &mut self,
         db: &(dyn DatabaseConnection + 'static),
         world: &mut World,
         key: &str,
         entity: Entity,
         component_names: &[&'static str],
     ) -> Result<(), PersistenceError> {
-        for &comp_name in component_names {
-            if let Some(val) = db.fetch_component(key, comp_name).await? {
-                if let Some(deser) = self.component_deserializers.get(comp_name) {
-                    deser(world, entity, val)?;
+        if let Some((doc, rev, id)) = db.fetch_document(key).await? {
+            trace!(?entity, key, %rev, %id, "Fetched document, updating session _rev and _id");
+            self.entity_revs.insert(entity, rev);
+            self.entity_ids.insert(entity, id);
+            for &comp_name in component_names {
+                if let Some(val) = doc.get(comp_name) {
+                    if let Some(deser) = self.component_deserializers.get(comp_name) {
+                        deser(world, entity, val.clone())?;
+                    }
                 }
             }
         }
@@ -203,11 +214,23 @@ pub(crate) fn _prepare_commit(
         }
     }
     // Creations & Updates
-    for &e in &session.dirty_entities {
+    for (&e, changed_components) in &session.dirty_components {
         let mut map = serde_json::Map::new();
-        for ser in session.component_serializers.values() {
-            if let Some((n, v)) = ser(e, world)? {
-                map.insert(n, v);
+        // For updates, only serialize the components that have actually changed.
+        if session.entity_keys.contains_key(&e) {
+            for type_id in changed_components {
+                if let Some(ser) = session.component_serializers.get(type_id) {
+                    if let Some((n, v)) = ser(e, world)? {
+                        map.insert(n, v);
+                    }
+                }
+            }
+        } else {
+            // For new entities, serialize all components.
+            for ser in session.component_serializers.values() {
+                if let Some((n, v)) = ser(e, world)? {
+                    map.insert(n, v);
+                }
             }
         }
 
@@ -217,7 +240,22 @@ pub(crate) fn _prepare_commit(
 
         let doc = Value::Object(map);
         if let Some(key) = session.entity_keys.get(&e) {
-            operations.push(TransactionOperation::UpdateDocument(key.clone(), doc));
+            // This is an update. We must have a revision and an id.
+            if let (Some(rev), Some(_id)) = (session.entity_revs.get(&e), session.entity_ids.get(&e)) {
+                trace!(entity = ?e, key, rev, "Preparing UpdateDocument operation");
+                operations.push(TransactionOperation::UpdateDocument {
+                    key: key.clone(),
+                    rev: rev.clone(),
+                    patch: doc,
+                });
+            } else {
+                // This case should ideally not be hit if an entity is correctly loaded before update.
+                // Handling it defensively.
+                return Err(PersistenceError::Other(format!(
+                    "Missing revision or id for updated entity with key {}",
+                    key
+                )));
+            }
         } else {
             // For new entities, only create a document if there's something to persist.
             if !doc.as_object().unwrap().is_empty() {
@@ -263,7 +301,7 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
             biased; // Check rx first, as it's the more likely exit condition.
             res = &mut rx => {
                 info!("Received commit result for correlation ID {}", correlation_id);
-                return res.map_err(|e| PersistenceError(e.to_string()))?;
+                return res.map_err(|e| PersistenceError::Other(e.to_string()))?;
             },
             _ = tokio::task::yield_now() => {
                 // Yielding allows other tasks to run, then we update the app.
@@ -299,7 +337,7 @@ mod arango_session {
         setup();
         let mock_db = MockDatabaseConnection::new();
         let session = PersistenceSession::new_mocked(Arc::new(mock_db));
-        assert!(session.dirty_entities.is_empty());
+        assert!(session.dirty_components.is_empty());
         assert!(session.despawned_entities.is_empty());
     }
 

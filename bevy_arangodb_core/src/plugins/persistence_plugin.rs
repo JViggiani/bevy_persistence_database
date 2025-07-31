@@ -5,7 +5,9 @@
 
 use crate::registration::COMPONENT_REGISTRY;
 use crate::resources::persistence_session::_prepare_commit;
-use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist};
+use crate::{
+    DatabaseConnection, Guid, Persist, PersistenceError, PersistenceSession, TransactionResult,
+};
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
 use bevy::tasks::{IoTaskPool, Task};
@@ -28,7 +30,7 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
 
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
-struct CommitTask(Task<Result<(Vec<String>, Vec<Entity>), PersistenceError>>);
+struct CommitTask(Task<Result<(TransactionResult, Vec<Entity>), PersistenceError>>);
 
 /// A `SystemSet` for grouping the core persistence systems into ordered phases.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -41,7 +43,11 @@ pub enum PersistenceSystemSet {
 
 /// An event fired when a background commit task is complete.
 #[derive(Event)]
-pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<Entity>, pub Option<u64>);
+pub struct CommitCompleted(
+    pub Result<Vec<String>, PersistenceError>,
+    pub Vec<Entity>,
+    pub Option<u64>,
+);
 
 /// A resource used to track which `Persist` types have been registered with an `App`.
 /// This prevents duplicate systems from being added.
@@ -49,16 +55,10 @@ pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<En
 pub struct RegisteredPersistTypes(pub HashSet<TypeId>);
 
 /// An event that users fire to trigger a commit.
-#[derive(Event, Clone)]
+#[derive(Event, Clone, Default)]
 pub struct TriggerCommit {
     /// An optional ID to correlate this trigger with a `CommitCompleted` event.
     pub correlation_id: Option<u64>,
-}
-
-impl Default for TriggerCommit {
-    fn default() -> Self {
-        Self { correlation_id: None }
-    }
 }
 
 /// A state machine resource to track the commit lifecycle.
@@ -147,7 +147,7 @@ fn handle_commit_trigger(world: &mut World) {
         // This blocks the current thread (from Bevy's pool), but that's okay here.
         runtime.block_on(async {
             match db.execute_transaction(operations).await {
-                Ok(keys) => Ok((keys, new_entities)),
+                Ok(transaction_result) => Ok((transaction_result, new_entities)),
                 Err(e) => Err(e),
             }
         })
@@ -177,27 +177,47 @@ fn handle_commit_completed(
             let event_result;
 
             match result {
-                Ok((new_keys, new_entities)) => {
+                Ok((transaction_result, new_entities)) => {
                     info!(
                         "Commit successful for correlation ID {:?}. Assigning {} new keys.",
                         trigger_id.0,
-                        new_keys.len()
+                        transaction_result.created.len()
                     );
                     // Assign new GUIDs to newly created entities
-                    for (entity, key) in new_entities.iter().zip(new_keys.iter()) {
+                    for (entity, (key, rev, id)) in
+                        new_entities.iter().zip(transaction_result.created.iter())
+                    {
                         commands.entity(*entity).insert(Guid::new(key.clone()));
                         session.entity_keys.insert(*entity, key.clone());
+                        session.entity_revs.insert(*entity, rev.clone());
+                        session.entity_ids.insert(*entity, id.clone());
+                    }
+
+                    // Create a reverse map from key -> entity for efficient lookup of updated entities
+                    let key_to_entity: HashMap<String, Entity> =
+                        session.entity_keys.iter().map(|(e, k)| (k.clone(), *e)).collect();
+
+                    // Update revisions for entities that were successfully updated
+                    for (key, rev, id) in &transaction_result.updated {
+                        if let Some(entity) = key_to_entity.get(key) {
+                            session.entity_revs.insert(*entity, rev.clone());
+                            session.entity_ids.insert(*entity, id.clone());
+                        }
                     }
 
                     // Only clear the dirty flags if we are not immediately starting another commit.
                     if *status != CommitStatus::InProgressAndDirty {
-                        session.dirty_entities.clear();
+                        session.dirty_components.clear();
                         session.despawned_entities.clear();
                         session.dirty_resources.clear();
                         debug!("Commit successful, returning to Idle.");
                     }
 
-                    event_result = Ok(new_keys);
+                    event_result = Ok(transaction_result
+                        .created
+                        .into_iter()
+                        .map(|(k, _, _)| k)
+                        .collect());
                 }
                 Err(e) => {
                     let err_msg = e.to_string();
@@ -205,7 +225,7 @@ fn handle_commit_completed(
                         "Commit failed for correlation ID {:?}: {}",
                         trigger_id.0, err_msg
                     );
-                    event_result = Err(PersistenceError(err_msg));
+                    event_result = Err(e);
                 }
             }
             // The task is complete, so we can despawn the task entity.
@@ -234,13 +254,14 @@ pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
     mut session: ResMut<PersistenceSession>,
     query: Query<Entity, Or<(Added<T>, Changed<T>)>>,
 ) {
+    let type_id = TypeId::of::<T>();
     for entity in query.iter() {
         debug!(
             "Marking entity {:?} as dirty due to component {}",
             entity,
             std::any::type_name::<T>()
         );
-        session.dirty_entities.insert(entity);
+        session.dirty_components.entry(entity).or_default().insert(type_id);
     }
 }
 
@@ -291,7 +312,7 @@ fn commit_event_listener(
                 info!("Found listener for commit {}. Sending result.", id);
                 let result = match &event.0 {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(PersistenceError(e.to_string())),
+                    Err(e) => Err(e.clone()),
                 };
                 let _ = sender.send(result);
             }

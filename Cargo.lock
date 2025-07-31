@@ -653,6 +653,7 @@ dependencies = [
 name = "bevy_arangodb"
 version = "0.1.0"
 dependencies = [
+ "arangors",
  "bevy 0.13.2",
  "bevy 0.16.1",
  "bevy-tokio-tasks",
@@ -664,6 +665,7 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "tokio",
+ "tracing",
  "tracing-subscriber",
 ]
 
@@ -685,6 +687,7 @@ dependencies = [
  "serde_json",
  "testcontainers",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

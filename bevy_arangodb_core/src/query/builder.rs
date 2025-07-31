@@ -106,7 +106,7 @@ impl PersistenceQuery {
     /// operations, and then re-inserts it.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
-        let session = world.remove_resource::<PersistenceSession>().unwrap();
+        let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
         // 1) run AQL to get matching keys
         let keys = self.fetch_ids().await;
@@ -124,6 +124,7 @@ impl PersistenceQuery {
                 e
             } else {
                 let new_e = world.spawn(Guid::new(key.clone())).id();
+                session.entity_keys.insert(new_e, key.clone());
                 existing.insert(key.clone(), new_e);
                 new_e
             };
@@ -139,6 +140,11 @@ impl PersistenceQuery {
             .fetch_and_insert_resources(&*self.db, world)
             .await
             .expect("resource deserialization failed");
+
+        // After loading data, we must clear Bevy's internal change trackers.
+        // This prevents the loaded data from being detected as "Changed" on the
+        // next `app.update()`, ensuring only true local changes are persisted.
+        world.clear_trackers();
 
         // 5) restore and return
         world.insert_resource(session);

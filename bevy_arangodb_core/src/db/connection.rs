@@ -24,11 +24,18 @@ impl std::fmt::Display for Collection {
 }
 
 /// An error type for database operations.
-#[derive(Debug)]
-pub struct PersistenceError(pub String);
+#[derive(Debug, Clone)]
+pub enum PersistenceError {
+    Conflict { key: String },
+    Other(String),
+}
+
 impl fmt::Display for PersistenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Persistence Error: {}", self.0)
+        match self {
+            PersistenceError::Conflict { key } => write!(f, "Conflict detected for key: {}", key),
+            PersistenceError::Other(s) => write!(f, "Persistence Error: {}", s),
+        }
     }
 }
 impl std::error::Error for PersistenceError {}
@@ -37,9 +44,22 @@ impl std::error::Error for PersistenceError {}
 #[derive(serde::Serialize, Debug, Clone)]
 pub enum TransactionOperation {
     CreateDocument(Value),
-    UpdateDocument(String, Value),
+    UpdateDocument {
+        key: String,
+        rev: String,
+        patch: Value,
+    },
     DeleteDocument(String),
     UpsertResource(String, Value),
+}
+
+/// The result of a successful transaction execution.
+#[derive(Debug, Default)]
+pub struct TransactionResult {
+    /// A list of `(_key, _rev, _id)` tuples for newly created documents.
+    pub created: Vec<(String, String, String)>,
+    /// A list of `(_key, _rev, _id)` tuples for updated documents.
+    pub updated: Vec<(String, String, String)>,
 }
 
 /// Abstracts database operations via async returns but remains object-safe.
@@ -48,7 +68,7 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<TransactionResult, PersistenceError>>;
 
     fn query(
         &self,
@@ -59,7 +79,7 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn fetch_document(
         &self,
         entity_key: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<Option<(Value, String, String)>, PersistenceError>>;
 
     fn fetch_component(
         &self,

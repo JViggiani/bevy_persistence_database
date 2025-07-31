@@ -7,16 +7,17 @@ use arangors::{
     AqlQuery, ClientError, Connection, Database,
 };
 use crate::db::DatabaseConnection;
-use crate::db::connection::{PersistenceError, TransactionOperation, Collection};
+use crate::db::connection::{PersistenceError, TransactionOperation, Collection, TransactionResult};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
+use tracing::trace;
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
-    db: Database<ReqwestClient>,
+    pub db: Database<ReqwestClient>,
 }
 
 impl fmt::Debug for ArangoDbConnection {
@@ -37,11 +38,11 @@ impl ArangoDbConnection {
     ) -> Result<Self, PersistenceError> {
         let conn = Connection::establish_jwt(url, user, pass)
             .await
-            .map_err(|e| PersistenceError(e.to_string()))?;
+            .map_err(|e| PersistenceError::Other(e.to_string()))?;
         let db: Database<ReqwestClient> = conn
             .db(db_name)
             .await
-            .map_err(|e| PersistenceError(e.to_string()))?;
+            .map_err(|e| PersistenceError::Other(e.to_string()))?;
 
         // Ensure all required collections exist.
         let collections_to_ensure = vec![
@@ -55,10 +56,10 @@ impl ArangoDbConnection {
                     // If the error is "duplicate name", the collection already exists, which is fine.
                     if let ClientError::Arango(arango_error) = e {
                         if arango_error.error_num() != 1207 { // 1207 is "duplicate name"
-                            return Err(PersistenceError(arango_error.to_string()));
+                            return Err(PersistenceError::Other(arango_error.to_string()));
                         }
                     } else {
-                        return Err(PersistenceError(e.to_string()));
+                        return Err(PersistenceError::Other(e.to_string()));
                     }
                 }
             }
@@ -92,7 +93,7 @@ impl DatabaseConnection for ArangoDbConnection {
             let docs: Vec<Value> = db
                 .aql_query(query)
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             // extract keys as strings
             let keys = docs
                 .into_iter()
@@ -106,16 +107,20 @@ impl DatabaseConnection for ArangoDbConnection {
     fn fetch_document(
         &self,
         entity_key: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
+    ) -> BoxFuture<'static, Result<Option<(Value, String, String)>, PersistenceError>> {
         let db = self.db.clone();
         let key = entity_key.to_string();
         async move {
             let col = db
                 .collection(&Collection::Entities.to_string())
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             match col.document::<Value>(&key).await {
-                Ok(doc) => Ok(Some(doc.document)),
+                Ok(doc) => {
+                    let rev = doc.header._rev.clone();
+                    let id = doc.header._id.clone();
+                    Ok(Some((doc.document, rev, id)))
+                }
                 Err(e) => {
                     if let ClientError::Arango(api_err) = &e {
                         if api_err.error_num() == 1202 {
@@ -123,7 +128,7 @@ impl DatabaseConnection for ArangoDbConnection {
                             return Ok(None);
                         }
                     }
-                    Err(PersistenceError(e.to_string()))
+                    Err(PersistenceError::Other(e.to_string()))
                 }
             }
         }
@@ -142,7 +147,7 @@ impl DatabaseConnection for ArangoDbConnection {
             let col = db
                 .collection(&Collection::Entities.to_string())
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             match col.document::<Value>(&key).await {
                 Ok(doc) => Ok(doc.document.get(&comp).cloned()),
                 Err(e) => {
@@ -152,7 +157,7 @@ impl DatabaseConnection for ArangoDbConnection {
                             return Ok(None);
                         }
                     }
-                    Err(PersistenceError(e.to_string()))
+                    Err(PersistenceError::Other(e.to_string()))
                 }
             }
         }
@@ -169,7 +174,7 @@ impl DatabaseConnection for ArangoDbConnection {
             let col = db
                 .collection(&Collection::Resources.to_string())
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             // A document may not exist, so we handle the error.
             match col.document::<Value>(&res_key).await {
                 Ok(doc) => Ok(Some(doc.document)),
@@ -179,7 +184,7 @@ impl DatabaseConnection for ArangoDbConnection {
                             return Ok(None);
                         }
                     }
-                    Err(PersistenceError(e.to_string()))
+                    Err(PersistenceError::Other(e.to_string()))
                 }
             }
         }
@@ -192,10 +197,10 @@ impl DatabaseConnection for ArangoDbConnection {
             let col = db
                 .collection(&Collection::Entities.to_string())
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             col.truncate()
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             Ok(())
         }
         .boxed()
@@ -207,10 +212,10 @@ impl DatabaseConnection for ArangoDbConnection {
             let col = db
                 .collection(&Collection::Resources.to_string())
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             col.truncate()
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
             Ok(())
         }
         .boxed()
@@ -219,7 +224,7 @@ impl DatabaseConnection for ArangoDbConnection {
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
+    ) -> BoxFuture<'static, Result<TransactionResult, PersistenceError>> {
         let db = self.db.clone();
         async move {
             let ent = Collection::Entities.to_string();
@@ -234,24 +239,67 @@ impl DatabaseConnection for ArangoDbConnection {
             let trx = db
                 .begin_transaction(settings)
                 .await
-                .map_err(|e| PersistenceError(e.to_string()))?;
-            let mut new_keys = Vec::new();
+                .map_err(|e| PersistenceError::Other(e.to_string()))?;
+            let mut result = TransactionResult::default();
 
             for op in operations {
                 match op {
                     TransactionOperation::CreateDocument(doc) => {
-                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
-                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| PersistenceError(e.to_string()))?;
-                        let key = meta.header().ok_or_else(|| PersistenceError("Missing header".into()))?._key.clone();
-                        new_keys.push(key);
+                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError::Other(e.to_string()))?;
+                        let meta = col.create_document(doc, Default::default()).await.map_err(|e| PersistenceError::Other(e.to_string()))?;
+                        let header = meta.header().ok_or_else(|| PersistenceError::Other("Missing header".into()))?;
+                        result.created.push((header._key.clone(), header._rev.clone(), header._id.clone()));
                     }
-                    TransactionOperation::UpdateDocument(key, patch) => {
-                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
-                        col.update_document(&key, patch, Default::default()).await.map_err(|e| PersistenceError(e.to_string()))?;
+                    TransactionOperation::UpdateDocument { key, rev, patch } => {
+                        // Use `UPDATE` for robust conditional updates. This allows for merging.
+                        let aql = format!(
+                            "UPDATE {{ _key: @key, _rev: @rev }} WITH @patch IN {} OPTIONS {{ ignoreRevs: false, mergeObjects: true }} RETURN {{ _rev: NEW._rev, _id: NEW._id }}",
+                            ent
+                        );
+                        trace!(aql, "Executing conditional update AQL");
+
+                        let mut bind_vars_map = HashMap::new();
+                        bind_vars_map.insert("key".to_string(), Value::String(key.clone()));
+                        bind_vars_map.insert("rev".to_string(), Value::String(rev));
+                        bind_vars_map.insert("patch".to_string(), patch);
+
+                        let bind_refs: HashMap<&'static str, Value> = bind_vars_map
+                            .into_iter()
+                            .map(|(k, v)| (Box::leak(k.into_boxed_str()) as &str, v))
+                            .collect();
+
+                        let query = AqlQuery::builder()
+                            .query(&aql)
+                            .bind_vars(bind_refs)
+                            .build();
+
+                        let query_res: Result<Vec<Value>, ClientError> = trx.aql_query(query).await;
+
+                        match query_res {
+                            Ok(new_meta) => {
+                                if let Some(meta_val) = new_meta.into_iter().next() {
+                                    if let (Some(new_rev), Some(new_id)) = (meta_val.get("_rev").and_then(Value::as_str), meta_val.get("_id").and_then(Value::as_str)) {
+                                        result.updated.push((key, new_rev.to_string(), new_id.to_string()));
+                                    } else {
+                                        return Err(PersistenceError::Other(format!("Update for key {} succeeded but did not return a new revision and id", key)));
+                                    }
+                                } else {
+                                    return Err(PersistenceError::Other(format!("Update for key {} succeeded but did not return a new revision", key)));
+                                }
+                            }
+                            Err(e) => {
+                                if let ClientError::Arango(arango_error) = &e {
+                                    if arango_error.error_num() == 1200 { // Precondition failed
+                                        return Err(PersistenceError::Conflict { key });
+                                    }
+                                }
+                                return Err(PersistenceError::Other(e.to_string()));
+                            }
+                        }
                     }
                     TransactionOperation::DeleteDocument(key) => {
-                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError(e.to_string()))?;
-                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| PersistenceError(e.to_string()))?;
+                        let col = trx.collection(&ent).await.map_err(|e| PersistenceError::Other(e.to_string()))?;
+                        col.remove_document::<Value>(&key, Default::default(), None).await.map_err(|e| PersistenceError::Other(e.to_string()))?;
                     }
                     TransactionOperation::UpsertResource(key, data) => {
                         // An AQL UPSERT is the robust way to handle create-or-replace logic.
@@ -282,13 +330,13 @@ impl DatabaseConnection for ArangoDbConnection {
 
                         trx.aql_query::<Value>(query)
                             .await
-                            .map_err(|e| PersistenceError(e.to_string()))?;
+                            .map_err(|e| PersistenceError::Other(e.to_string()))?;
                     }
                 }
             }
 
-            trx.commit().await.map_err(|e| PersistenceError(e.to_string()))?;
-            Ok(new_keys)
+            trx.commit().await.map_err(|e| PersistenceError::Other(e.to_string()))?;
+            Ok(result)
         }
         .boxed()
     }
