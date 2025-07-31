@@ -2,6 +2,7 @@
 
 use bevy::prelude::Component;
 use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use crate::dsl::Expression;
 
 /// A globally-unique identifier for an entity, used to link the Bevy `Entity`
 /// to its corresponding document in ArangoDB. This is typically the `_key`.
@@ -36,5 +37,13 @@ impl Guid {
     /// Returns the underlying global ID
     pub fn id(&self) -> &str {
         &self.0
+    }
+
+    /// Creates a DSL expression for the document _key field
+    pub fn key_field() -> Expression {
+        Expression::Field { 
+            component_name: "_key", 
+            field_name: "" 
+        }
     }
 }

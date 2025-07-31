@@ -3,3 +3,4 @@
 pub mod persisting_tests;
 pub mod querying_tests;
 pub mod plugin_tests;
+pub mod concurrency_tests;

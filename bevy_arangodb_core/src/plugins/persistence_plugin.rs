@@ -200,12 +200,11 @@ fn handle_commit_completed(
                     event_result = Ok(new_keys);
                 }
                 Err(e) => {
-                    let err_msg = e.to_string();
                     error!(
                         "Commit failed for correlation ID {:?}: {}",
-                        trigger_id.0, err_msg
+                        trigger_id.0, e
                     );
-                    event_result = Err(PersistenceError(err_msg));
+                    event_result = Err(e);
                 }
             }
             // The task is complete, so we can despawn the task entity.
@@ -291,7 +290,7 @@ fn commit_event_listener(
                 info!("Found listener for commit {}. Sending result.", id);
                 let result = match &event.0 {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(PersistenceError(e.to_string())),
+                    Err(e) => Err(e.clone()),
                 };
                 let _ = sender.send(result);
             }

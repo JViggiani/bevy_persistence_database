@@ -106,7 +106,7 @@ impl PersistenceQuery {
     /// operations, and then re-inserts it.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
-        let session = world.remove_resource::<PersistenceSession>().unwrap();
+        let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
         // 1) run AQL to get matching keys
         let keys = self.fetch_ids().await;
@@ -128,7 +128,7 @@ impl PersistenceQuery {
                 new_e
             };
             session
-                .fetch_and_insert_components(&*self.db, world, &key, e, &self.component_names)
+                .fetch_and_insert_document(&*self.db, world, &key, e, &self.component_names)
                 .await
                 .expect("component deserialization failed");
             result.push(e);

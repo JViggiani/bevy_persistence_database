@@ -1,18 +1,17 @@
 # bevy_arangodb
 
-A Bevy plugin that bridges in-memory ECS with ArangoDB persistence.  
-Define persisted components/resources with the `#[persist(...)]` macro, add the `PersistencePlugins`,  
-call `commit(&mut app).await` to save changes, and use `PersistenceQuery` to load data back.
+A Bevy plugin for persisting ECS state to ArangoDB, supporting components, resources, and querying. Built with async Rust and designed for seamless integration into Bevy's ECS architecture.
 
 ## Features
 
-- Declarative persistence via `#[persist(component)]` and `#[persist(resource)]`
-- Automatic dirty‐tracking and unit‐of‐work (`commit`) to batch create/update/delete
-- Self-contained async runtime powered by Tokio, no need to manage it yourself
-- Type-safe query DSL: `.with::<T>()` + `.filter(...)` + `.fetch_into(&mut app)`
-- Reusable mock connection (`MockDatabaseConnection`) for fast unit tests
+- **Component & Resource Persistence**: Automatically persist Bevy components and resources to ArangoDB documents.
+- **Ergonomic API**: Simple derive macros and minimal boilerplate to mark types for persistence.
+- **Type-Safe Querying**: Build complex queries with a type-safe DSL that leverages Rust's type system.
+- **Change Detection**: Leverages Bevy's built-in change detection to efficiently sync only modified data.
+- **Async/Await Support**: Full async support with a convenient `commit` function for easy integration.
+- **Optimistic Locking**: Automatic version management prevents data loss from concurrent modifications.
 
-## Usage
+## Quick Start
 
 1. Derive persisted types:
 
@@ -89,3 +88,41 @@ call `commit(&mut app).await` to save changes, and use `PersistenceQuery` to loa
         println!("Loaded {} entities", entities.len());
     }
     ```
+
+## Optimistic Locking
+
+The library automatically handles versioning to prevent race conditions when multiple processes access the same data. Each entity and resource document contains a `bevy_persistence_version` field that is checked during updates.
+
+When a version conflict is detected, the library returns a `PersistenceError::Conflict`. Your application can implement its own conflict resolution strategy:
+
+```rust
+use bevy_arangodb::{commit, PersistenceError, PersistenceQuery};
+
+// Example: Last Write Wins strategy with retry
+async fn commit_with_retry(app: &mut App, max_retries: u32) -> Result<(), PersistenceError> {
+    for _ in 0..max_retries {
+        match commit(app).await {
+            Ok(()) => return Ok(()),
+            Err(PersistenceError::Conflict { key }) => {
+                // Reload the conflicted entity
+                let query = PersistenceQuery::new(db.clone())
+                    .with::<Health>()
+                    .with::<Position>();
+                query.fetch_into(app.world_mut()).await;
+                
+                // Re-apply your changes here
+                // ...
+                
+                // Try again
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(PersistenceError::General("Max retries exceeded".into()))
+}
+```
+
+The versioning is completely managed by the library - you don't need to worry about it unless you're handling conflicts.
+
+See the `concurrency_tests.rs` file for more examples of merge strategies. 

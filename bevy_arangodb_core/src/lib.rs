@@ -27,6 +27,7 @@ pub use db::{
     Collection,
     PersistenceError,
     TransactionOperation,
+    BEVY_PERSISTENCE_VERSION_FIELD,
 };
 pub use db::MockDatabaseConnection;
 pub use plugins::{
