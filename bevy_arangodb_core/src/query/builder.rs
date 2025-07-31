@@ -202,12 +202,25 @@ mod tests {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_query()
             .returning(|_, _| Box::pin(async { Ok(vec!["k1".into(), "k2".into()]) }));
-        mock_db.expect_fetch_component()
-            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Health::name())
-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"value":10}))) }));
-        mock_db.expect_fetch_component()
-            .withf(|k, comp| (k=="k1"||k=="k2") && comp==Position::name())
-            .returning(|_, _| Box::pin(async { Ok(Some(json!({"x":1.0,"y":2.0}))) }));
+
+        // The function under test, `fetch_into`, calls `fetch_document`, not `fetch_component`.
+        // We need to mock `fetch_document` to return a document containing the components.
+        mock_db.expect_fetch_document()
+            .returning(|key| {
+                let doc = if key == "k1" || key == "k2" {
+                    Some((
+                        json!({
+                            Health::name(): { "value": 10 },
+                            Position::name(): { "x": 1.0, "y": 2.0 }
+                        }),
+                        1u64, // version
+                    ))
+                } else {
+                    None
+                };
+                Box::pin(async { Ok(doc) })
+            });
+
         // Due to test pollution from other modules, other resource types might be registered.
         // We must expect `fetch_resource` to be called, and we can just return `None`.
         mock_db.expect_fetch_resource()
@@ -242,7 +255,7 @@ mod tests {
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_query().returning(|_, _| {
-            Box::pin(async { Err(crate::PersistenceError("db error".into())) })
+            Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
         });
         let db = Arc::new(mock_db);
         let query = PersistenceQuery::new(db);

@@ -14,8 +14,9 @@ use std::{
     },
 };
 use crate::persist::Persist;
-use crate::plugins::persistence_plugin::CommitEventListeners;
+use crate::plugins::persistence_plugin::{CommitEventListeners};
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 /// A unique ID generator for correlating commit requests and responses.
 static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -39,6 +40,7 @@ pub struct PersistenceSession {
     component_deserializers: HashMap<String, ComponentDeserializer>,
     resource_serializers: HashMap<TypeId, ResourceSerializer>,
     resource_deserializers: HashMap<String, ResourceDeserializer>,
+    resource_name_to_type_id: HashMap<String, TypeId>,
 }
 
 pub(crate) struct CommitData {
@@ -111,6 +113,7 @@ impl PersistenceSession {
                 Ok(())
             }
         ));
+        self.resource_name_to_type_id.insert(de_key.to_string(), type_id);
     }
 
     /// Manually mark a resource as needing persistence.
@@ -132,6 +135,7 @@ impl PersistenceSession {
             component_deserializers: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
+            resource_name_to_type_id: HashMap::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
@@ -149,6 +153,7 @@ impl PersistenceSession {
             component_deserializers: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
+            resource_name_to_type_id: HashMap::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
@@ -193,16 +198,9 @@ impl PersistenceSession {
     ) -> Result<(), PersistenceError> {
         for (res_name, deser) in self.resource_deserializers.iter() {
             if let Some((val, version)) = db.fetch_resource(res_name).await? {
-                // Cache the version based on the resource's TypeId
-                // We need to find the TypeId that corresponds to this resource name
-                for (&type_id, serializer_fn) in self.resource_serializers.iter() {
-                    // Check if this serializer produces the same resource name
-                    if let Ok(Some((name, _))) = serializer_fn(world, self) {
-                        if name == *res_name {
-                            self.resource_versions.insert(type_id, version);
-                            break;
-                        }
-                    }
+                // Cache the version based on the resource's TypeId using the map.
+                if let Some(type_id) = self.resource_name_to_type_id.get(res_name) {
+                    self.resource_versions.insert(*type_id, version);
                 }
                 deser(world, val)?;
             }
@@ -334,21 +332,34 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
         correlation_id: Some(correlation_id),
     });
 
-    // Loop, calling app.update() and checking the receiver, but yield to the
-    // executor each time to avoid blocking.
-    loop {
-        tokio::select! {
-            biased; // Check rx first, as it's the more likely exit condition.
-            res = &mut rx => {
-                info!("Received commit result for correlation ID {}", correlation_id);
-                return res.map_err(|e| PersistenceError::new(e.to_string()))?;
-            },
-            _ = tokio::task::yield_now() => {
-                // Yielding allows other tasks to run, then we update the app.
-                app.update();
+    // The timeout is applied to the entire commit-and-wait process.
+    timeout(std::time::Duration::from_secs(15), async {
+        // Loop, calling app.update() and checking the receiver.
+        // Yield to the executor each time to avoid blocking.
+        loop {
+            app.update();
+
+            // Check if the receiver has a value without blocking.
+            match rx.try_recv() {
+                Ok(result) => {
+                    info!("Received commit result for correlation ID {}", correlation_id);
+                    return result;
+                }
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // No result yet, yield and try again on the next loop iteration.
+                    tokio::task::yield_now().await;
+                }
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // The sender was dropped, which indicates an error.
+                    return Err(PersistenceError::new(
+                        "Commit channel closed unexpectedly. The commit listener might have panicked.",
+                    ));
+                }
             }
         }
-    }
+    })
+    .await
+    .map_err(|_| PersistenceError::new("Commit timed out after 15 seconds"))?
 }
 
 #[cfg(test)]

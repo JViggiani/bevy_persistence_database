@@ -36,8 +36,7 @@ async fn test_trigger_commit_clears_event_queue() {
 
 #[tokio::test]
 async fn test_event_triggers_commit_and_persists_data() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -85,8 +84,7 @@ async fn test_event_triggers_commit_and_persists_data() {
 
 #[tokio::test]
 async fn test_queued_commit_persists_all_changes() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 

@@ -1,4 +1,4 @@
-use bevy::prelude::{App, Component};
+use bevy::prelude::App;
 use bevy_arangodb::{
     commit, Guid, PersistenceError, PersistencePlugins, PersistenceQuery, TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD, Persist,
@@ -9,8 +9,7 @@ use crate::common::*;
 
 #[tokio::test]
 async fn test_update_conflict_is_detected() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -65,8 +64,7 @@ async fn test_update_conflict_is_detected() {
 
 #[tokio::test]
 async fn test_delete_conflict_is_detected() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -113,8 +111,7 @@ async fn test_delete_conflict_is_detected() {
 
 #[tokio::test]
 async fn test_conflict_strategy_last_write_wins() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -213,8 +210,7 @@ async fn test_conflict_strategy_last_write_wins() {
 
 #[tokio::test]
 async fn test_conflict_strategy_three_way_merge() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 

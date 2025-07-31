@@ -1,12 +1,11 @@
 use bevy::prelude::App;
-use bevy_arangodb::{commit, Guid, Persist, PersistencePlugins};
+use bevy_arangodb::{commit, Guid, Persist, PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD};
 
 use crate::common::*;
 
 #[tokio::test]
 async fn test_create_new_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -49,8 +48,7 @@ async fn test_create_new_entity() {
 
 #[tokio::test]
 async fn test_create_new_resource() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -69,7 +67,7 @@ async fn test_create_new_resource() {
 
     // 2. Verify the resource was saved correctly by fetching it directly
     let resource_name = GameSettings::name();
-    let resource_json = db
+    let (resource_json, _) = db
         .fetch_resource(resource_name)
         .await
         .expect("Failed to fetch resource from DB")
@@ -84,8 +82,7 @@ async fn test_create_new_resource() {
 
 #[tokio::test]
 async fn test_update_existing_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -142,8 +139,7 @@ async fn test_update_existing_entity() {
 
 #[tokio::test]
 async fn test_update_existing_resource() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -168,7 +164,7 @@ async fn test_update_existing_resource() {
 
     // 4. THEN the GameSettings data in the database reflects the new values.
     let resource_name = GameSettings::name();
-    let resource_json_after = db
+    let (resource_json_after, _) = db
         .fetch_resource(resource_name)
         .await
         .expect("Failed to fetch resource from DB")
@@ -183,8 +179,7 @@ async fn test_update_existing_resource() {
 
 #[tokio::test]
 async fn test_delete_persisted_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -228,8 +223,7 @@ async fn test_delete_persisted_entity() {
 
 #[tokio::test]
 async fn test_commit_with_no_changes() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -253,8 +247,7 @@ async fn test_commit_with_no_changes() {
 
 #[tokio::test]
 async fn test_add_new_component_to_existing_entity() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -329,8 +322,7 @@ struct NonPersisted {
 #[tokio::test]
 async fn test_commit_entity_with_non_persisted_component() {
     // GIVEN a new Bevy app with the PersistencePluginCore
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -353,7 +345,7 @@ async fn test_commit_entity_with_non_persisted_component() {
         .id();
 
     // Verify the document in the database only contains the `Health` component.
-    let doc = db
+    let (doc, _) = db
         .fetch_document(guid)
         .await
         .expect("Document fetch failed")
@@ -363,8 +355,8 @@ async fn test_commit_entity_with_non_persisted_component() {
         .as_object()
         .expect("Document value is not an object");
 
-    // Filter out ArangoDB metadata fields before checking the component count.
-    let component_fields: Vec<_> = obj.keys().filter(|k| !k.starts_with('_')).collect();
+    // Filter out ArangoDB metadata fields and our version field before checking the component count.
+    let component_fields: Vec<_> = obj.keys().filter(|k| !k.starts_with('_') && *k != BEVY_PERSISTENCE_VERSION_FIELD).collect();
 
     // It should have exactly one key: the name of the Health component.
     assert_eq!(
@@ -388,8 +380,7 @@ async fn test_commit_entity_with_non_persisted_component() {
 #[tokio::test]
 async fn test_persist_component_with_empty_vec() {
     // GIVEN a new Bevy app with the PersistencePluginCore
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -430,8 +421,7 @@ async fn test_persist_component_with_empty_vec() {
 #[tokio::test]
 async fn test_persist_component_with_option_none() {
     // GIVEN a new Bevy app with the PersistencePlugin
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -463,5 +453,4 @@ async fn test_persist_component_with_option_none() {
         serde_json::from_value(data_json).expect("Failed to deserialize OptionalData component");
 
     assert!(fetched_data.data.is_none(), "The fetched data should be None");
-
 }

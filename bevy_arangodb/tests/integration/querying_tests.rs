@@ -7,8 +7,7 @@ use crate::common::*;
 
 #[tokio::test]
 async fn test_load_specific_entities_into_new_session() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins(db.clone()));
 
@@ -57,8 +56,7 @@ async fn test_load_specific_entities_into_new_session() {
 
 #[tokio::test]
 async fn test_load_resources_alongside_entities() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins(db.clone()));
 
@@ -88,8 +86,7 @@ async fn test_load_resources_alongside_entities() {
 
 #[tokio::test]
 async fn test_load_into_world_with_existing_entities() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
 
     // GIVEN entity A in DB, created by app1
     let mut app1 = App::new();
@@ -132,8 +129,7 @@ async fn test_load_into_world_with_existing_entities() {
 
 #[tokio::test]
 async fn test_dsl_filter_by_component_presence() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -162,8 +158,7 @@ async fn test_dsl_filter_by_component_presence() {
 
 #[tokio::test]
 async fn test_dsl_equality_operator() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -214,8 +209,7 @@ async fn test_dsl_equality_operator() {
 
 #[tokio::test]
 async fn test_dsl_relational_operators() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -267,8 +261,7 @@ async fn test_dsl_relational_operators() {
 
 #[tokio::test]
 async fn test_dsl_logical_combinations() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -311,8 +304,7 @@ async fn test_dsl_logical_combinations() {
 #[tokio::test]
 #[should_panic(expected = "component deserialization failed")]
 async fn test_load_with_schema_mismatch() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
 
     // GIVEN a bad Health document
     let bad_health_doc = serde_json::json!({

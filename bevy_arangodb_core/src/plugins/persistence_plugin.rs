@@ -187,6 +187,15 @@ fn handle_commit_completed(
                     for (entity, key) in new_entities.iter().zip(new_keys.iter()) {
                         commands.entity(*entity).insert(Guid::new(key.clone()));
                         session.entity_keys.insert(*entity, key.clone());
+                        // Cache the initial version for the new entity.
+                        session.entity_versions.insert(*entity, 1);
+                    }
+
+                    // Update versions for all dirtied resources
+                    let dirty_resources_clone = session.dirty_resources.clone();
+                    for type_id in dirty_resources_clone.iter() {
+                        let current_version = session.resource_versions.entry(*type_id).or_insert(0);
+                        *current_version += 1;
                     }
 
                     // Only clear the dirty flags if we are not immediately starting another commit.
