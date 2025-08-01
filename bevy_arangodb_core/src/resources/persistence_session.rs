@@ -2,7 +2,7 @@
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
 use crate::db::connection::{
-    DatabaseConnection, PersistenceError, TransactionOperation, Version,
+    DatabaseConnection, PersistenceError, TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD, Collection,
 };
 use crate::plugins::TriggerCommit;
@@ -247,17 +247,14 @@ pub(crate) fn _prepare_commit(
     for &e in despawned_entities {
         if let Some(key) = session.entity_keys.get(&e) {
             let version_key = VersionKey::Entity(key.clone());
-            let expected_version = session
+            let expected_current_version = session
                 .version_manager
                 .get_version(&version_key)
                 .ok_or_else(|| PersistenceError::new("Missing version for deletion"))?;
             operations.push(TransactionOperation::DeleteDocument {
                 collection: Collection::Entities,
                 key: key.clone(),
-                version: Version {
-                    expected: expected_version,
-                    new: 0, // Not used for deletes
-                },
+                expected_current_version,
             });
         }
     }
@@ -277,12 +274,12 @@ pub(crate) fn _prepare_commit(
         if let Some(key) = session.entity_keys.get(&e) {
             // Update existing document
             let version_key = VersionKey::Entity(key.clone());
-            let expected_version = session
+            let expected_current_version = session
                 .version_manager
                 .get_version(&version_key)
                 .ok_or_else(|| PersistenceError::new("Missing version for update"))?;
 
-            let new_version = expected_version + 1;
+            let new_version = expected_current_version + 1;
             map.insert(
                 BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                 serde_json::json!(new_version),
@@ -291,10 +288,7 @@ pub(crate) fn _prepare_commit(
             operations.push(TransactionOperation::UpdateDocument {
                 collection: Collection::Entities,
                 key: key.clone(),
-                version: Version {
-                    expected: expected_version,
-                    new: new_version,
-                },
+                expected_current_version,
                 patch: Value::Object(map),
             });
         } else {
@@ -314,9 +308,9 @@ pub(crate) fn _prepare_commit(
         if let Some(ser) = session.resource_serializers.get(&tid) {
             if let Some((n, mut v)) = ser(world, session)? {
                 let version_key = VersionKey::Resource(tid);
-                if let Some(expected_version) = session.version_manager.get_version(&version_key) {
+                if let Some(expected_current_version) = session.version_manager.get_version(&version_key) {
                     // Update existing resource
-                    let new_version = expected_version + 1;
+                    let new_version = expected_current_version + 1;
                     if let Some(obj) = v.as_object_mut() {
                         obj.insert(
                             BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
@@ -326,10 +320,7 @@ pub(crate) fn _prepare_commit(
                     operations.push(TransactionOperation::UpdateDocument {
                         collection: Collection::Resources,
                         key: n,
-                        version: Version {
-                            expected: expected_version,
-                            new: new_version,
-                        },
+                        expected_current_version,
                         patch: v,
                     });
                 } else {

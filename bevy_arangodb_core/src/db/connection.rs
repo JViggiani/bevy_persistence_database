@@ -61,15 +61,6 @@ impl PersistenceError {
     }
 }
 
-/// Represents the version information for an optimistic locking operation.
-#[derive(serde::Serialize, Debug, Clone, Copy)]
-pub struct Version {
-    /// The version we expect the document to have in the database.
-    pub expected: u64,
-    /// The new version to set after a successful update.
-    pub new: u64,
-}
-
 /// Represents one DB operation in our atomic transaction.
 #[derive(serde::Serialize, Debug, Clone)]
 pub enum TransactionOperation {
@@ -80,13 +71,13 @@ pub enum TransactionOperation {
     UpdateDocument {
         collection: Collection,
         key: String,
-        version: Version,
+        expected_current_version: u64,
         patch: Value,
     },
     DeleteDocument {
         collection: Collection,
         key: String,
-        version: Version,
+        expected_current_version: u64,
     },
 }
 

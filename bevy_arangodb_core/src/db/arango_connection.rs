@@ -287,12 +287,12 @@ impl DatabaseConnection for ArangoDbConnection {
                     TransactionOperation::UpdateDocument {
                         collection,
                         key,
-                        version,
+                        expected_current_version,
                         patch,
                     } => {
                         let aql = format!(
                             "LET doc = DOCUMENT('{}', @key) \
-                             FILTER doc != null AND doc.{} == @expected_version \
+                             FILTER doc != null AND doc.{} == @expected_current_version \
                              UPDATE doc WITH @patch IN {} \
                              RETURN OLD",
                             collection, BEVY_PERSISTENCE_VERSION_FIELD, collection
@@ -300,7 +300,7 @@ impl DatabaseConnection for ArangoDbConnection {
 
                         let bind_vars: HashMap<String, Value> = [
                             ("key".to_string(), Value::String(key.clone())),
-                            ("expected_version".to_string(), Value::Number(version.expected.into())),
+                            ("expected_current_version".to_string(), Value::Number(expected_current_version.into())),
                             ("patch".to_string(), patch),
                         ].into_iter().collect();
 
@@ -325,11 +325,11 @@ impl DatabaseConnection for ArangoDbConnection {
                     TransactionOperation::DeleteDocument {
                         collection,
                         key,
-                        version,
+                        expected_current_version,
                     } => {
                         let aql = format!(
                             "LET doc = DOCUMENT('{}', @key) \
-                             FILTER doc != null AND doc.{} == @expected_version \
+                             FILTER doc != null AND doc.{} == @expected_current_version \
                              REMOVE doc IN {} \
                              RETURN OLD",
                             collection, BEVY_PERSISTENCE_VERSION_FIELD, collection
@@ -337,7 +337,7 @@ impl DatabaseConnection for ArangoDbConnection {
 
                         let bind_vars: HashMap<String, Value> = [
                             ("key".to_string(), Value::String(key.clone())),
-                            ("expected_version".to_string(), Value::Number(version.expected.into())),
+                            ("expected_current_version".to_string(), Value::Number(expected_current_version.into())),
                         ].into_iter().collect();
 
                         let query = AqlQuery::builder()

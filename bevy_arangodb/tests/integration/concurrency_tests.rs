@@ -1,6 +1,6 @@
 use bevy::prelude::App;
 use bevy_arangodb::{
-    commit, db::connection::Version, Guid, PersistenceError, PersistencePlugins,
+    commit, Guid, PersistenceError, PersistencePlugins,
     PersistenceQuery, TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
 };
 use serde_json::json;
@@ -41,7 +41,7 @@ async fn test_update_conflict_is_detected() {
     db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
-        version: Version { expected: version, new: version + 1 },
+        expected_current_version: version,
         patch: updated_doc,
     }])
     .await
@@ -92,7 +92,7 @@ async fn test_delete_conflict_is_detected() {
     db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
-        version: Version { expected: version, new: version + 1 },
+        expected_current_version: version,
         patch: updated_doc,
     }])
     .await
@@ -144,7 +144,7 @@ async fn test_conflict_strategy_last_write_wins() {
     db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
-        version: Version { expected: version, new: version + 1 },
+        expected_current_version: version,
         patch: updated_doc,
     }])
     .await
@@ -240,7 +240,7 @@ async fn test_conflict_strategy_three_way_merge() {
     db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
-        version: Version { expected: version, new: version + 1 },
+        expected_current_version: version,
         patch: updated_doc,
     }])
     .await
