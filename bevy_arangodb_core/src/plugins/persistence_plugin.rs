@@ -186,13 +186,13 @@ struct CommitMeta {
 /// A system that polls the running commit task and updates the state machine upon completion.
 fn handle_commit_completed(
     mut commands: Commands,
-    mut query: Query<(Entity, &mut CommitTask, &TriggerID, &CommitMeta)>,
+    mut query: Query<(Entity, &mut CommitTask, &TriggerID, &mut CommitMeta)>,
     mut session: ResMut<PersistenceSession>,
     mut status: ResMut<CommitStatus>,
     mut completed: EventWriter<CommitCompleted>,
     mut triggers: EventWriter<TriggerCommit>,
 ) {
-    for (ent, mut task, trigger_id, meta) in &mut query {
+    for (ent, mut task, trigger_id, mut meta) in &mut query {
         if let Some(result) = future::block_on(future::poll_once(&mut task.0)) {
             let cid = trigger_id.0;
             let event_res = match result {
@@ -232,9 +232,9 @@ fn handle_commit_completed(
                 }
                 Err(err) => {
                     // restore dirty sets on failure
-                    session.dirty_entities.extend(meta.dirty_entities.clone());
-                    session.despawned_entities.extend(meta.despawned_entities.clone());
-                    session.dirty_resources.extend(meta.dirty_resources.clone());
+                    session.dirty_entities.extend(meta.dirty_entities.drain());
+                    session.despawned_entities.extend(meta.despawned_entities.drain());
+                    session.dirty_resources.extend(meta.dirty_resources.drain());
                     Err(err)
                 }
             };
