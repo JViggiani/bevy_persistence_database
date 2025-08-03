@@ -5,5 +5,6 @@ pub use persistence_plugin::{
     CommitStatus,
     PersistencePluginCore,
     PersistencePlugins,
+    PersistencePluginConfig,
     TriggerCommit,
 };

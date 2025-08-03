@@ -21,6 +21,8 @@ use crate::persist::Persist;
 use crate::plugins::persistence_plugin::{CommitEventListeners};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 
 /// A unique ID generator for correlating commit requests and responses.
 static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
@@ -226,123 +228,164 @@ impl PersistenceSession {
         }
         Ok(())
     }
-}
 
-/// Serialize all data. This will fail early if any serialization fails.
-pub(crate) fn _prepare_commit(
-    session: &PersistenceSession,
-    world: &World,
-    dirty_entities: &HashSet<Entity>,
-    despawned_entities: &HashSet<Entity>,
-    dirty_resources: &HashSet<TypeId>,
-) -> Result<CommitData, PersistenceError> {
-    let mut operations = Vec::with_capacity(
-        despawned_entities.len()
-            + dirty_entities.len()
-            + dirty_resources.len(),
-    );
-    let mut new_entities = Vec::new();
+    /// Prepare all operations (deletions, creations, updates of entities and resources)
+    /// using a Rayon pool of `thread_count` threads.
+    pub(crate) fn _prepare_commit(
+        session: &PersistenceSession,
+        world: &World,
+        dirty_entities: &HashSet<Entity>,
+        despawned_entities: &HashSet<Entity>,
+        dirty_resources: &HashSet<TypeId>,
+        thread_count: usize,
+    ) -> Result<CommitData, PersistenceError> {
+        let mut operations = Vec::new();
+        let mut newly_created_entities = Vec::new();
 
-    // Deletions
-    for &e in despawned_entities {
-        if let Some(key) = session.entity_keys.get(&e) {
-            let version_key = VersionKey::Entity(key.clone());
-            let expected_current_version = session
-                .version_manager
-                .get_version(&version_key)
-                .ok_or_else(|| PersistenceError::new("Missing version for deletion"))?;
-            operations.push(TransactionOperation::DeleteDocument {
-                collection: Collection::Entities,
-                key: key.clone(),
-                expected_current_version,
-            });
-        }
-    }
-    // Creations & Updates
-    for &e in dirty_entities {
-        let mut map = serde_json::Map::new();
-        for ser in session.component_serializers.values() {
-            if let Some((n, v)) = ser(e, world)? {
-                map.insert(n, v);
+        // 1) Deletions (order matters less, do sequentially)
+        for &entity in despawned_entities {
+            if let Some(key) = session.entity_keys.get(&entity) {
+                let version_key = VersionKey::Entity(key.clone());
+                let current_version = session
+                    .version_manager
+                    .get_version(&version_key)
+                    .ok_or_else(|| PersistenceError::new("Missing version for deletion"))?;
+                operations.push(TransactionOperation::DeleteDocument {
+                    collection: Collection::Entities,
+                    key: key.clone(),
+                    expected_current_version: current_version,
+                });
             }
         }
 
-        if map.is_empty() {
-            continue; // Nothing to persist for this entity.
-        }
+        // Build a Rayon pool
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()
+            .map_err(|e| PersistenceError::new(format!("ThreadPool error: {}", e)))?;
 
-        if let Some(key) = session.entity_keys.get(&e) {
-            // Update existing document
-            let version_key = VersionKey::Entity(key.clone());
-            let expected_current_version = session
-                .version_manager
-                .get_version(&version_key)
-                .ok_or_else(|| PersistenceError::new("Missing version for update"))?;
-
-            let new_version = expected_current_version + 1;
-            map.insert(
-                BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                serde_json::json!(new_version),
-            );
-
-            operations.push(TransactionOperation::UpdateDocument {
-                collection: Collection::Entities,
-                key: key.clone(),
-                expected_current_version,
-                patch: Value::Object(map),
-            });
-        } else {
-            // Create new document with initial version
-            map.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), serde_json::json!(1u64));
-
-            let doc = Value::Object(map);
-            operations.push(TransactionOperation::CreateDocument {
-                collection: Collection::Entities,
-                data: doc,
-            });
-            new_entities.push(e);
-        }
-    }
-    // Resources
-    for &tid in dirty_resources {
-        if let Some(ser) = session.resource_serializers.get(&tid) {
-            if let Some((n, mut v)) = ser(world, session)? {
-                let version_key = VersionKey::Resource(tid);
-                if let Some(expected_current_version) = session.version_manager.get_version(&version_key) {
-                    // Update existing resource
-                    let new_version = expected_current_version + 1;
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert(
-                            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                            serde_json::json!(new_version),
-                        );
+        // 2) Creations & Updates (entities)
+        // Fix: Handle errors properly in the closure
+        let entity_ops_result: Result<Vec<_>, PersistenceError> = pool.install(|| {
+            dirty_entities
+                .par_iter()
+                .map(|&entity| {
+                    let mut data_map = serde_json::Map::new();
+                    // serialize each component
+                    for serializer in session.component_serializers.values() {
+                        if let Some((field_name, value)) = serializer(entity, world)? {
+                            data_map.insert(field_name, value);
+                        }
                     }
-                    operations.push(TransactionOperation::UpdateDocument {
-                        collection: Collection::Resources,
-                        key: n,
-                        expected_current_version,
-                        patch: v,
-                    });
-                } else {
-                    // Create new resource
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert(
+                    if data_map.is_empty() {
+                        return Ok(None);
+                    }
+                    if let Some(key) = session.entity_keys.get(&entity) {
+                        // update existing
+                        let version_key = VersionKey::Entity(key.clone());
+                        let current_version = session
+                            .version_manager
+                            .get_version(&version_key)
+                            .ok_or_else(|| PersistenceError::new("Missing version for update"))?;
+                        let next_version = current_version + 1;
+                        data_map.insert(
+                            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+                            serde_json::json!(next_version),
+                        );
+                        Ok(Some((
+                            TransactionOperation::UpdateDocument {
+                                collection: Collection::Entities,
+                                key: key.clone(),
+                                expected_current_version: current_version,
+                                patch: Value::Object(data_map),
+                            },
+                            None,
+                        )))
+                    } else {
+                        // create new document
+                        data_map.insert(
                             BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                             serde_json::json!(1u64),
                         );
-                        // Resources use their name as the _key
-                        obj.insert("_key".to_string(), Value::String(n.clone()));
+                        let document = Value::Object(data_map);
+                        Ok(Some((
+                            TransactionOperation::CreateDocument {
+                                collection: Collection::Entities,
+                                data: document,
+                            },
+                            Some(entity),
+                        )))
                     }
-                    operations.push(TransactionOperation::CreateDocument {
-                        collection: Collection::Resources,
-                        data: v,
-                    });
+                })
+                .filter_map(|res| res.transpose())
+                .collect::<Result<Vec<(TransactionOperation, Option<Entity>)>, PersistenceError>>()
+        });
+        
+        let (entity_ops, created): (Vec<TransactionOperation>, Vec<Option<Entity>>) = match entity_ops_result {
+            Ok(ops_and_entities) => ops_and_entities.into_iter().unzip(),
+            Err(e) => return Err(e),
+        };
+        
+        operations.extend(entity_ops);
+        newly_created_entities.extend(created.into_iter().flatten());
+
+        // 3) Resources (in parallel)
+        let resource_ops_result: Result<Vec<_>, PersistenceError> = pool.install(|| {
+            let mut resource_ops = Vec::new();
+            
+            for &resource_type_id in dirty_resources {
+                if let Some(serializer) = session.resource_serializers.get(&resource_type_id) {
+                    match serializer(world, session) {
+                        Ok(Some((name, mut value))) => {
+                            let version_key = VersionKey::Resource(resource_type_id);
+                            if let Some(current_version) = session.version_manager.get_version(&version_key) {
+                                // update existing resource
+                                let next_version = current_version + 1;
+                                if let Some(obj) = value.as_object_mut() {
+                                    obj.insert(
+                                        BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+                                        serde_json::json!(next_version),
+                                    );
+                                }
+                                resource_ops.push(TransactionOperation::UpdateDocument {
+                                    collection: Collection::Resources,
+                                    key: name,
+                                    expected_current_version: current_version,
+                                    patch: value,
+                                });
+                            } else {
+                                // create new resource
+                                if let Some(obj) = value.as_object_mut() {
+                                    obj.insert(
+                                        BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+                                        serde_json::json!(1u64),
+                                    );
+                                    obj.insert("_key".to_string(), Value::String(name.clone()));
+                                }
+                                resource_ops.push(TransactionOperation::CreateDocument {
+                                    collection: Collection::Resources,
+                                    data: value,
+                                });
+                            }
+                        }
+                        Ok(None) => {} // Nothing to do if serializer returns None
+                        Err(e) => return Err(e),
+                    }
                 }
             }
-        }
+            
+            Ok(resource_ops)
+        });
+        
+        let resource_ops = resource_ops_result?;
+        operations.extend(resource_ops);
+
+        info!("[_prepare_commit] Prepared {} operations.", operations.len());
+        Ok(CommitData {
+            operations,
+            new_entities: newly_created_entities,
+        })
     }
-    info!("[_prepare_commit] Prepared {} operations.", operations.len());
-    Ok(CommitData { operations, new_entities })
 }
 
 /// This function provides a clean `await`-able interface for the event-driven

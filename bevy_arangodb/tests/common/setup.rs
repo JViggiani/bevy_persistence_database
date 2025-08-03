@@ -1,3 +1,6 @@
+use bevy::prelude::App;
+use bevy_arangodb::PersistencePluginCore;
+use bevy_arangodb::persistence_plugin::PersistencePluginConfig;
 use bevy_arangodb::{
     ArangoDbConnection, DatabaseConnection, 
 };
@@ -32,4 +35,17 @@ pub async fn setup() -> (Arc<dyn DatabaseConnection>, ContainerAsync<GenericImag
     );
 
     (db, container)
+}
+
+/// Creates a new App with the PersistencePlugin configured with batching enabled.
+pub fn make_app(db: Arc<dyn DatabaseConnection>, batch_size: usize) -> App {
+    let config = PersistencePluginConfig {
+        batching_enabled: true,
+        commit_batch_size: batch_size,
+        thread_count: 4,
+    };
+    let plugin = PersistencePluginCore::new(db.clone()).with_config(config);
+    let mut app = App::new();
+    app.add_plugins(plugin);
+    app
 }
