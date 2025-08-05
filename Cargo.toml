@@ -1,3 +1,8 @@
+[package]
+name = "bevy_arangodb_root"
+version = "0.1.0"
+edition = "2021"
+
 [workspace]
 resolver = "2"
 members = [
@@ -26,3 +31,16 @@ testcontainers = "0.19.0"
 
 [profile.bench]
 debug = true
+
+[dev-dependencies]
+bevy_arangodb     = { path = "bevy_arangodb" }
+bevy              = { workspace = true }
+serde             = { workspace = true, features = ["derive"] }
+serde_json        = { workspace = true }
+testcontainers    = { workspace = true }
+tokio             = { workspace = true, features = ["full", "macros", "rt"] }
+ctor              = { workspace = true }
+futures           = { workspace = true }
+tracing-subscriber = "0.3.19"
+bevy_arangodb_core   = { path = "bevy_arangodb_core" }
+bevy_arangodb_derive = { path = "bevy_arangodb_derive" }
