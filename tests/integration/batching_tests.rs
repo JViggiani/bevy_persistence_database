@@ -2,7 +2,7 @@ use bevy::prelude::*;
 use bevy_arangodb_core::{
     commit, PersistenceQuery, CommitStatus, PersistenceError, Guid,
     persistence_plugin::PersistencePlugins, MockDatabaseConnection, PersistencePluginCore,
-    persistence_plugin::PersistencePluginConfig, Collection, TransactionOperation, Persist,
+    persistence_plugin::PersistencePluginConfig, Collection, TransactionOperation,
 };
 use crate::common::{setup, make_app};
 use crate::common::Health;
@@ -126,7 +126,7 @@ async fn test_concurrent_batch_execution() {
     // Configure the mock to delay each transaction by batch_delay
     db.expect_execute_transaction()
         .times(batch_count)
-        .returning(move |_| {
+        .returning(move |_ops| {
             Box::pin(async move {
                 tokio::time::sleep(batch_delay).await;
                 Ok(vec![])
@@ -143,7 +143,7 @@ async fn test_concurrent_batch_execution() {
         commit_batch_size: batch_size,
         thread_count: 4,
     };
-    let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config);
+    let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config.clone());
     let mut app = App::new();
     app.add_plugins(plugin);
 
@@ -178,4 +178,71 @@ async fn test_concurrent_batch_execution() {
         elapsed < batch_delay * 2,
         "Concurrent execution took too long."
     );
+}
+
+#[tokio::test]
+async fn test_atomic_multi_batch_commit() {
+    // Create a mock database that will succeed for the first N-1 batches but fail on the last one
+    let mut db = MockDatabaseConnection::new();
+    let batch_count = 3;
+    let batch_to_fail = 2; // Zero-indexed, so this is the third batch
+    
+    let mut call_count = 0;
+    db.expect_execute_transaction()
+        .times(batch_count)
+        .returning(move |_| {
+            let current_batch = call_count;
+            call_count += 1;
+            
+            Box::pin(async move {
+                // Sleep to simulate network latency
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                
+                // Make the specified batch fail
+                if current_batch == batch_to_fail {
+                    return Err(PersistenceError::new("Simulated failure in batch"));
+                }
+                
+                // Return empty keys for successful batches
+                Ok(vec![])
+            })
+        });
+    
+    let db_arc = Arc::new(db);
+    
+    // Create an app with a small batch size to ensure multiple batches
+    let config = PersistencePluginConfig {
+        batching_enabled: true,
+        commit_batch_size: 3, // Small batch size to ensure multiple batches
+        thread_count: 2,
+    };
+    
+    // Store the batch size before moving config
+    let batch_size = config.commit_batch_size;
+    
+    let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config);
+    let mut app = App::new();
+    app.add_plugins(plugin);
+    
+    // Spawn enough entities to create multiple batches
+    let entity_count = batch_count * batch_size;
+    for i in 0..entity_count {
+        app.world_mut().spawn(Health { value: i as i32 });
+    }
+    app.update();
+    
+    // Attempt the commit operation
+    let result = commit(&mut app).await;
+    
+    // The entire operation should fail due to the failure in one batch
+    assert!(result.is_err());
+    assert!(matches!(result, Err(PersistenceError::General(msg)) if msg.contains("Simulated failure")));
+    
+    // The status should be reset to Idle after a failure
+    assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
+    
+    // No entity should have a Guid since the commit failed atomically
+    let world_ref = app.world_mut();
+    let guid_count = world_ref.query::<&Guid>().iter(world_ref).count();
+    assert_eq!(guid_count, 0, "No entity should have a Guid after atomic failure");
 }

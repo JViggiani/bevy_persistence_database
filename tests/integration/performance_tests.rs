@@ -1,7 +1,7 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
     commit, persistence_plugin::PersistencePlugins, PersistenceQuery, PersistencePluginCore, 
-    persistence_plugin::PersistencePluginConfig, Persist
+    persistence_plugin::PersistencePluginConfig
 };
 use std::time::Instant;
 use crate::common::*;
