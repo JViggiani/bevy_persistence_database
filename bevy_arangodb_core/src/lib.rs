@@ -5,6 +5,7 @@ pub mod plugins;
 pub mod query;
 pub mod resources;
 pub mod registration;
+pub mod versioning;
 
 mod persist;
 
@@ -27,6 +28,7 @@ pub use db::{
     Collection,
     PersistenceError,
     TransactionOperation,
+    BEVY_PERSISTENCE_VERSION_FIELD,
 };
 pub use db::MockDatabaseConnection;
 pub use plugins::{
@@ -36,3 +38,5 @@ pub use plugins::{
 pub use query::{PersistenceQuery, dsl};
 pub use resources::{PersistenceSession, commit_and_wait as commit};
 pub use persist::Persist;
+
+pub use versioning::VersionManager;

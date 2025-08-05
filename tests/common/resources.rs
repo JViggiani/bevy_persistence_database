@@ -1,5 +1,7 @@
+use bevy_arangodb_derive::persist;
+
 #[derive(Clone)]
-#[bevy_arangodb::persist(resource)]
+#[persist(resource)]
 pub struct GameSettings {
     pub difficulty: f32,
     pub map_name: String,

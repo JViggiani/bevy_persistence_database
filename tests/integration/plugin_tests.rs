@@ -1,6 +1,6 @@
 use bevy::prelude::{App, Events};
-use bevy_arangodb::{
-    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, PersistencePlugins, Persist,
+use bevy_arangodb_core::{
+    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
     TriggerCommit,
 };
 use crate::common::*;
@@ -36,8 +36,7 @@ async fn test_trigger_commit_clears_event_queue() {
 
 #[tokio::test]
 async fn test_event_triggers_commit_and_persists_data() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -85,8 +84,7 @@ async fn test_event_triggers_commit_and_persists_data() {
 
 #[tokio::test]
 async fn test_queued_commit_persists_all_changes() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -129,10 +127,22 @@ async fn test_queued_commit_persists_all_changes() {
 
     // AND data from both commits exists in the database
     let guid_a = app.world().get::<Guid>(entity_a).unwrap();
-    let health_json = db.fetch_component(guid_a.id(), Health::name()).await.unwrap().unwrap();
-    assert_eq!(serde_json::from_value::<Health>(health_json).unwrap().value, 100);
+    let health_json = db
+        .fetch_component(guid_a.id(), Health::name())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_value::<Health>(health_json).unwrap().value,
+        100
+    );
 
     let guid_b = app.world().get::<Guid>(entity_b).unwrap();
-    let pos_json = db.fetch_component(guid_b.id(), Position::name()).await.unwrap().unwrap();
-    assert_eq!(serde_json::from_value::<Position>(pos_json).unwrap().x, 50.0);
+    let pos_json = db
+        .fetch_component(guid_b.id(), Position::name())
+        .await
+        .unwrap()
+        .unwrap();
+    let pos: Position = serde_json::from_value(pos_json).unwrap();
+    assert_eq!(pos.x, 50.0);
 }

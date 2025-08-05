@@ -109,7 +109,14 @@ pub(crate) fn translate_expression(
             format!("@{}", bind_name)
         }
         Expression::Field { component_name, field_name } => {
-            format!("doc.`{}`.`{}`", component_name, field_name)
+            // Special handling for _key field
+            if component_name == &"_key" {
+                "doc._key".to_string()
+            } else if field_name.is_empty() {
+                format!("doc.`{}`", component_name)
+            } else {
+                format!("doc.`{}`.`{}`", component_name, field_name)
+            }
         }
         Expression::BinaryOp { op, lhs, rhs } => {
             let op_str = match op {

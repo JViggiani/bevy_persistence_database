@@ -1,14 +1,13 @@
 use bevy::prelude::App;
-use bevy_arangodb::{
-    commit, Guid, Persist, PersistencePlugins, PersistenceQuery, TransactionOperation,
+use bevy_arangodb_core::{
+    commit, Guid, Persist, persistence_plugin::PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
 };
 
 use crate::common::*;
 
 #[tokio::test]
 async fn test_load_specific_entities_into_new_session() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins(db.clone()));
 
@@ -57,8 +56,7 @@ async fn test_load_specific_entities_into_new_session() {
 
 #[tokio::test]
 async fn test_load_resources_alongside_entities() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins(db.clone()));
 
@@ -88,8 +86,7 @@ async fn test_load_resources_alongside_entities() {
 
 #[tokio::test]
 async fn test_load_into_world_with_existing_entities() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
 
     // GIVEN entity A in DB, created by app1
     let mut app1 = App::new();
@@ -132,8 +129,7 @@ async fn test_load_into_world_with_existing_entities() {
 
 #[tokio::test]
 async fn test_dsl_filter_by_component_presence() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -162,8 +158,7 @@ async fn test_dsl_filter_by_component_presence() {
 
 #[tokio::test]
 async fn test_dsl_equality_operator() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -214,8 +209,7 @@ async fn test_dsl_equality_operator() {
 
 #[tokio::test]
 async fn test_dsl_relational_operators() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -267,8 +261,7 @@ async fn test_dsl_relational_operators() {
 
 #[tokio::test]
 async fn test_dsl_logical_combinations() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -311,15 +304,19 @@ async fn test_dsl_logical_combinations() {
 #[tokio::test]
 #[should_panic(expected = "component deserialization failed")]
 async fn test_load_with_schema_mismatch() {
-    let _guard = DB_LOCK.lock().await;
-    let db = setup().await;
+    let (db, _container) = setup().await;
 
-    // GIVEN a bad Health document
+    // GIVEN a bad Health document with required fields
     let bad_health_doc = serde_json::json!({
+        "_key": "bad_doc",
+        "bevy_persistence_version": 1,
         Health::name(): { "value": "a string, not a number" }
     });
     let _key = db
-        .execute_transaction(vec![TransactionOperation::CreateDocument(bad_health_doc)])
+        .execute_transaction(vec![TransactionOperation::CreateDocument {
+            collection: Collection::Entities,
+            data: bad_health_doc,
+        }])
         .await
         .expect("Transaction to create bad doc failed")
         .remove(0);
@@ -331,4 +328,54 @@ async fn test_load_with_schema_mismatch() {
         .with::<Health>()
         .fetch_into(app2.world_mut())
         .await;
+}
+
+#[tokio::test]
+async fn test_fetch_ids_only() {
+    let (db, _container) = setup().await;
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+
+    // Spawn entities with different components
+    app.world_mut().spawn(Health { value: 100 });
+    app.world_mut().spawn(Health { value: 50 });
+    app.world_mut().spawn((Health { value: 200 }, Position { x: 10.0, y: 20.0 }));
+    app.world_mut().spawn(Position { x: 5.0, y: 5.0 });
+    app.update();
+    commit(&mut app).await.expect("Initial commit failed");
+
+    // Store Guids to verify them later
+    let health_entities: Vec<String> = app.world_mut()
+        .query::<(&Health, &Guid)>()
+        .iter(&app.world())
+        .map(|(_, guid)| guid.id().to_string())
+        .collect();
+    
+    // Verify there are 3 entities with Health
+    assert_eq!(health_entities.len(), 3);
+
+    // Test fetch_ids with a Health value > 75 filter
+    let keys = PersistenceQuery::new(db.clone())
+        .with::<Health>()
+        .filter(Health::value().gt(75))
+        .fetch_ids()
+        .await;
+    
+    // Should return 2 keys (Health 100 and 200)
+    assert_eq!(keys.len(), 2);
+    
+    // All returned keys should be in our health_entities collection
+    for key in &keys {
+        assert!(health_entities.contains(key), "Returned key not found in expected set");
+    }
+    
+    // Test a more specific query for Health AND Position
+    let keys_with_position = PersistenceQuery::new(db.clone())
+        .with::<Health>()
+        .with::<Position>()
+        .fetch_ids()
+        .await;
+    
+    // Should find exactly 1 entity
+    assert_eq!(keys_with_position.len(), 1);
 }

@@ -6,7 +6,11 @@ use mockall::automock;
 use serde_json::Value;
 use std::fmt;
 
+/// The field name used for optimistic locking version tracking.
+pub const BEVY_PERSISTENCE_VERSION_FIELD: &str = "bevy_persistence_version";
+
 /// An enum representing the collections used by this library.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
 pub enum Collection {
     /// The collection where all Bevy entities are stored as documents.
     Entities,
@@ -24,22 +28,57 @@ impl std::fmt::Display for Collection {
 }
 
 /// An error type for database operations.
-#[derive(Debug)]
-pub struct PersistenceError(pub String);
+#[derive(Debug, Clone)]
+pub enum PersistenceError {
+    /// A general error with a message.
+    General(String),
+    /// A version conflict occurred during an update or delete operation.
+    Conflict { key: String },
+}
+
 impl fmt::Display for PersistenceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Persistence Error: {}", self.0)
+        match self {
+            PersistenceError::General(msg) => write!(f, "Persistence Error: {}", msg),
+            PersistenceError::Conflict { key } => write!(f, "Version conflict for key: {}", key),
+        }
     }
 }
+
 impl std::error::Error for PersistenceError {}
+
+// For backward compatibility
+impl From<String> for PersistenceError {
+    fn from(msg: String) -> Self {
+        PersistenceError::General(msg)
+    }
+}
+
+impl PersistenceError {
+    /// Creates a new general error.
+    pub fn new(msg: impl Into<String>) -> Self {
+        PersistenceError::General(msg.into())
+    }
+}
 
 /// Represents one DB operation in our atomic transaction.
 #[derive(serde::Serialize, Debug, Clone)]
 pub enum TransactionOperation {
-    CreateDocument(Value),
-    UpdateDocument(String, Value),
-    DeleteDocument(String),
-    UpsertResource(String, Value),
+    CreateDocument {
+        collection: Collection,
+        data: Value,
+    },
+    UpdateDocument {
+        collection: Collection,
+        key: String,
+        expected_current_version: u64,
+        patch: Value,
+    },
+    DeleteDocument {
+        collection: Collection,
+        key: String,
+        expected_current_version: u64,
+    },
 }
 
 /// Abstracts database operations via async returns but remains object-safe.
@@ -50,16 +89,22 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
         operations: Vec<TransactionOperation>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
 
-    fn query(
+    fn query_keys(
         &self,
         aql: String,
         bind_vars: std::collections::HashMap<String, Value>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
 
+    fn query_documents(
+        &self,
+        aql: String,
+        bind_vars: std::collections::HashMap<String, Value>,
+    ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>>;
+
     fn fetch_document(
         &self,
         entity_key: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>>;
 
     fn fetch_component(
         &self,
@@ -70,7 +115,7 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn fetch_resource(
         &self,
         resource_name: &str,
-    ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>>;
+    ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>>;
 
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
 

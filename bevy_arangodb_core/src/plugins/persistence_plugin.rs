@@ -4,16 +4,19 @@
 //! as a resource and automatically adding systems for change detection.
 
 use crate::registration::COMPONENT_REGISTRY;
-use crate::resources::persistence_session::_prepare_commit;
-use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist};
+use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist, TransactionOperation, Collection};
+use crate::versioning::version_manager::VersionKey;
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
-use bevy::tasks::{IoTaskPool, Task};
+use bevy::tasks::{IoTaskPool, TaskPool, Task};
 use futures_lite::future;
 use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
@@ -29,6 +32,14 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
 struct CommitTask(Task<Result<(Vec<String>, Vec<Entity>), PersistenceError>>);
+
+/// A component that tracks the state of a multi-batch commit operation.
+#[derive(Component)]
+struct MultiBatchCommitTracker {
+    correlation_id: u64,
+    remaining_batches: Arc<AtomicUsize>,
+    result_sender: Arc<Mutex<Option<oneshot::Sender<Result<(), PersistenceError>>>>>,
+}
 
 /// A `SystemSet` for grouping the core persistence systems into ordered phases.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -109,123 +120,373 @@ fn handle_commit_trigger(world: &mut World) {
         return;
     }
 
-    // --- STAGE 1: Prepare Data on Main Thread ---
-    let commit_data = {
-        let session = world.resource::<PersistenceSession>();
-        match _prepare_commit(session, world) {
-            Ok(data) => {
-                if data.operations.is_empty() {
-                    // If there are no operations, we still need to send a completion event
-                    // to unblock any waiting `commit_and_wait` calls.
-                    world.send_event(CommitCompleted(Ok(vec![]), vec![], correlation_id));
-                    return;
-                }
-                data
-            }
-            Err(e) => {
-                error!("Failed to prepare commit: {}", e);
-                world.send_event(CommitCompleted(Err(e), vec![], correlation_id));
-                return;
-            }
+    let plugin_config = world.resource::<PersistencePluginConfig>().clone();
+
+    // 1) isolate dirty sets from the session
+    let (dirty_entities, despawned_entities, dirty_resources) = {
+        let mut session = world.resource_mut::<PersistenceSession>();
+        (
+            std::mem::take(&mut session.dirty_entities),
+            std::mem::take(&mut session.despawned_entities),
+            std::mem::take(&mut session.dirty_resources),
+        )
+    };
+
+    // 2) prepare commit with those sets
+    let commit_data = match PersistenceSession::_prepare_commit(
+        world.resource::<PersistenceSession>(),
+        world,
+        &dirty_entities,
+        &despawned_entities,
+        &dirty_resources,
+        plugin_config.thread_count,
+    ) {
+        Ok(data) if data.operations.is_empty() => {
+            // nothing to do → send completion and restore dirty sets
+            world.send_event(CommitCompleted(Ok(vec![]), vec![], correlation_id));
+            let mut session = world.resource_mut::<PersistenceSession>();
+            session.dirty_entities.extend(dirty_entities);
+            session.despawned_entities.extend(despawned_entities);
+            session.dirty_resources.extend(dirty_resources);
+            return;
+        }
+        Ok(data) => data,
+        Err(e) => {
+            // prepare failed → send error and restore dirty sets
+            world.send_event(CommitCompleted(Err(e.clone()), vec![], correlation_id));
+            let mut session = world.resource_mut::<PersistenceSession>();
+            session.dirty_entities.extend(dirty_entities);
+            session.despawned_entities.extend(despawned_entities);
+            session.dirty_resources.extend(dirty_resources);
+            return;
         }
     };
 
-    // Update status and spawn the task
+    // 3) spawn the async task(s)
     *world.resource_mut::<CommitStatus>() = CommitStatus::InProgress;
-    info!("[handle_commit_trigger] CommitStatus set to InProgress. Spawning task.");
-
-    // Get the dedicated runtime
     let runtime = world.resource::<TokioRuntime>().0.clone();
-
     let thread_pool = IoTaskPool::get();
     let db = world.resource::<PersistenceSession>().db.clone();
+
+    let all_operations = commit_data.operations;
     let new_entities = commit_data.new_entities;
-    let operations = commit_data.operations;
 
-    let task = thread_pool.spawn(async move {
-        // Use `block_on` to run the async database logic on the dedicated Tokio runtime.
-        // This blocks the current thread (from Bevy's pool), but that's okay here.
-        runtime.block_on(async {
-            match db.execute_transaction(operations).await {
-                Ok(keys) => Ok((keys, new_entities)),
-                Err(e) => Err(e),
+    if plugin_config.batching_enabled && all_operations.len() > plugin_config.commit_batch_size {
+        let batch_size = plugin_config.commit_batch_size;
+        let session = world.resource::<PersistenceSession>();
+        
+        // Group operations by entity
+        let mut entity_ops: HashMap<Entity, Vec<TransactionOperation>> = HashMap::new();
+        let mut new_entity_ops: Vec<(TransactionOperation, Entity)> = Vec::new();
+        let mut resource_ops: Vec<TransactionOperation> = Vec::new();
+        let mut new_entity_idx = 0;
+        
+        // Categorize operations
+        for op in all_operations {
+            match &op {
+                TransactionOperation::UpdateDocument { collection: Collection::Entities, key, .. } => {
+                    // Find entity for this key
+                    if let Some(entity) = session.entity_keys.iter().find(|(_, k)| *k == key).map(|(e, _)| *e) {
+                        entity_ops.entry(entity).or_default().push(op);
+                    }
+                },
+                TransactionOperation::DeleteDocument { collection: Collection::Entities, key, .. } => {
+                    // Find entity for this key
+                    if let Some(entity) = session.entity_keys.iter().find(|(_, k)| *k == key).map(|(e, _)| *e) {
+                        entity_ops.entry(entity).or_default().push(op);
+                    }
+                },
+                TransactionOperation::CreateDocument { collection: Collection::Entities, .. } => {
+                    // New entities get their operation paired with the entity index
+                    if let Some(entity) = new_entities.get(new_entity_idx) {
+                        new_entity_ops.push((op, *entity));
+                        new_entity_idx += 1;
+                    }
+                },
+                // Resource operations go in their own group
+                _ => resource_ops.push(op),
             }
-        })
-    });
+        }
+        
+        // Create batches with balanced operations
+        let mut batches: Vec<Vec<TransactionOperation>> = Vec::new();
+        let mut batch_entities: Vec<HashSet<Entity>> = Vec::new();
+        let mut batch_new_entities: Vec<Vec<Entity>> = Vec::new();
+        let mut current_batch = Vec::new();
+        let mut current_batch_entities = HashSet::new();
+        let mut current_batch_new_entities = Vec::new();
+        
+        // Add entity operations in batches
+        for (entity, ops) in entity_ops {
+            if current_batch.len() + ops.len() > batch_size && !current_batch.is_empty() {
+                // Current batch is full, start a new one
+                batches.push(std::mem::take(&mut current_batch));
+                batch_entities.push(std::mem::take(&mut current_batch_entities));
+                batch_new_entities.push(std::mem::take(&mut current_batch_new_entities));
+            }
+            
+            // Add all operations for this entity to the current batch
+            current_batch.extend(ops);
+            current_batch_entities.insert(entity);
+        }
+        
+        // Add new entity operations in batches
+        for (op, entity) in new_entity_ops {
+            if current_batch.len() + 1 > batch_size && !current_batch.is_empty() {
+                // Current batch is full, start a new one
+                batches.push(std::mem::take(&mut current_batch));
+                batch_entities.push(std::mem::take(&mut current_batch_entities));
+                batch_new_entities.push(std::mem::take(&mut current_batch_new_entities));
+            }
+            
+            current_batch.push(op);
+            current_batch_new_entities.push(entity);
+        }
+        
+        // Add resource operations to the first batch, or create a new batch if needed
+        if current_batch.len() + resource_ops.len() > batch_size && !current_batch.is_empty() {
+            batches.push(std::mem::take(&mut current_batch));
+            batch_entities.push(std::mem::take(&mut current_batch_entities));
+            batch_new_entities.push(std::mem::take(&mut current_batch_new_entities));
+        }
+        current_batch.extend(resource_ops);
+        
+        // Push the final batch if not empty
+        if !current_batch.is_empty() {
+            batches.push(current_batch);
+            batch_entities.push(current_batch_entities);
+            batch_new_entities.push(current_batch_new_entities);
+        }
+        
+        let num_batches = batches.len();
+        info!(
+            "[handle_commit_trigger] Splitting commit into {} batches of size ~{}.",
+            num_batches, batch_size
+        );
 
-    // Spawn a new entity to hold the task and the correlation ID.
-    world.spawn((CommitTask(task), TriggerID(correlation_id)));
+        if let Some(cid) = correlation_id {
+            if let Some(listener) = world.resource_mut::<CommitEventListeners>().0.remove(&cid) {
+                world.spawn(MultiBatchCommitTracker {
+                    correlation_id: cid,
+                    remaining_batches: Arc::new(AtomicUsize::new(num_batches)),
+                    // wrap sender in Arc<Mutex<Option<>>>
+                    result_sender: Arc::new(Mutex::new(Some(listener))),
+                });
+            }
+        }
+
+        // Create dirty resource subsets - divide them across batches
+        let mut resource_sets = Vec::with_capacity(num_batches);
+        for _ in 0..num_batches {
+            resource_sets.push(HashSet::new());
+        }
+        
+        // Distribute resource types across batches
+        for (i, res_type) in dirty_resources.iter().enumerate() {
+            let batch_idx = i % num_batches;
+            resource_sets[batch_idx].insert(*res_type);
+        }
+
+        // Spawn a task for each batch
+        for (i, (batch_ops, batch_entities_set)) in batches.into_iter().zip(batch_entities.into_iter()).enumerate() {
+            let batch_db = db.clone();
+            let batch_runtime = runtime.clone();
+            let batch_new_entities = batch_new_entities.get(i).cloned().unwrap_or_default();
+            
+            // Task spawning - the block_on is necessary for the Tokio runtime
+            let task = thread_pool.spawn(async move {
+                batch_runtime
+                    .block_on(async {
+                        batch_db
+                            .execute_transaction(batch_ops)
+                            .await
+                            .map(|keys| (keys, batch_new_entities))
+                    })
+            });
+            
+            // Each batch gets its own subset of entities and resources
+            let meta = CommitMeta {
+                dirty_entities: batch_entities_set,
+                despawned_entities: if i == 0 { despawned_entities.clone() } else { HashSet::new() },
+                dirty_resources: resource_sets[i].clone(),
+            };
+            
+            world.spawn((CommitTask(task), TriggerID(correlation_id), meta));
+        }
+    } else {
+        let task = thread_pool.spawn(async move {
+            runtime.block_on(async {
+                db.execute_transaction(all_operations)
+                    .await
+                    .map(|keys| (keys, new_entities))
+            })
+        });
+
+        world.spawn((
+            CommitTask(task),
+            TriggerID(correlation_id),
+            CommitMeta {
+                dirty_entities,
+                despawned_entities,
+                dirty_resources,
+            },
+        ));
+    }
 }
 
 /// A component to correlate a commit task with its trigger event.
 #[derive(Component)]
 struct TriggerID(Option<u64>);
 
+/// Carries exactly the dirty‐sets for one in‐flight commit.
+#[derive(Component)]
+struct CommitMeta {
+    dirty_entities: HashSet<Entity>,
+    despawned_entities: HashSet<Entity>,
+    dirty_resources: HashSet<TypeId>,
+}
+
 /// A system that polls the running commit task and updates the state machine upon completion.
 fn handle_commit_completed(
     mut commands: Commands,
-    mut tasks: Query<(Entity, &mut CommitTask, &TriggerID)>,
+    mut query: Query<(Entity, &mut CommitTask, &TriggerID, Option<&mut CommitMeta>)>,
     mut session: ResMut<PersistenceSession>,
     mut status: ResMut<CommitStatus>,
-    mut completed_events: EventWriter<CommitCompleted>,
-    mut trigger_events: EventWriter<TriggerCommit>,
+    mut completed: EventWriter<CommitCompleted>,
+    mut triggers: EventWriter<TriggerCommit>,
+    mut trackers: Query<(Entity, &MultiBatchCommitTracker)>,
 ) {
-    for (task_entity, mut task, trigger_id) in &mut tasks {
-        trace!("[handle_commit_completed] Polling a commit task for correlation ID {:?}.", trigger_id.0);
+    // Keep track of entities to despawn
+    let mut to_despawn = Vec::new();
+    // Track if any batch had an error - errors should force status to Idle
+    let mut had_error = false;
+    
+    for (ent, mut task, trigger_id, meta_opt) in &mut query {
         if let Some(result) = future::block_on(future::poll_once(&mut task.0)) {
-            debug!("[handle_commit_completed] Task is finished for correlation ID {:?}. Processing result.", trigger_id.0);
-            let event_result;
+            let cid = trigger_id.0;
+            let mut is_final_batch = true;
+            let mut should_send_result = true;
 
-            match result {
-                Ok((new_keys, new_entities)) => {
-                    info!(
-                        "Commit successful for correlation ID {:?}. Assigning {} new keys.",
-                        trigger_id.0,
-                        new_keys.len()
-                    );
-                    // Assign new GUIDs to newly created entities
-                    for (entity, key) in new_entities.iter().zip(new_keys.iter()) {
-                        commands.entity(*entity).insert(Guid::new(key.clone()));
-                        session.entity_keys.insert(*entity, key.clone());
-                    }
-
-                    // Only clear the dirty flags if we are not immediately starting another commit.
-                    if *status != CommitStatus::InProgressAndDirty {
-                        session.dirty_entities.clear();
-                        session.despawned_entities.clear();
-                        session.dirty_resources.clear();
-                        debug!("Commit successful, returning to Idle.");
-                    }
-
-                    event_result = Ok(new_keys);
-                }
-                Err(e) => {
-                    let err_msg = e.to_string();
-                    error!(
-                        "Commit failed for correlation ID {:?}: {}",
-                        trigger_id.0, err_msg
-                    );
-                    event_result = Err(PersistenceError(err_msg));
-                }
-            }
-            // The task is complete, so we can despawn the task entity.
-            commands.entity(task_entity).despawn();
-
-            // Check if another commit was requested while this one was running.
-            if *status == CommitStatus::InProgressAndDirty {
-                info!("Commit completed, but world is dirty. Triggering another commit.");
-                // Set status back to Idle and immediately trigger a new commit.
-                // The `handle_commit_trigger` system will run in the same tick.
-                *status = CommitStatus::Idle;
-                trigger_events.write(TriggerCommit::default());
-            } else {
-                // Otherwise, we are done.
-                *status = CommitStatus::Idle;
+            // Set had_error if any batch has an error
+            if result.is_err() {
+                had_error = true;
             }
 
-            // Send the completion event for any waiting `commit_and_wait` calls.
-            completed_events.write(CommitCompleted(event_result, vec![], trigger_id.0));
+            if let Some(correlation_id) = cid {
+                if let Some((tracker_entity, tracker)) = trackers
+                    .iter_mut()
+                    .find(|(_, t)| t.correlation_id == correlation_id)
+                {
+                    let remaining = tracker
+                        .remaining_batches
+                        .fetch_sub(1, Ordering::SeqCst)
+                        - 1;
+                    is_final_batch = remaining == 0;
+
+                    // Only take and send on the channel if we have an error or it's the final batch
+                    if result.is_err() || is_final_batch {
+                        // Take the sender if we need to send a result
+                        if let Some(sender) = tracker.result_sender.lock().unwrap().take() {
+                            if result.is_err() {
+                                let _ = sender.send(Err(result.as_ref().err().unwrap().clone()));
+                            } else if is_final_batch {
+                                let _ = sender.send(Ok(()));
+                            }
+                        }
+                        
+                        // Schedule the tracker for removal
+                        commands.entity(tracker_entity).remove::<MultiBatchCommitTracker>();
+                    } else {
+                        // For intermediate successful batches, don't send a completion event
+                        should_send_result = false;
+                    }
+                }
+            }
+
+            if let Some(mut meta) = meta_opt {
+                // Process metadata regardless of batch position
+                let event_res = match &result {
+                    Ok((new_keys, new_entities)) => {
+                        // assign GUIDs + initial versions
+                        for (e, key) in new_entities.iter().zip(new_keys.iter()) {
+                            commands.entity(*e).insert(Guid::new(key.clone()));
+                            session.entity_keys.insert(*e, key.clone());
+                            session.version_manager.set_version(VersionKey::Entity(key.clone()), 1);
+                        }
+                        // bump resource versions
+                        for tid in &meta.dirty_resources {
+                            let vk = VersionKey::Resource(*tid);
+                            let nv = session.version_manager.get_version(&vk).unwrap_or(0) + 1;
+                            session.version_manager.set_version(vk, nv);
+                        }
+                        // bump existing-entity versions
+                        let new_set: HashSet<_> = new_entities.iter().cloned().collect();
+                        let keys_to_update: Vec<_> = meta.dirty_entities
+                            .iter()
+                            .filter(|e| !new_set.contains(e))
+                            .filter_map(|e| session.entity_keys.get(e).cloned())
+                            .collect();
+                        for key in keys_to_update {
+                            let vk = VersionKey::Entity(key.clone());
+                            if let Some(v) = session.version_manager.get_version(&vk) {
+                                session.version_manager.set_version(vk, v + 1);
+                            }
+                        }
+                        // remove versions for deleted entities
+                        for e in &meta.despawned_entities {
+                            if let Some(key) = session.entity_keys.get(e).cloned() {
+                                session.version_manager.remove_version(&VersionKey::Entity(key));
+                            }
+                        }
+                        Ok(new_keys.clone())
+                    }
+                    Err(err) => {
+                        // restore dirty sets on failure
+                        session.dirty_entities.extend(meta.dirty_entities.drain());
+                        session.despawned_entities.extend(meta.despawned_entities.drain());
+                        session.dirty_resources.extend(meta.dirty_resources.drain());
+                        Err(err.clone())
+                    }
+                };
+                
+                // Only send completion event for the final batch or errors
+                if should_send_result && (is_final_batch || result.is_err()) {
+                    completed.write(CommitCompleted(event_res, vec![], cid));
+                }
+            } else if let Err(e) = &result {
+                // A non-meta batch failed. Signal failure.
+                if should_send_result {
+                    completed.write(CommitCompleted(Err(e.clone()), vec![], cid));
+                }
+            }
+
+            // Schedule this entity for despawn 
+            to_despawn.push(ent);
+
+            // Update status if this is the final batch or there was an error
+            if is_final_batch || had_error {
+                // Check if we need to trigger a chained commit
+                let should_trigger_next = !had_error && *status == CommitStatus::InProgressAndDirty;
+                
+                // Update status to Idle
+                *status = CommitStatus::Idle;
+                
+                // Only trigger next commit if we determined we needed to
+                if should_trigger_next {
+                    triggers.write(TriggerCommit::default());
+                }
+            }
         }
+    }
+    
+    // If we had any error, force status to Idle regardless of other batches
+    if had_error {
+        *status = CommitStatus::Idle;
+    }
+    
+    // Despawn all entities at once
+    for entity in to_despawn {
+        commands.entity(entity).despawn();
     }
 }
 
@@ -266,15 +527,43 @@ fn auto_despawn_tracking_system(
     }
 }
 
+/// Configuration for the persistence plugin.
+#[derive(Resource, Clone)]
+pub struct PersistencePluginConfig {
+    pub batching_enabled: bool,
+    pub commit_batch_size: usize,
+    pub thread_count: usize,
+}
+
+impl Default for PersistencePluginConfig {
+    fn default() -> Self {
+        Self {
+            batching_enabled: true,
+            commit_batch_size: 1000,
+            thread_count: 4, // default to 4 threads
+        }
+    }
+}
+
 /// A Bevy `Plugin` that sets up `bevy_arangodb`.
 pub struct PersistencePluginCore {
     db: Arc<dyn DatabaseConnection>,
+    config: PersistencePluginConfig,
 }
 
 impl PersistencePluginCore {
     /// Creates a new `PersistencePluginCore` with the given database connection.
     pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
-        Self { db }
+        Self {
+            db,
+            config: PersistencePluginConfig::default(),
+        }
+    }
+
+    /// Configures the persistence plugin.
+    pub fn with_config(mut self, config: PersistencePluginConfig) -> Self {
+        self.config = config;
+        self
     }
 }
 
@@ -291,7 +580,7 @@ fn commit_event_listener(
                 info!("Found listener for commit {}. Sending result.", id);
                 let result = match &event.0 {
                     Ok(_) => Ok(()),
-                    Err(e) => Err(PersistenceError(e.to_string())),
+                    Err(e) => Err(e.clone()),
                 };
                 let _ = sender.send(result);
             }
@@ -301,8 +590,12 @@ fn commit_event_listener(
 
 impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
+        // Initialize the global IO task pool so IoTaskPool::get() won’t panic
+        IoTaskPool::get_or_init(|| TaskPool::new());
+
         let session = PersistenceSession::new(self.db.clone());
         app.insert_resource(session);
+        app.insert_resource(self.config.clone());
         app.init_resource::<RegisteredPersistTypes>();
         app.add_event::<TriggerCommit>();
         app.add_event::<CommitCompleted>();
