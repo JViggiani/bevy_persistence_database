@@ -1,6 +1,6 @@
 use bevy::prelude::App;
-use bevy_arangodb::{
-    commit, Guid, Persist, PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
+use bevy_arangodb_core::{
+    commit, Guid, Persist, persistence_plugin::PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
 };
 
 use crate::common::*;

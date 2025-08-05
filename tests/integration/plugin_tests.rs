@@ -1,6 +1,6 @@
 use bevy::prelude::{App, Events};
-use bevy_arangodb::{
-    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, PersistencePlugins, Persist,
+use bevy_arangodb_core::{
+    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
     TriggerCommit,
 };
 use crate::common::*;

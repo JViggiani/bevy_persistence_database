@@ -1,7 +1,7 @@
 use bevy::prelude::App;
-use bevy_arangodb::PersistencePluginCore;
-use bevy_arangodb::persistence_plugin::PersistencePluginConfig;
-use bevy_arangodb::{
+use bevy_arangodb_core::PersistencePluginCore;
+use bevy_arangodb_core::persistence_plugin::PersistencePluginConfig;
+use bevy_arangodb_core::{
     ArangoDbConnection, DatabaseConnection, 
 };
 use std::sync::Arc;

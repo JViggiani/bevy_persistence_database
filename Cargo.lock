@@ -465,23 +465,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bevy_arangodb"
-version = "0.1.0"
-dependencies = [
- "bevy",
- "bevy-tokio-tasks",
- "bevy_arangodb_core",
- "bevy_arangodb_derive",
- "ctor",
- "futures",
- "serde",
- "serde_json",
- "testcontainers",
- "tokio",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "bevy_arangodb_core"
 version = "0.1.0"
 dependencies = [
@@ -519,7 +502,6 @@ name = "bevy_arangodb_root"
 version = "0.1.0"
 dependencies = [
  "bevy",
- "bevy_arangodb",
  "bevy_arangodb_core",
  "bevy_arangodb_derive",
  "ctor",

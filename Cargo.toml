@@ -6,7 +6,6 @@ edition = "2021"
 [workspace]
 resolver = "2"
 members = [
-    "bevy_arangodb",
     "bevy_arangodb_core",
     "bevy_arangodb_derive",
 ]
@@ -33,7 +32,6 @@ testcontainers = "0.19.0"
 debug = true
 
 [dev-dependencies]
-bevy_arangodb     = { path = "bevy_arangodb" }
 bevy              = { workspace = true }
 serde             = { workspace = true, features = ["derive"] }
 serde_json        = { workspace = true }

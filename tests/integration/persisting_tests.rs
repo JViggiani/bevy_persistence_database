@@ -1,5 +1,5 @@
 use bevy::prelude::App;
-use bevy_arangodb::{commit, Guid, Persist, PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD};
+use bevy_arangodb_core::{commit, Guid, Persist, persistence_plugin::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, CommitStatus};
 
 use crate::common::*;
 
@@ -241,8 +241,8 @@ async fn test_commit_with_no_changes() {
 
     // THEN the commit operation succeeds without error
     // AND no database write operations are performed (this is handled by an early return in the commit function)
-    let status = app.world().resource::<bevy_arangodb::CommitStatus>();
-    assert_eq!(*status, bevy_arangodb::CommitStatus::Idle);
+    let status = app.world().resource::<CommitStatus>();
+    assert_eq!(*status, CommitStatus::Idle);
 }
 
 #[tokio::test]

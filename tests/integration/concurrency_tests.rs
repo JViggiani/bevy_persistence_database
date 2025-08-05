@@ -1,6 +1,6 @@
 use bevy::prelude::App;
-use bevy_arangodb::{
-    commit, Guid, PersistenceError, PersistencePlugins,
+use bevy_arangodb_core::{
+    commit, Guid, PersistenceError, persistence_plugin::PersistencePlugins,
     PersistenceQuery, TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
 };
 use serde_json::json;
