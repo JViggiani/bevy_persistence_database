@@ -69,6 +69,10 @@ impl ArangoDbConnection {
 }
 
 impl DatabaseConnection for ArangoDbConnection {
+    fn document_key_field(&self) -> &'static str {
+        "_key"
+    }
+
     fn query_keys(
         &self,
         aql: String,

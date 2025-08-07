@@ -30,12 +30,15 @@ pub use db::{
     TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD,
 };
+pub use db::connection::DatabaseConnectionResource;
 pub use db::MockDatabaseConnection;
 pub use plugins::{
     CommitStatus, PersistencePluginCore, TriggerCommit, CommitCompleted,
     persistence_plugin::PersistenceSystemSet,
 };
-pub use query::{PersistenceQuery, dsl};
+pub use query::{PersistenceQuery, PersistentQuery, PersistenceQueryCache, CachePolicy};
+
+pub use query::expression::{Expression, BinaryOperator};
 pub use resources::{PersistenceSession, commit_and_wait as commit};
 pub use persist::Persist;
 

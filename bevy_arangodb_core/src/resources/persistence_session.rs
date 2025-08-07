@@ -43,6 +43,7 @@ pub struct PersistenceSession {
     pub(crate) version_manager: VersionManager,
     component_serializers: HashMap<TypeId, ComponentSerializer>,
     pub(crate) component_deserializers: HashMap<String, ComponentDeserializer>,
+    pub(crate) component_type_id_to_name: HashMap<TypeId, &'static str>,
     resource_serializers: HashMap<TypeId, ResourceSerializer>,
     resource_deserializers: HashMap<String, ResourceDeserializer>,
     resource_name_to_type_id: HashMap<String, TypeId>,
@@ -61,6 +62,7 @@ impl PersistenceSession {
     pub fn register_component<T: Component + Persist>(&mut self) {
         let ser_key = T::name();
         let type_id = TypeId::of::<T>();
+        self.component_type_id_to_name.insert(type_id, ser_key);
         self.component_serializers.insert(type_id, Box::new(
             move |entity, world| -> Result<Option<(String, Value)>, PersistenceError> {
                 if let Some(c) = world.get::<T>(entity) {
@@ -134,6 +136,7 @@ impl PersistenceSession {
             db,
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
+            component_type_id_to_name: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),
@@ -151,6 +154,7 @@ impl PersistenceSession {
             db,
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
+            component_type_id_to_name: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),

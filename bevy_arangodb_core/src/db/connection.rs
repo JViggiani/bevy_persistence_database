@@ -5,6 +5,8 @@ use futures::future::BoxFuture;
 use mockall::automock;
 use serde_json::Value;
 use std::fmt;
+use std::sync::Arc;
+use bevy::prelude::Resource;
 
 /// The field name used for optimistic locking version tracking.
 pub const BEVY_PERSISTENCE_VERSION_FIELD: &str = "bevy_persistence_version";
@@ -84,6 +86,9 @@ pub enum TransactionOperation {
 /// Abstracts database operations via async returns but remains object-safe.
 #[automock]
 pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
+    /// Returns the name of the field used as the primary key for documents.
+    fn document_key_field(&self) -> &'static str;
+
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
@@ -122,3 +127,15 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
 }
 impl_downcast!(DatabaseConnection);
+
+/// A resource wrapper around the DatabaseConnection
+#[derive(Resource)]
+pub struct DatabaseConnectionResource(pub Arc<dyn DatabaseConnection>);
+
+impl std::ops::Deref for DatabaseConnectionResource {
+    type Target = Arc<dyn DatabaseConnection>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}

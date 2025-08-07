@@ -1,8 +1,10 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
     commit, Guid, Persist, persistence_plugin::PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
+    PersistentQuery, MockDatabaseConnection, BEVY_PERSISTENCE_VERSION_FIELD, DatabaseConnection,
+    db::connection::DatabaseConnectionResource,
 };
-
+use std::sync::Arc;
 use crate::common::*;
 
 #[tokio::test]
@@ -378,4 +380,196 @@ async fn test_fetch_ids_only() {
     
     // Should find exactly 1 entity
     assert_eq!(keys_with_position.len(), 1);
+}
+
+// The test system that uses PersistentQuery
+fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
+    // This will load entities from the database
+    for (entity, (health, position)) in query.iter_with_loading() {
+        println!("Entity {:?} has health {} and position ({}, {})", 
+            entity, health.value, position.x, position.y);
+    }
+}
+
+#[tokio::test]
+async fn test_persistent_query_system_param() {
+    let (db, _container) = setup().await;
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+
+    // 1. Create some test data
+    let entity_high_health = app
+        .world_mut()
+        .spawn((
+            Health { value: 150 },
+            Position { x: 10.0, y: 20.0 },
+        ))
+        .id();
+    
+    let entity_low_health = app
+        .world_mut()
+        .spawn((
+            Health { value: 50 },
+            Position { x: 5.0, y: 5.0 },
+        ))
+        .id();
+
+    app.update();
+    commit(&mut app).await.expect("Initial commit failed");
+
+    // Get the GUIDs for verification
+    let high_health_guid = app.world().get::<Guid>(entity_high_health).unwrap().id().to_string();
+    let low_health_guid = app.world().get::<Guid>(entity_low_health).unwrap().id().to_string();
+
+    // 2. Create a new app that will use the PersistentQuery
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    
+    // Add system that uses the PersistentQuery
+    app2.add_systems(bevy::prelude::Update, test_persistent_query_system);
+    
+    // Run the app to execute the system
+    app2.update();
+    
+    // 3. Verify that entities were loaded
+    let mut health_query = app2.world_mut().query::<&Health>();
+    let health_count = health_query.iter(&app2.world()).count();
+    assert_eq!(health_count, 2, "Should have loaded two entities with Health component");
+    
+    // Verify the Position component was also loaded
+    let mut position_query = app2.world_mut().query::<&Position>();
+    let position_count = position_query.iter(&app2.world()).count();
+    assert_eq!(position_count, 2, "Should have loaded two entities with Position component");
+    
+    // Check that we have the right GUIDs
+    let mut guid_query = app2.world_mut().query::<&Guid>();
+    let guids: Vec<String> = guid_query.iter(&app2.world())
+        .map(|guid| guid.id().to_string())
+        .collect();
+    assert!(guids.contains(&high_health_guid), "High health entity not loaded");
+    assert!(guids.contains(&low_health_guid), "Low health entity not loaded");
+}
+
+// The test system that uses PersistentQuery with filter
+fn test_filtered_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
+    // Add filter for Health > 100
+    query = query.filter(Health::value().gt(100));
+    
+    // This will load entities from the database
+    for (entity, (health, position)) in query.iter_with_loading() {
+        println!("Entity {:?} has health {} and position ({}, {})", 
+            entity, health.value, position.x, position.y);
+        // Additional assertion
+        assert!(health.value > 100, "Filter should only return entities with health > 100");
+    }
+}
+
+#[tokio::test]
+async fn test_persistent_query_with_filter() {
+    let (db, _container) = setup().await;
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+
+    // 1. Create some test data
+    app.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 }));
+    app.world_mut().spawn((Health { value: 50 }, Position { x: 5.0, y: 5.0 }));
+    app.world_mut().spawn((Health { value: 100 }, Position { x: 15.0, y: 15.0 }));
+    app.update();
+    commit(&mut app).await.expect("Initial commit failed");
+
+    // 2. Create a new app that will use the PersistentQuery with filter
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    
+    // Add system that uses the PersistentQuery with filter
+    app2.add_systems(bevy::prelude::Update, test_filtered_query_system);
+    
+    // Run the app to execute the system
+    app2.update();
+    
+    // 3. Verify that only matching entities were loaded (Health > 100)
+    let mut health_query = app2.world_mut().query::<&Health>();
+    let entities_with_health: Vec<i32> = health_query.iter(&app2.world())
+        .map(|health| health.value)
+        .collect();
+    
+    assert_eq!(entities_with_health.len(), 1, "Should have loaded only one entity");
+    assert!(entities_with_health.contains(&150), "Should have loaded only the high health entity");
+}
+
+// System that uses query twice to test caching
+fn test_cached_query_system(mut query1: PersistentQuery<&Health>, mut query2: PersistentQuery<&Health>) {
+    // First query execution - should hit database
+    let _ = query1.iter_with_loading().count();
+    
+    // Second execution of equivalent query - should use cache
+    let _ = query2.iter_with_loading().count();
+}
+
+// System that tests force refresh
+fn test_force_refresh_system(mut query: PersistentQuery<&Health>) {
+    // Use force refresh to bypass cache
+    query = query.force_refresh();
+    let _ = query.iter_with_loading().count();
+}
+
+#[tokio::test]
+async fn test_persistent_query_caching() {
+    let (db, _container) = setup().await;
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+
+    // 1. Create some test data
+    app.world_mut().spawn(Health { value: 100 });
+    app.update();
+    commit(&mut app).await.expect("Initial commit failed");
+
+    // 2. Create a new app that will use the PersistentQuery with cache tracking
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    
+    // Override the database with a mock that counts calls
+    let mut db_mock = MockDatabaseConnection::new();
+    
+    // Track query calls
+    let mut query_count = 0;
+    db_mock.expect_query_documents()
+        .returning(move |_, _| {
+            query_count += 1;
+            Box::pin(async {
+                Ok(vec![
+                    serde_json::json!({
+                        "_key": "test_key",
+                        BEVY_PERSISTENCE_VERSION_FIELD: 1,
+                        "Health": { "value": 100 }
+                    })
+                ])
+            })
+        });
+    
+    // Setup other required methods with minimal implementations
+    db_mock.expect_query_keys()
+        .returning(|_, _| Box::pin(async { Ok(vec!["test_key".to_string()]) }));
+    
+    db_mock.expect_fetch_resource()
+        .returning(|_| Box::pin(async { Ok(None) }));
+    
+    app2.insert_resource(DatabaseConnectionResource(Arc::new(db_mock) as Arc<dyn DatabaseConnection>));
+    
+    // Add system that uses the PersistentQuery twice
+    app2.add_systems(bevy::prelude::Update, test_cached_query_system);
+    
+    // Run the app to execute the system
+    app2.update();
+    
+    // Since our mock setup is counting query calls, we should see only 1 call
+    // despite the system using the query twice (second time should use cache)
+    assert_eq!(query_count, 1, "Database should only be queried once due to caching");
+    
+    // Run again with force refresh to verify it bypasses cache
+    app2.add_systems(bevy::prelude::Update, test_force_refresh_system);
+    app2.update();
+    
+    // Now we should see a second query
+    assert_eq!(query_count, 2, "Force refresh should bypass cache and query again");
 }

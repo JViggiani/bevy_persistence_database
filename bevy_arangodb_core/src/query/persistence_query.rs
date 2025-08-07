@@ -1,18 +1,14 @@
-//! A builder for loading entities from ArangoDB into an PersistenceSession.
-//!
-//! You call `.with::<T>()` to request components, and `.filter("…")`
-//! to inject raw AQL snippets. Later phases will construct full AQL
-//! and fetch matching entity IDs and component data.
+//! A manual builder for creating and executing database queries outside of Bevy systems.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
+use crate::{DatabaseConnection, Guid, Persist, PersistenceSession, PersistenceError};
 use crate::Collection;
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
-use crate::dsl::{Expression, translate_expression};
+use crate::query::expression::{Expression, translate_expression};
 use crate::versioning::version_manager::VersionKey;
-use bevy::prelude::{Component, World};
+use bevy::prelude::{Component, World, Commands, EntityWorldMut, Entity};
 
 /// AQL query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
@@ -37,16 +33,18 @@ impl PersistenceQuery {
         self
     }
 
-    /// Sets the filter for the query using a `dsl::Expression`.
+    /// Sets the filter for the query using a `Expression`.
     pub fn filter(mut self, expression: Expression) -> Self {
         // Collect any component names referenced in the filter expression
         fn collect(expr: &Expression, names: &mut Vec<&'static str>) {
             match expr {
                 Expression::Field { component_name, .. } => {
-                    // "_key" is a special field, not a component to be deserialized.
-                    if *component_name != "_key" && !names.contains(component_name) {
+                    if !names.contains(component_name) {
                         names.push(component_name);
                     }
+                }
+                Expression::DocumentKey => {
+                    // DocumentKey doesn't reference a component
                 }
                 Expression::BinaryOp { lhs, rhs, .. } => {
                     collect(lhs, names);
@@ -65,7 +63,7 @@ impl PersistenceQuery {
     }
 
     /// Construct the AQL and bind-variables tuple.
-    fn build_aql(&self, full_docs: bool) -> (String, HashMap<String, Value>) {
+    pub(crate) fn build_aql(&self, full_docs: bool) -> (String, HashMap<String, Value>) {
         let mut bind_vars = HashMap::new();
         let mut aql = format!("FOR doc IN {}", Collection::Entities);
 
@@ -79,7 +77,7 @@ impl PersistenceQuery {
             filters.push(format!("({})", comp_filter));
         }
         if let Some(expr) = &self.filter_expr {
-            filters.push(translate_expression(expr, &mut bind_vars));
+            filters.push(translate_expression(expr, &mut bind_vars, &*self.db));
         }
 
         if filters.is_empty() {
@@ -92,7 +90,7 @@ impl PersistenceQuery {
         if full_docs {
             aql.push_str("\n  RETURN doc");
         } else {
-            aql.push_str("\n  RETURN doc._key");
+            aql.push_str(&format!("\n  RETURN doc.{}", self.db.document_key_field()));
         }
         (aql, bind_vars)
     }
@@ -128,7 +126,8 @@ impl PersistenceQuery {
             }
 
             for doc in documents {
-                let key = doc["_key"].as_str().unwrap().to_string();
+                let key_field = self.db.document_key_field();
+                let key = doc[key_field].as_str().unwrap().to_string();
                 let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap();
 
                 let entity = if let Some(&e) = existing.get(&key) {
@@ -160,6 +159,140 @@ impl PersistenceQuery {
         world.insert_resource(session);
         result
     }
+
+    /// Load matching entities into the World using Commands
+    /// This is primarily used by the PersistentQuery SystemParam
+    pub(crate) fn fetch_into_world_with_commands(
+        &self, 
+        db: &Arc<dyn DatabaseConnection>,
+        session: &PersistenceSession,
+        commands: &mut Commands
+    ) -> Vec<bevy::prelude::Entity> {
+        // fetch full documents in one go
+        let (aql, bind_vars) = self.build_aql(true);
+        
+        // Use block_in_place to run async code from a sync context
+        let documents = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                db.query_documents(aql, bind_vars)
+                    .await
+                    .expect("Batch document fetch failed")
+            })
+        });
+
+        let mut result = Vec::with_capacity(documents.len());
+        if !documents.is_empty() {
+            // First pass: collect existing GUIDs and create new entities
+            let mut existing = HashMap::new();
+            let mut entities_to_create = Vec::new();
+            
+            for doc in &documents {
+                let key_field = db.document_key_field();
+                let key = doc[key_field].as_str().unwrap().to_string();
+                
+                // Check if we already have this entity
+                if let Some(guid) = session.entity_keys.iter()
+                    .find(|(_, k)| **k == key)
+                    .map(|(e, _)| *e) 
+                {
+                    existing.insert(key, guid);
+                } else {
+                    entities_to_create.push(key);
+                }
+            }
+            
+            // Create all new entities in one go
+            for key in entities_to_create {
+                let entity = commands.spawn(Guid::new(key.clone())).id();
+                existing.insert(key, entity);
+            }
+
+            // Second pass: queue component insertion for all entities
+            for doc in documents {
+                let key_field = db.document_key_field();
+                let key = doc[key_field].as_str().unwrap().to_string();
+                let _version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap();
+                
+                // Get the entity (must exist now)
+                let entity = *existing.get(&key).unwrap();
+                
+                // Components will be added by a system that runs after this
+                for &comp in &self.component_names {
+                    if let Some(val) = doc.get(comp) {
+                        if let Some(_deser) = session.component_deserializers.get(comp) {
+                            let val_clone = val.clone();
+                            let comp_name = comp;
+                            
+                            // Use queue to defer component insertion
+                            commands.entity(entity).queue(move |mut entity_world_mut: EntityWorldMut| {
+                                // First, check if the component name exists in the session
+                                let has_deserializer = {
+                                    let world = unsafe { entity_world_mut.world_mut() };
+                                    world
+                                        .get_resource::<PersistenceSession>()
+                                        .map(|session| session.component_deserializers.contains_key(comp_name))
+                                        .unwrap_or(false)
+                                };
+
+                                // Only proceed if we have a deserializer
+                                if has_deserializer {
+                                    // SAFETY: We need to transmute the deserializer to extend its lifetime
+                                    // This is safe because:
+                                    // 1. We know the deserializer exists in PersistenceSession
+                                    // 2. PersistenceSession is a resource that outlives this closure
+                                    // 3. We drop the world reference before calling the deserializer
+                                    
+                                    // Use a separate scope to limit the immutable borrow
+                                    let deserializer_fn = {
+                                        let world = unsafe { entity_world_mut.world_mut() };
+                                        let session = world.resource::<PersistenceSession>();
+                                        let deserializer = session.component_deserializers.get(comp_name).unwrap();
+                                        
+                                        // Create a type-erased function pointer that can be called after the borrow is dropped
+                                        let fn_ptr = deserializer as *const _;
+                                        
+                                        // This is safe because the deserializer is 'static (it's in a resource)
+                                        unsafe {
+                                            std::mem::transmute::<_, fn(&mut World, Entity, Value) -> Result<(), PersistenceError>>(fn_ptr)
+                                        }
+                                    };
+                                    
+                                    // Now we can safely get a new mutable borrow of the world
+                                    let world = unsafe { entity_world_mut.world_mut() };
+                                    
+                                    // Call the deserializer
+                                    match deserializer_fn(world, entity, val_clone.clone()) {
+                                        Ok(_) => {},
+                                        Err(e) => {
+                                            panic!("Component deserialization failed: {}", e);
+                                        }
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+
+                result.push(entity);
+            }
+        }
+
+        // Resources are handled by the persistence plugin directly
+        result
+    }
+}
+
+// Extension trait for PersistenceQuery to add component by name
+pub trait WithComponentExt {
+    fn with_component(self, component_name: &'static str) -> Self;
+}
+
+impl WithComponentExt for PersistenceQuery {
+    fn with_component(mut self, component_name: &'static str) -> Self {
+        self.component_names.push(component_name);
+        self
+    }
 }
 
 #[cfg(test)]
@@ -181,7 +314,9 @@ mod tests {
 
     #[test]
     fn build_query_with_dsl() {
-        let db = Arc::new(MockDatabaseConnection::new());
+        let mut db = MockDatabaseConnection::new();
+        db.expect_document_key_field().return_const("_key");
+        let db = Arc::new(db);
         let q = PersistenceQuery::new(db.clone())
             .with::<A>()
             .filter(
@@ -216,6 +351,7 @@ mod tests {
     #[tokio::test]
     async fn fetch_into_loads_new_entities() {
         let mut mock_db = MockDatabaseConnection::new();
+        mock_db.expect_document_key_field().return_const("_key");
         mock_db.expect_query_documents()
             .returning(|_, _| Box::pin(async { Ok(vec![
                 json!({"_key":"k1",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
@@ -246,7 +382,9 @@ mod tests {
 
     #[test]
     fn build_query_empty_filters() {
-        let db = Arc::new(MockDatabaseConnection::new());
+        let mut db = MockDatabaseConnection::new();
+        db.expect_document_key_field().return_const("_key");
+        let db = Arc::new(db);
         let (aql, _) = PersistenceQuery::new(db).build_aql(false);
         assert!(aql.contains("FILTER true"));
     }
@@ -255,6 +393,7 @@ mod tests {
     #[should_panic(expected = "AQL query failed")]
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
+        mock_db.expect_document_key_field().return_const("_key");
         mock_db.expect_query_keys().returning(|_, _| {
             Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
         });
@@ -271,7 +410,9 @@ mod tests {
 
     #[test]
     fn build_query_single_and_multi() {
-        let db = Arc::new(MockDatabaseConnection::new());
+        let mut db = MockDatabaseConnection::new();
+        db.expect_document_key_field().return_const("_key");
+        let db = Arc::new(db);
         let (a_single, _) = PersistenceQuery::new(db.clone()).with::<H>().build_aql(false);
         assert!(a_single.contains(&format!("doc.`{}` != null", H::name())));
 

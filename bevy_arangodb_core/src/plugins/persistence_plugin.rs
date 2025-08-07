@@ -5,6 +5,7 @@
 
 use crate::registration::COMPONENT_REGISTRY;
 use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist, TransactionOperation, Collection};
+use crate::db::connection::DatabaseConnectionResource;
 use crate::versioning::version_manager::VersionKey;
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
@@ -19,6 +20,8 @@ use std::sync::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
+
+use crate::query::PersistenceQueryCache;
 
 static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
     Arc::new(
@@ -590,12 +593,14 @@ fn commit_event_listener(
 
 impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
-        // Initialize the global IO task pool so IoTaskPool::get() won’t panic
+        // Initialize the global IO task pool so IoTaskPool::get() won't panic
         IoTaskPool::get_or_init(|| TaskPool::new());
 
         let session = PersistenceSession::new(self.db.clone());
         app.insert_resource(session);
         app.insert_resource(self.config.clone());
+        // Add the database connection as a resource
+        app.insert_resource(DatabaseConnectionResource(self.db.clone()));
         app.init_resource::<RegisteredPersistTypes>();
         app.add_event::<TriggerCommit>();
         app.add_event::<CommitCompleted>();
@@ -604,6 +609,9 @@ impl Plugin for PersistencePluginCore {
 
         // Insert the dedicated Tokio runtime from the global static.
         app.insert_resource(TokioRuntime(TOKIO_RUNTIME.clone()));
+
+        // Add the query cache
+        app.init_resource::<PersistenceQueryCache>();
 
         // Iterate over the registration functions from the global registry.
         // Using .iter() instead of .drain() prevents test pollution.

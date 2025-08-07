@@ -1,14 +1,15 @@
-//! Defines a Domain-Specific Language (DSL) for building type-safe AQL queries.
+//! Defines a Domain-Specific Language (DSL) for building type-safe database queries.
 //!
 //! This module provides the `Expression` enum and related structures to represent
 //! query components like fields, literals, and operations, allowing for the
-//! programmatic construction of complex, safe AQL filters.
+//! programmatic construction of complex, safe query filters.
 
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
+use crate::DatabaseConnection;
 
-/// Represents a part of an AQL query, forming an expression tree.
+/// Represents a part of a database query, forming an expression tree.
 #[derive(Clone, Debug)]
 pub enum Expression {
     /// A literal value, like a number or string.
@@ -24,12 +25,14 @@ pub enum Expression {
         lhs: Box<Expression>,
         rhs: Box<Expression>,
     },
+    /// A reference to the document's unique key field.
+    DocumentKey,
 }
 
-/// Represents the different binary operators available in AQL.
+/// Represents the different binary operators available in database queries.
 #[derive(Clone, Debug)]
 pub enum BinaryOperator {
-    Eq, Gt, Gte, Lt, Lte, And, Or,
+    Eq, Gt, Gte, Lt, Lte, And, Or, In,
 }
 
 impl Expression {
@@ -101,6 +104,7 @@ impl Expression {
 pub(crate) fn translate_expression(
     expr: &Expression,
     bind_vars: &mut HashMap<String, Value>,
+    db: &dyn DatabaseConnection,
 ) -> String {
     match expr {
         Expression::Literal(val) => {
@@ -109,28 +113,38 @@ pub(crate) fn translate_expression(
             format!("@{}", bind_name)
         }
         Expression::Field { component_name, field_name } => {
-            // Special handling for _key field
-            if component_name == &"_key" {
-                "doc._key".to_string()
-            } else if field_name.is_empty() {
+            if field_name.is_empty() {
                 format!("doc.`{}`", component_name)
             } else {
                 format!("doc.`{}`.`{}`", component_name, field_name)
             }
         }
+        Expression::DocumentKey => {
+            format!("doc.{}", db.document_key_field())
+        }
         Expression::BinaryOp { op, lhs, rhs } => {
-            let op_str = match op {
-                BinaryOperator::Eq => "==",
-                BinaryOperator::Gt => ">",
-                BinaryOperator::Gte => ">=",
-                BinaryOperator::Lt => "<",
-                BinaryOperator::Lte => "<=",
-                BinaryOperator::And => "AND",
-                BinaryOperator::Or => "OR",
-            };
-            let lhs_str = translate_expression(lhs, bind_vars);
-            let rhs_str = translate_expression(rhs, bind_vars);
-            format!("({} {} {})", lhs_str, op_str, rhs_str)
+            match op {
+                BinaryOperator::In => {
+                    let lhs_str = translate_expression(lhs, bind_vars, db);
+                    let rhs_str = translate_expression(rhs, bind_vars, db);
+                    format!("({} IN {})", lhs_str, rhs_str)
+                },
+                _ => {
+                    let op_str = match op {
+                        BinaryOperator::Eq => "==",
+                        BinaryOperator::Gt => ">",
+                        BinaryOperator::Gte => ">=",
+                        BinaryOperator::Lt => "<",
+                        BinaryOperator::Lte => "<=",
+                        BinaryOperator::And => "AND",
+                        BinaryOperator::Or => "OR",
+                        BinaryOperator::In => unreachable!(), // Handled above
+                    };
+                    let lhs_str = translate_expression(lhs, bind_vars, db);
+                    let rhs_str = translate_expression(rhs, bind_vars, db);
+                    format!("({} {} {})", lhs_str, op_str, rhs_str)
+                }
+            }
         }
     }
 }
