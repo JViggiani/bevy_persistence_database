@@ -450,20 +450,6 @@ async fn test_persistent_query_system_param() {
     assert!(guids.contains(&low_health_guid), "Low health entity not loaded");
 }
 
-// The test system that uses PersistentQuery with filter
-fn test_filtered_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
-    // Add filter for Health > 100
-    query = query.filter(Health::value().gt(100));
-    
-    // This will load entities from the database
-    for (entity, (health, position)) in query.iter_with_loading() {
-        println!("Entity {:?} has health {} and position ({}, {})", 
-            entity, health.value, position.x, position.y);
-        // Additional assertion
-        assert!(health.value > 100, "Filter should only return entities with health > 100");
-    }
-}
-
 #[tokio::test]
 async fn test_persistent_query_with_filter() {
     let (db, _container) = setup().await;
@@ -481,13 +467,27 @@ async fn test_persistent_query_with_filter() {
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
     
-    // Add system that uses the PersistentQuery with filter
-    app2.add_systems(bevy::prelude::Update, test_filtered_query_system);
+    // Define a system that will test the filtered query
+    fn filtered_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
+        // Add filter for Health > 100
+        query = query.filter(Health::value().gt(100));
+        
+        // This will load entities from the database
+        for (_entity, (health, position)) in query.iter_with_loading() {
+            println!("Entity has health {} and position ({}, {})", 
+                health.value, position.x, position.y);
+            // Assertion to verify filter works
+            assert!(health.value > 100, "Filter should only return entities with health > 100");
+        }
+    }
+    
+    // Add the system that tests filtering
+    app2.add_systems(bevy::prelude::Update, filtered_query_system);
     
     // Run the app to execute the system
     app2.update();
     
-    // 3. Verify that only matching entities were loaded (Health > 100)
+    // Verify that only matching entities were loaded (Health > 100)
     let mut health_query = app2.world_mut().query::<&Health>();
     let entities_with_health: Vec<i32> = health_query.iter(&app2.world())
         .map(|health| health.value)

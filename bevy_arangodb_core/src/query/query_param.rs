@@ -51,7 +51,7 @@ pub struct PersistentQuery<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'sta
     /// The database connection
     db: Res<'w, DatabaseConnectionResource>,
     /// The persistence session
-    session: ResMut<'w, PersistenceSession>,
+    session: Res<'w, PersistenceSession>,
     /// The query cache
     cache: ResMut<'w, PersistenceQueryCache>,
     /// Commands for spawning entities
@@ -93,8 +93,8 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                     query = query.filter(expr.clone());
                 }
                 
-                // Pass the database connection and components - no World access needed
-                let _loaded_entities = query.fetch_into_world_with_commands(
+                // Load entities using the helper method that works with immutable session access
+                query.fetch_into_world_with_commands(
                     &self.db.0,
                     &self.session,
                     &mut self.commands

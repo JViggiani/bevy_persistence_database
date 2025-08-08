@@ -220,54 +220,39 @@ impl PersistenceQuery {
                 // Components will be added by a system that runs after this
                 for &comp in &self.component_names {
                     if let Some(val) = doc.get(comp) {
-                        if let Some(_deser) = session.component_deserializers.get(comp) {
+                        if let Some(_) = session.component_deserializers.get(comp) {
                             let val_clone = val.clone();
                             let comp_name = comp;
                             
                             // Use queue to defer component insertion
-                            commands.entity(entity).queue(move |mut entity_world_mut: EntityWorldMut| {
-                                // First, check if the component name exists in the session
+                            commands.entity(entity).queue(move |mut entity_world_mut: EntityWorldMut<'_>| {
+                                // First, check if the component deserializer exists
                                 let has_deserializer = {
                                     let world = unsafe { entity_world_mut.world_mut() };
-                                    world
-                                        .get_resource::<PersistenceSession>()
+                                    world.get_resource::<PersistenceSession>()
                                         .map(|session| session.component_deserializers.contains_key(comp_name))
                                         .unwrap_or(false)
                                 };
-
+                                
                                 // Only proceed if we have a deserializer
                                 if has_deserializer {
-                                    // SAFETY: We need to transmute the deserializer to extend its lifetime
-                                    // This is safe because:
-                                    // 1. We know the deserializer exists in PersistenceSession
-                                    // 2. PersistenceSession is a resource that outlives this closure
-                                    // 3. We drop the world reference before calling the deserializer
+                                    // Use a separate scope to avoid borrow conflicts
+                                    let world_ptr = unsafe { entity_world_mut.world_mut() as *mut World };
                                     
-                                    // Use a separate scope to limit the immutable borrow
-                                    let deserializer_fn = {
-                                        let world = unsafe { entity_world_mut.world_mut() };
-                                        let session = world.resource::<PersistenceSession>();
+                                    // Get a pointer to the deserializer, which we'll use after dropping all borrows
+                                    let deserializer_ptr: *const Box<dyn Fn(&mut World, Entity, Value) -> Result<(), PersistenceError> + Send + Sync> = unsafe {
+                                        let session = (*world_ptr).get_resource::<PersistenceSession>().unwrap();
                                         let deserializer = session.component_deserializers.get(comp_name).unwrap();
-                                        
-                                        // Create a type-erased function pointer that can be called after the borrow is dropped
-                                        let fn_ptr = deserializer as *const _;
-                                        
-                                        // This is safe because the deserializer is 'static (it's in a resource)
-                                        unsafe {
-                                            std::mem::transmute::<_, fn(&mut World, Entity, Value) -> Result<(), PersistenceError>>(fn_ptr)
-                                        }
+                                        deserializer as *const _
                                     };
                                     
-                                    // Now we can safely get a new mutable borrow of the world
-                                    let world = unsafe { entity_world_mut.world_mut() };
+                                    // Now get a fresh borrow of world and call the deserializer
+                                    let world = unsafe { &mut *world_ptr };
                                     
-                                    // Call the deserializer
-                                    match deserializer_fn(world, entity, val_clone.clone()) {
-                                        Ok(_) => {},
-                                        Err(e) => {
-                                            panic!("Component deserialization failed: {}", e);
-                                        }
-                                    }
+                                    // Call the deserializer through the pointer
+                                    let deserializer = unsafe { &*deserializer_ptr };
+                                    deserializer(world, entity, val_clone.clone())
+                                        .expect("Component deserialization failed");
                                 }
                             });
                         }
