@@ -85,7 +85,13 @@ pub enum CommitStatus {
 }
 
 #[derive(Resource)]
-struct TokioRuntime(Arc<Runtime>);
+pub struct TokioRuntime(pub Arc<Runtime>);
+
+impl TokioRuntime {
+    pub fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
+        self.0.block_on(fut)
+    }
+}
 
 /// A system that handles the `TriggerCommit` event to change the `CommitStatus`.
 fn handle_commit_trigger(world: &mut World) {

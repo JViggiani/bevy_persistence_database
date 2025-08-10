@@ -391,63 +391,72 @@ fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>
     }
 }
 
-#[tokio::test]
-async fn test_persistent_query_system_param() {
-    let (db, _container) = setup().await;
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+// Replace the async tokio test with a sync test that owns its own runtime
+#[test]
+fn test_persistent_query_system_param() {
+    // Build a dedicated runtime for the async setup/teardown calls used in this test
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
 
-    // 1. Create some test data
-    let entity_high_health = app
-        .world_mut()
-        .spawn((
-            Health { value: 150 },
-            Position { x: 10.0, y: 20.0 },
-        ))
-        .id();
-    
-    let entity_low_health = app
-        .world_mut()
-        .spawn((
-            Health { value: 50 },
-            Position { x: 5.0, y: 5.0 },
-        ))
-        .id();
+    rt.block_on(async {
+        let (db, _container) = setup().await;
+        let mut app = App::new();
+        app.add_plugins(PersistencePlugins(db.clone()));
 
-    app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+        // 1. Create some test data
+        let entity_high_health = app
+            .world_mut()
+            .spawn((
+                Health { value: 150 },
+                Position { x: 10.0, y: 20.0 },
+            ))
+            .id();
+        
+        let entity_low_health = app
+            .world_mut()
+            .spawn((
+                Health { value: 50 },
+                Position { x: 5.0, y: 5.0 },
+            ))
+            .id();
 
-    // Get the GUIDs for verification
-    let high_health_guid = app.world().get::<Guid>(entity_high_health).unwrap().id().to_string();
-    let low_health_guid = app.world().get::<Guid>(entity_low_health).unwrap().id().to_string();
+        app.update();
+        commit(&mut app).await.expect("Initial commit failed");
 
-    // 2. Create a new app that will use the PersistentQuery
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
-    
-    // Add system that uses the PersistentQuery
-    app2.add_systems(bevy::prelude::Update, test_persistent_query_system);
-    
-    // Run the app to execute the system
-    app2.update();
-    
-    // 3. Verify that entities were loaded
-    let mut health_query = app2.world_mut().query::<&Health>();
-    let health_count = health_query.iter(&app2.world()).count();
-    assert_eq!(health_count, 2, "Should have loaded two entities with Health component");
-    
-    // Verify the Position component was also loaded
-    let mut position_query = app2.world_mut().query::<&Position>();
-    let position_count = position_query.iter(&app2.world()).count();
-    assert_eq!(position_count, 2, "Should have loaded two entities with Position component");
-    
-    // Check that we have the right GUIDs
-    let mut guid_query = app2.world_mut().query::<&Guid>();
-    let guids: Vec<String> = guid_query.iter(&app2.world())
-        .map(|guid| guid.id().to_string())
-        .collect();
-    assert!(guids.contains(&high_health_guid), "High health entity not loaded");
-    assert!(guids.contains(&low_health_guid), "Low health entity not loaded");
+        // Get the GUIDs for verification
+        let high_health_guid = app.world().get::<Guid>(entity_high_health).unwrap().id().to_string();
+        let low_health_guid = app.world().get::<Guid>(entity_low_health).unwrap().id().to_string();
+
+        // 2. Create a new app that will use the PersistentQuery
+        let mut app2 = App::new();
+        app2.add_plugins(PersistencePlugins(db.clone()));
+        
+        // Add system that uses the PersistentQuery
+        app2.add_systems(bevy::prelude::Update, test_persistent_query_system);
+        
+        // Run the app to execute the system (DB fetch + component insertion are done here)
+        app2.update();
+        
+        // 3. Verify that entities were loaded
+        let mut health_query = app2.world_mut().query::<&Health>();
+        let health_count = health_query.iter(&app2.world()).count();
+        assert_eq!(health_count, 2, "Should have loaded two entities with Health component");
+        
+        // Verify the Position component was also loaded
+        let mut position_query = app2.world_mut().query::<&Position>();
+        let position_count = position_query.iter(&app2.world()).count();
+        assert_eq!(position_count, 2, "Should have loaded two entities with Position component");
+        
+        // Check that we have the right GUIDs
+        let mut guid_query = app2.world_mut().query::<&Guid>();
+        let guids: Vec<String> = guid_query.iter(&app2.world())
+            .map(|guid| guid.id().to_string())
+            .collect();
+        assert!(guids.contains(&high_health_guid), "High health entity not loaded");
+        assert!(guids.contains(&low_health_guid), "Low health entity not loaded");
+    });
 }
 
 #[tokio::test]
@@ -532,10 +541,12 @@ async fn test_persistent_query_caching() {
     let mut db_mock = MockDatabaseConnection::new();
     
     // Track query calls
-    let mut query_count = 0;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let query_count = Arc::new(AtomicUsize::new(0));
+    let qc = query_count.clone();
     db_mock.expect_query_documents()
         .returning(move |_, _| {
-            query_count += 1;
+            qc.fetch_add(1, Ordering::SeqCst);
             Box::pin(async {
                 Ok(vec![
                     serde_json::json!({
@@ -546,7 +557,7 @@ async fn test_persistent_query_caching() {
                 ])
             })
         });
-    
+
     // Setup other required methods with minimal implementations
     db_mock.expect_query_keys()
         .returning(|_, _| Box::pin(async { Ok(vec!["test_key".to_string()]) }));
@@ -564,12 +575,12 @@ async fn test_persistent_query_caching() {
     
     // Since our mock setup is counting query calls, we should see only 1 call
     // despite the system using the query twice (second time should use cache)
-    assert_eq!(query_count, 1, "Database should only be queried once due to caching");
+    assert_eq!(query_count.load(std::sync::atomic::Ordering::SeqCst), 1, "Database should only be queried once due to caching");
     
     // Run again with force refresh to verify it bypasses cache
     app2.add_systems(bevy::prelude::Update, test_force_refresh_system);
     app2.update();
     
     // Now we should see a second query
-    assert_eq!(query_count, 2, "Force refresh should bypass cache and query again");
+    assert_eq!(query_count.load(std::sync::atomic::Ordering::SeqCst), 2, "Force refresh should bypass cache and query again");
 }

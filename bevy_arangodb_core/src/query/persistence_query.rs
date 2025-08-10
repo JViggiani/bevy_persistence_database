@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
-use crate::{DatabaseConnection, Guid, Persist, PersistenceSession, PersistenceError};
+use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use crate::Collection;
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
 use crate::query::expression::{Expression, translate_expression};
 use crate::versioning::version_manager::VersionKey;
-use bevy::prelude::{Component, World, Commands, EntityWorldMut, Entity};
+use bevy::prelude::{Component, World};
 
 /// AQL query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
@@ -157,80 +157,6 @@ impl PersistenceQuery {
             .expect("resource deserialization failed");
 
         world.insert_resource(session);
-        result
-    }
-
-    /// Load matching entities into the World using Commands
-    /// This is primarily used by the PersistentQuery SystemParam
-    pub(crate) fn fetch_into_world_with_commands(
-        &self, 
-        db: &Arc<dyn DatabaseConnection>,
-        session: &PersistenceSession,
-        commands: &mut Commands
-    ) -> Vec<bevy::prelude::Entity> {
-        // fetch full documents in one go
-        let (aql, bind_vars) = self.build_aql(true);
-        
-        bevy::log::debug!("fetch_into_world_with_commands: Executing query synchronously");
-        
-        // Use synchronous query method to avoid Tokio runtime issues
-        let documents = match db.query_documents_sync(aql, bind_vars) {
-            Ok(docs) => {
-                bevy::log::debug!("Retrieved {} documents from database", docs.len());
-                docs
-            },
-            Err(e) => {
-                bevy::log::error!("Error fetching documents: {}", e);
-                Vec::new() // Return empty result on error
-            }
-        };
-
-        bevy::log::debug!("Processing {} documents", documents.len());
-        
-        let mut result = Vec::with_capacity(documents.len());
-        if documents.is_empty() {
-            return result;
-        }
-
-        // First pass: collect existing GUIDs and create new entities
-        let mut existing = HashMap::new();
-        let mut entities_to_create = Vec::new();
-        
-        for doc in &documents {
-            let key_field = db.document_key_field();
-            let key = doc[key_field].as_str().unwrap().to_string();
-            
-            // Check if we already have this entity
-            if let Some(guid) = session.entity_keys.iter()
-                .find(|(_, k)| **k == key)
-                .map(|(e, _)| *e) 
-            {
-                existing.insert(key, guid);
-            } else {
-                entities_to_create.push(key);
-            }
-        }
-        
-        // Create all new entities in one go - without any deferred logic
-        bevy::log::debug!("Creating {} new entities", entities_to_create.len());
-        for key in entities_to_create {
-            let entity = commands.spawn(Guid::new(key.clone())).id();
-            existing.insert(key, entity);
-        }
-        
-        // We'll collect entity IDs and return them, but skip component insertion for now
-        for doc in documents {
-            let key_field = db.document_key_field();
-            let key = doc[key_field].as_str().unwrap().to_string();
-            
-            // Get the entity (must exist now)
-            if let Some(&entity) = existing.get(&key) {
-                result.push(entity);
-            }
-        }
-
-        bevy::log::debug!("Returning {} entities from query", result.len());
-        // We'll let the caller handle the rest - this ensures we don't block or hang
         result
     }
 }

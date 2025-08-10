@@ -13,6 +13,7 @@ use crate::query::persistence_query::WithComponentExt;
 use crate::{DatabaseConnectionResource, PersistenceSession, Guid, BEVY_PERSISTENCE_VERSION_FIELD};
 use crate::query::PersistenceQuery;
 use crate::versioning::version_manager::VersionKey;
+use crate::plugins::persistence_plugin::TokioRuntime;
 
 /// Caching policy for persistent queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +80,8 @@ pub struct PersistentQuery<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'sta
     commands: Commands<'w, 's>,
     /// Local state that persists across invocations
     state: Local<'s, PersistentQueryState>,
+    /// + add: runtime to drive async DB calls
+    runtime: Res<'w, TokioRuntime>,
 }
 
 // A custom command to deserialize a component
@@ -171,23 +174,21 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                 // Execute synchronously - this will block until complete
                 bevy::log::info!("Executing synchronous database query for components: {:?}", comp_names);
                 let (aql, bind_vars) = query.build_aql(true);
-                
-                match self.db.0.query_documents_sync(aql, bind_vars) {
+
+                // - replace sync call with runtime-driven async call
+                match self.runtime.block_on(self.db.0.query_documents(aql, bind_vars)) {
                     Ok(documents) => {
-                        bevy::log::debug!("Retrieved {} documents synchronously", documents.len());
-                        
-                        // Process each document, creating entities and components
+                        bevy::log::debug!("Retrieved {} documents (async via runtime)", documents.len());
                         self.process_documents(documents, &comp_names);
-                        
                         if let Some(hash) = self.state.query_hash {
                             self.cache.insert(hash);
                         }
-                    },
+                    }
                     Err(e) => {
-                        bevy::log::error!("Error fetching documents synchronously: {}", e);
+                        bevy::log::error!("Error fetching documents: {}", e);
                     }
                 }
-                
+
                 // Mark as loaded for this frame
                 self.state.loaded_this_frame = true;
             } else {

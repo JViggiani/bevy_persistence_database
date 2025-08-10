@@ -13,6 +13,7 @@ use futures::FutureExt;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
+use once_cell::sync::Lazy;
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
@@ -67,6 +68,14 @@ impl ArangoDbConnection {
         Ok(Self { db })
     }
 }
+
+// Shared multi-thread runtime for sync operations (avoid per-call runtimes)
+static SYNC_RT: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build sync Tokio runtime")
+});
 
 impl DatabaseConnection for ArangoDbConnection {
     fn document_key_field(&self) -> &'static str {
@@ -378,15 +387,8 @@ impl DatabaseConnection for ArangoDbConnection {
         aql: String,
         bind_vars: HashMap<String, Value>,
     ) -> Result<Vec<Value>, PersistenceError> {
-        // Create a dedicated single-threaded runtime for this call
-        // This avoids conflicts with any existing Tokio runtimes
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io() // Enable IO to allow network operations
-            .build()
-            .map_err(|e| PersistenceError::new(format!("Failed to create runtime: {}", e)))?;
-        
-        // Run the async query on this dedicated runtime
-        runtime.block_on(async {
+        // Drive the async query on the shared multi-thread runtime.
+        SYNC_RT.block_on(async {
             let query = AqlQuery::builder()
                 .query(&aql)
                 .bind_vars(
@@ -395,8 +397,9 @@ impl DatabaseConnection for ArangoDbConnection {
                         .collect()
                 )
                 .build();
-                
-            self.db.aql_query(query)
+
+            self.db
+                .aql_query(query)
                 .await
                 .map_err(|e| PersistenceError::new(e.to_string()))
         })
