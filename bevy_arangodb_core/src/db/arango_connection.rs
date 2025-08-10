@@ -67,6 +67,36 @@ impl ArangoDbConnection {
 
         Ok(Self { db })
     }
+
+    /// Ensure a database exists, creating it if necessary.
+    pub async fn ensure_database(
+        url: &str,
+        user: &str,
+        pass: &str,
+        db_name: &str,
+    ) -> Result<(), PersistenceError> {
+        // Establish a root connection to the server
+        let conn = Connection::establish_jwt(url, user, pass)
+            .await
+            .map_err(|e| PersistenceError::new(e.to_string()))?;
+
+        // Try to create the database; ignore duplicate-name errors
+        match conn.create_database(db_name).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let ClientError::Arango(ref arango_error) = e {
+                    // 1207 = ARANGO_DUPLICATE_NAME
+                    if arango_error.error_num() == 1207 {
+                        return Ok(());
+                    }
+                }
+                Err(PersistenceError::new(format!(
+                    "Failed to ensure database '{}': {}",
+                    db_name, e
+                )))
+            }
+        }
+    }
 }
 
 // Shared multi-thread runtime for sync operations (avoid per-call runtimes)
