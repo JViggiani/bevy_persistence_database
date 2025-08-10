@@ -10,9 +10,16 @@ use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, Generi
 /// This function will be executed once when the test binary starts.
 #[ctor::ctor]
 fn initialize_logging() {
-    // The `try_init` call will fail if the logger is already set, which is fine.
-    // This ensures that logging is initialized exactly once.
-    let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    // Set the RUST_LOG environment variable if it's not already set
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", "debug,bevy_arangodb_core=trace");
+    }
+    
+    // Initialize simple logger
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_test_writer()
+        .init();
 }
 
 /// Starts a new ArangoDB container and returns a connection and the container handle.

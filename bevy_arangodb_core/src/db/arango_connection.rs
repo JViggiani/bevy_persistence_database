@@ -372,4 +372,33 @@ impl DatabaseConnection for ArangoDbConnection {
         }
         .boxed()
     }
+
+    fn query_documents_sync(
+        &self,
+        aql: String,
+        bind_vars: HashMap<String, Value>,
+    ) -> Result<Vec<Value>, PersistenceError> {
+        // Create a dedicated single-threaded runtime for this call
+        // This avoids conflicts with any existing Tokio runtimes
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io() // Enable IO to allow network operations
+            .build()
+            .map_err(|e| PersistenceError::new(format!("Failed to create runtime: {}", e)))?;
+        
+        // Run the async query on this dedicated runtime
+        runtime.block_on(async {
+            let query = AqlQuery::builder()
+                .query(&aql)
+                .bind_vars(
+                    bind_vars.iter()
+                        .map(|(k,v)| (k.as_str(), v.clone()))
+                        .collect()
+                )
+                .build();
+                
+            self.db.aql_query(query)
+                .await
+                .map_err(|e| PersistenceError::new(e.to_string()))
+        })
+    }
 }

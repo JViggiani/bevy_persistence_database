@@ -23,6 +23,7 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
+use crate::components::Guid;
 
 /// A unique ID generator for correlating commit requests and responses.
 static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);

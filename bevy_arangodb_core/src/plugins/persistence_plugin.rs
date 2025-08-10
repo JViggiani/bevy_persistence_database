@@ -613,6 +613,8 @@ impl Plugin for PersistencePluginCore {
         // Add the query cache
         app.init_resource::<PersistenceQueryCache>();
 
+        // Remove the process_queued_component_data system - we don't need it anymore
+
         // Iterate over the registration functions from the global registry.
         // Using .iter() instead of .drain() prevents test pollution.
         let registry = COMPONENT_REGISTRY.lock().unwrap();

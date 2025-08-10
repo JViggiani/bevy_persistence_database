@@ -106,6 +106,16 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
         bind_vars: std::collections::HashMap<String, Value>,
     ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>>;
 
+    /// Synchronous version of query_documents for testing and system parameters
+    /// Default implementation just panics - implementations should override this
+    fn query_documents_sync(
+        &self,
+        _aql: String,
+        _bind_vars: std::collections::HashMap<String, Value>,
+    ) -> Result<Vec<Value>, PersistenceError> {
+        panic!("query_documents_sync not implemented");
+    }
+
     fn fetch_document(
         &self,
         entity_key: &str,
