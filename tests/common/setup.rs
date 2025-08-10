@@ -6,40 +6,42 @@ use bevy_arangodb_core::{
 };
 use std::sync::Arc;
 use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
-use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}};
+use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}, Mutex};
 use tokio::runtime::Runtime;
 
 static TEST_RT: OnceLock<Arc<Runtime>> = OnceLock::new();
 
 struct GlobalContainerState {
     rt: Arc<Runtime>,
-    // Store the container in an Option so we can take() and drop it explicitly.
-    container: Option<ContainerAsync<GenericImage>>,
+    // Store the container and its ID; use Mutex<Option<..>> for safe take() in dtor/drop.
+    container: Mutex<Option<ContainerAsync<GenericImage>>>,
+    container_id: String,
     base_url: String,
 }
 
 impl Drop for GlobalContainerState {
     fn drop(&mut self) {
-        // Ensure the container drops inside a Tokio runtime
-        let _enter = self.rt.enter();
-
         // Keep container running if flag is set
         let keep = std::env::var("BEVY_ARANGODB_KEEP_CONTAINER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         if keep {
-            if let Some(c) = self.container.take() {
-                // Intentionally leak to keep container for debugging
-                std::mem::forget(c);
+            if self.container.lock().unwrap().is_some() {
+                eprintln!("[bevy_arangodb tests] BEVY_ARANGODB_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", self.base_url);
             }
-            eprintln!("[bevy_arangodb tests] BEVY_ARANGODB_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", self.base_url);
             return;
         }
 
-        // Drop the container to stop it
-        if let Some(c) = self.container.take() {
-            drop(c);
+        // Force-remove the container using docker CLI (blocking, no Tokio runtime required)
+        if self.container.lock().unwrap().is_some() {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", "-v", &self.container_id])
+                .status();
+            // Prevent async Drop from running (which would require a Tokio context)
+            if let Some(c) = self.container.lock().unwrap().take() {
+                std::mem::forget(c);
+            }
         }
     }
 }
@@ -47,7 +49,8 @@ impl Drop for GlobalContainerState {
 static GLOBAL: OnceLock<GlobalContainerState> = OnceLock::new();
 static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-async fn start_container() -> (ContainerAsync<GenericImage>, String) {
+// Start a single async container once for all tests.
+async fn start_container() -> (ContainerAsync<GenericImage>, String, String) {
     let container = GenericImage::new("arangodb", "3.12.5")
         .with_wait_for(WaitFor::message_on_stdout("is ready for business"))
         .with_env_var("ARANGO_ROOT_PASSWORD", "password")
@@ -57,7 +60,8 @@ async fn start_container() -> (ContainerAsync<GenericImage>, String) {
 
     let host_port = container.get_host_port_ipv4(8529).await.unwrap();
     let url = format!("http://127.0.0.1:{}", host_port);
-    (container, url)
+    let id = container.id().to_string();
+    (container, url, id)
 }
 
 fn ensure_global() -> &'static GlobalContainerState {
@@ -72,8 +76,13 @@ fn ensure_global() -> &'static GlobalContainerState {
                 )
             })
             .clone();
-        let (container, base_url) = rt.block_on(start_container());
-        GlobalContainerState { rt, container: Some(container), base_url }
+        let (container, base_url, container_id) = rt.block_on(start_container());
+        GlobalContainerState {
+            rt,
+            container: Mutex::new(Some(container)),
+            container_id,
+            base_url,
+        }
     })
 }
 
@@ -94,18 +103,44 @@ fn initialize_logging() {
     let _ = ensure_global();
 }
 
+// Run once after all tests complete to ensure the container is stopped unless explicitly kept.
+#[ctor::dtor]
+fn teardown_container() {
+    if let Some(state) = GLOBAL.get() {
+        // Keep container running if flag is set
+        let keep = std::env::var("BEVY_ARANGODB_KEEP_CONTAINER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if keep {
+            if state.container.lock().unwrap().is_some() {
+                eprintln!("[bevy_arangodb tests] BEVY_ARANGODB_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", state.base_url);
+            }
+            return;
+        }
+
+        // Stop/remove the container explicitly here (blocking) and skip async Drop
+        if state.container.lock().unwrap().is_some() {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", "-v", &state.container_id])
+                .status();
+            if let Some(c) = state.container.lock().unwrap().take() {
+                std::mem::forget(c);
+            }
+        }
+    }
+}
+
 // Guard that ensures correct drop within a runtime (no-op per test now)
 pub struct ContainerGuard {
-    rt: Arc<Runtime>,
     inner: Option<ContainerAsync<GenericImage>>,
 }
 
 impl Drop for ContainerGuard {
     fn drop(&mut self) {
-        // Enter the runtime so AsyncDrop can find a reactor
-        let _enter = self.rt.enter();
         if let Some(inner) = self.inner.take() {
-            drop(inner);
+            // Avoid async Drop at test shutdown; forget here too.
+            std::mem::forget(inner);
         }
     }
 }
@@ -133,7 +168,7 @@ pub fn setup_sync() -> (Arc<dyn DatabaseConnection>, ContainerGuard) {
     let db = state.rt.block_on(ArangoDbConnection::connect(&state.base_url, "root", "password", &db_name))
         .expect("Failed to connect to per-test database");
 
-    let guard = ContainerGuard { rt: state.rt.clone(), inner: None };
+    let guard = ContainerGuard { inner: None };
     (Arc::new(db), guard)
 }
 
