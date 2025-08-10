@@ -26,7 +26,6 @@ fn test_persist_many_entities() {
     app.add_plugins(PersistencePluginCore::new(db.clone()).with_config(config));
     
     // --- spawn phase ---
-    let start_spawn = Instant::now();
     for _ in 0..count {
         app.world_mut().spawn(Health { value: 42 });
     }

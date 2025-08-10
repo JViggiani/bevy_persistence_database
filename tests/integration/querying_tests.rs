@@ -1,10 +1,9 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
-    commit, commit_sync, Guid, Persist, persistence_plugin::PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
-    PersistentQuery, MockDatabaseConnection, BEVY_PERSISTENCE_VERSION_FIELD, DatabaseConnection,
+    commit_sync, Guid, Persist, persistence_plugin::PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
+    PersistentQuery, DatabaseConnection,
     db::connection::DatabaseConnectionResource,
 };
-use std::sync::Arc;
 use crate::common::*;
 
 #[test]
@@ -313,6 +312,7 @@ fn test_load_with_schema_mismatch() {
     .expect("Transaction to create bad doc failed")
     .remove(0);
 
+    // WHEN loading with .with::<Health>() – this should panic inside fetch_into
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
     run_async(
@@ -520,35 +520,11 @@ fn test_persistent_query_caching() {
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
     
-    // Override the database with a mock that counts calls
-    let mut db_mock = MockDatabaseConnection::new();
-    
-    // Track query calls
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    // Wrap the real DB so we can count query_documents() calls
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let query_count = Arc::new(AtomicUsize::new(0));
-    let qc = query_count.clone();
-    db_mock.expect_query_documents()
-        .returning(move |_, _| {
-            qc.fetch_add(1, Ordering::SeqCst);
-            Box::pin(async {
-                Ok(vec![
-                    serde_json::json!({
-                        "_key": "test_key",
-                        BEVY_PERSISTENCE_VERSION_FIELD: 1,
-                        "Health": { "value": 100 }
-                    })
-                ])
-            })
-        });
-
-    // Setup other required methods with minimal implementations
-    db_mock.expect_query_keys()
-        .returning(|_, _| Box::pin(async { Ok(vec!["test_key".to_string()]) }));
-    
-    db_mock.expect_fetch_resource()
-        .returning(|_| Box::pin(async { Ok(None) }));
-    
-    app2.insert_resource(DatabaseConnectionResource(Arc::new(db_mock) as Arc<dyn DatabaseConnection>));
+    let counting = Arc::new(CountingDbConnection::new(db.clone(), query_count.clone())) as Arc<dyn DatabaseConnection>;
+    app2.insert_resource(DatabaseConnectionResource(counting));
     
     // Add system that uses the PersistentQuery twice
     app2.add_systems(bevy::prelude::Update, test_cached_query_system);
@@ -556,14 +532,107 @@ fn test_persistent_query_caching() {
     // Run the app to execute the system
     app2.update();
     
-    // Since our mock setup is counting query calls, we should see only 1 call
-    // despite the system using the query twice (second time should use cache)
-    assert_eq!(query_count.load(std::sync::atomic::Ordering::SeqCst), 1, "Database should only be queried once due to caching");
+    // The second identical query should use cache, so only 1 DB call
+    assert_eq!(query_count.load(Ordering::SeqCst), 1, "Database should only be queried once due to caching");
     
     // Run again with force refresh to verify it bypasses cache
     app2.add_systems(bevy::prelude::Update, test_force_refresh_system);
     app2.update();
     
     // Now we should see a second query
-    assert_eq!(query_count.load(std::sync::atomic::Ordering::SeqCst), 2, "Force refresh should bypass cache and query again");
+    assert_eq!(query_count.load(Ordering::SeqCst), 2, "Force refresh should bypass cache and query again");
+}
+
+// Add a small adapter that wraps a real DatabaseConnection and counts query_documents calls.
+#[derive(Debug)]
+struct CountingDbConnection {
+    inner: std::sync::Arc<dyn DatabaseConnection>,
+    queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl CountingDbConnection {
+    fn new(
+        inner: std::sync::Arc<dyn DatabaseConnection>,
+        queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self { inner, queries }
+    }
+}
+
+impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
+    fn document_key_field(&self) -> &'static str {
+        self.inner.document_key_field()
+    }
+
+    fn execute_transaction(
+        &self,
+        operations: Vec<TransactionOperation>,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, bevy_arangodb_core::PersistenceError>> {
+        self.inner.execute_transaction(operations)
+    }
+
+    fn query_keys(
+        &self,
+        aql: String,
+        bind_vars: std::collections::HashMap<String, serde_json::Value>,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, bevy_arangodb_core::PersistenceError>> {
+        self.inner.query_keys(aql, bind_vars)
+    }
+
+    fn query_documents(
+        &self,
+        aql: String,
+        bind_vars: std::collections::HashMap<String, serde_json::Value>,
+    ) -> futures::future::BoxFuture<'static, Result<Vec<serde_json::Value>, bevy_arangodb_core::PersistenceError>> {
+        use futures::FutureExt;
+        let inner = self.inner.clone();
+        let counter = self.queries.clone();
+        async move {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            inner.query_documents(aql, bind_vars).await
+        }
+        .boxed()
+    }
+
+    fn query_documents_sync(
+        &self,
+        aql: String,
+        bind_vars: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<Vec<serde_json::Value>, bevy_arangodb_core::PersistenceError> {
+        self.inner.query_documents_sync(aql, bind_vars)
+    }
+
+    fn fetch_document(
+        &self,
+        entity_key: &str,
+    ) -> futures::future::BoxFuture<'static, Result<Option<(serde_json::Value, u64)>, bevy_arangodb_core::PersistenceError>> {
+        self.inner.fetch_document(entity_key)
+    }
+
+    fn fetch_component(
+        &self,
+        entity_key: &str,
+        comp_name: &str,
+    ) -> futures::future::BoxFuture<'static, Result<Option<serde_json::Value>, bevy_arangodb_core::PersistenceError>> {
+        self.inner.fetch_component(entity_key, comp_name)
+    }
+
+    fn fetch_resource(
+        &self,
+        resource_name: &str,
+    ) -> futures::future::BoxFuture<'static, Result<Option<(serde_json::Value, u64)>, bevy_arangodb_core::PersistenceError>> {
+        self.inner.fetch_resource(resource_name)
+    }
+
+    fn clear_entities(
+        &self,
+    ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
+        self.inner.clear_entities()
+    }
+
+    fn clear_resources(
+        &self,
+    ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
+        self.inner.clear_resources()
+    }
 }
