@@ -39,7 +39,7 @@ pub use plugins::{
 pub use query::{PersistenceQuery, PersistentQuery, PersistenceQueryCache, CachePolicy};
 
 pub use query::expression::{Expression, BinaryOperator};
-pub use resources::{PersistenceSession, commit_and_wait as commit};
+pub use resources::{PersistenceSession, commit, commit_sync};
 pub use persist::Persist;
 
 pub use versioning::VersionManager;

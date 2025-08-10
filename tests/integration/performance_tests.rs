@@ -1,6 +1,6 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
-    commit, persistence_plugin::PersistencePlugins, PersistenceQuery, PersistencePluginCore, 
+    commit_sync, persistence_plugin::PersistencePlugins, PersistenceQuery, PersistencePluginCore, 
     persistence_plugin::PersistencePluginConfig
 };
 use std::time::Instant;
@@ -8,9 +8,9 @@ use crate::common::*;
 
 // Mark this test as ignored by default - run manually to benchmark the system
 #[ignore]
-#[tokio::test]
-async fn test_persist_many_entities() {
-    let (db, _container) = setup().await;
+#[test]
+fn test_persist_many_entities() {
+    let (db, _container) = setup_sync();
     
     // Use a higher entity count to better demonstrate parallel performance
     let count = 50_000;
@@ -31,12 +31,9 @@ async fn test_persist_many_entities() {
         app.world_mut().spawn(Health { value: 42 });
     }
     app.update();
-    let duration_spawn = start_spawn.elapsed();
-    println!("Spawned {} entities in {:.2?}", count, duration_spawn);
-    
     // --- prepare & commit phase ---
     let start_commit = Instant::now();
-    let res = commit(&mut app).await;
+    let res = commit_sync(&mut app);
     let duration_commit = start_commit.elapsed();
     res.expect("Bulk commit failed");
     
@@ -53,10 +50,11 @@ async fn test_persist_many_entities() {
     app2.add_plugins(PersistencePlugins(db.clone()));
 
     let start_fetch = Instant::now();
-    let loaded = PersistenceQuery::new(db.clone())
-        .with::<Health>()
-        .fetch_into(app2.world_mut())
-        .await;
+    let loaded = run_async(
+        PersistenceQuery::new(db.clone())
+            .with::<Health>()
+            .fetch_into(app2.world_mut()),
+    );
     let duration_fetch = start_fetch.elapsed();
     
     println!(

@@ -18,7 +18,7 @@ use std::{
     },
 };
 use crate::persist::Persist;
-use crate::plugins::persistence_plugin::{CommitEventListeners};
+use crate::plugins::persistence_plugin::{CommitEventListeners, TokioRuntime};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use rayon::prelude::*;
@@ -395,7 +395,7 @@ impl PersistenceSession {
 /// This function provides a clean `await`-able interface for the event-driven
 /// commit system. It sends a `TriggerCommit` event, then waits for a
 /// `CommitCompleted` event with a matching correlation ID.
-pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
+pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
     let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = oneshot::channel();
 
@@ -438,6 +438,13 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
     })
     .await
     .map_err(|_| PersistenceError::new("Commit timed out after 15 seconds"))?
+}
+
+// Add a synchronous convenience that uses the plugin’s runtime
+pub fn commit_sync(app: &mut App) -> Result<(), PersistenceError> {
+    // Clone the Arc<Runtime> out of the world without holding a borrow
+    let rt = { app.world().resource::<TokioRuntime>().0.clone() };
+    rt.block_on(commit(app))
 }
 
 #[cfg(test)]

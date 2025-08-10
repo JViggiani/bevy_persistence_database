@@ -160,7 +160,7 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                 
                 bevy::log::debug!("Will query for components (if any): {:?}", comp_names);
                 
-                // Build the synchronous query
+                // Build the query
                 let mut query = PersistenceQuery::new(self.db.0.clone());
                 
                 for comp_name in &comp_names {
@@ -171,11 +171,10 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                     query = query.filter(expr.clone());
                 }
                 
-                // Execute synchronously - this will block until complete
-                bevy::log::info!("Executing synchronous database query for components: {:?}", comp_names);
+                // Execute using the plugin runtime
+                bevy::log::info!("Executing database query for components: {:?}", comp_names);
                 let (aql, bind_vars) = query.build_aql(true);
 
-                // - replace sync call with runtime-driven async call
                 match self.runtime.block_on(self.db.0.query_documents(aql, bind_vars)) {
                     Ok(documents) => {
                         bevy::log::debug!("Retrieved {} documents (async via runtime)", documents.len());

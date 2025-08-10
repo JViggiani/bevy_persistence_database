@@ -6,6 +6,8 @@ use bevy_arangodb_core::{
 };
 use std::sync::Arc;
 use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
+use std::sync::OnceLock;
+use tokio::runtime::Runtime;
 
 /// This function will be executed once when the test binary starts.
 #[ctor::ctor]
@@ -42,6 +44,57 @@ pub async fn setup() -> (Arc<dyn DatabaseConnection>, ContainerAsync<GenericImag
     );
 
     (db, container)
+}
+
+// Shared runtime for sync helpers
+static TEST_RT: OnceLock<Arc<Runtime>> = OnceLock::new();
+
+/// Guard that ensures the testcontainers async drop runs inside a Tokio runtime.
+pub struct ContainerGuard {
+    rt: Arc<Runtime>,
+    inner: Option<ContainerAsync<GenericImage>>,
+}
+
+impl Drop for ContainerGuard {
+    fn drop(&mut self) {
+        // Enter the runtime so AsyncDrop can find a reactor
+        let _enter = self.rt.enter();
+        if let Some(inner) = self.inner.take() {
+            drop(inner);
+        }
+    }
+}
+
+/// Synchronous variant of setup() that handles the runtime and drop correctly.
+pub fn setup_sync() -> (Arc<dyn DatabaseConnection>, ContainerGuard) {
+    let rt = TEST_RT
+        .get_or_init(|| {
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build test tokio runtime"),
+            )
+        })
+        .clone();
+    let (db, container) = rt.block_on(setup());
+    let guard = ContainerGuard { rt, inner: Some(container) };
+    (db, guard)
+}
+
+/// Run any async future on the shared test runtime.
+pub fn run_async<F: std::future::Future>(fut: F) -> F::Output {
+    let rt = TEST_RT
+        .get_or_init(|| {
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build test tokio runtime"),
+            )
+        })
+        .clone();
+    rt.block_on(fut)
 }
 
 /// Creates a new App with the PersistencePlugin configured with batching enabled.

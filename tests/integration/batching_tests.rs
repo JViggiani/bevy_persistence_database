@@ -1,17 +1,16 @@
 use bevy::prelude::*;
 use bevy_arangodb_core::{
-    commit, PersistenceQuery, CommitStatus, PersistenceError, Guid,
+    commit_sync, PersistenceQuery, CommitStatus, PersistenceError, Guid,
     persistence_plugin::PersistencePlugins, MockDatabaseConnection, PersistencePluginCore,
     persistence_plugin::PersistencePluginConfig, Collection, TransactionOperation,
 };
-use crate::common::{setup, make_app};
-use crate::common::Health;
+use crate::common::{setup_sync, make_app, run_async, Health};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-#[tokio::test]
-async fn test_successful_batch_commit_of_new_entities() {
-    let (db, _c) = setup().await;
+#[test]
+fn test_successful_batch_commit_of_new_entities() {
+    let (db, _c) = setup_sync();
     let mut app = make_app(db.clone(), 2);
 
     // spawn 10 new entities
@@ -21,7 +20,7 @@ async fn test_successful_batch_commit_of_new_entities() {
     app.update();
 
     // commit
-    let res = commit(&mut app).await;
+    let res = commit_sync(&mut app);
     assert!(res.is_ok());
 
     // all entities got a Guid
@@ -33,16 +32,17 @@ async fn test_successful_batch_commit_of_new_entities() {
     // loading back from DB
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    let loaded = PersistenceQuery::new(db.clone())
-        .with::<Health>()
-        .fetch_into(app2.world_mut())
-        .await;
+    let loaded = run_async(
+        PersistenceQuery::new(db.clone())
+            .with::<Health>()
+            .fetch_into(app2.world_mut()),
+    );
     assert_eq!(loaded.len(), 10);
 }
 
-#[tokio::test]
-async fn test_batch_commit_with_updates_and_deletes() {
-    let (db, _c) = setup().await;
+#[test]
+fn test_batch_commit_with_updates_and_deletes() {
+    let (db, _c) = setup_sync();
     let mut app = make_app(db.clone(), 2);
 
     // initial 5 entities
@@ -50,7 +50,7 @@ async fn test_batch_commit_with_updates_and_deletes() {
         .map(|i| app.world_mut().spawn(Health { value: i }).id())
         .collect();
     app.update();
-    commit(&mut app).await.unwrap();
+    commit_sync(&mut app).unwrap();
 
     // update first two, delete last two
     app.world_mut().get_mut::<Health>(ids[0]).unwrap().value = 100;
@@ -59,16 +59,17 @@ async fn test_batch_commit_with_updates_and_deletes() {
     app.world_mut().entity_mut(ids[4]).despawn();
     app.update();
 
-    let res = commit(&mut app).await;
+    let res = commit_sync(&mut app);
     assert!(res.is_ok());
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    let loaded = PersistenceQuery::new(db.clone())
-        .with::<Health>()
-        .fetch_into(app2.world_mut())
-        .await;
+    let loaded = run_async(
+        PersistenceQuery::new(db.clone())
+            .with::<Health>()
+            .fetch_into(app2.world_mut()),
+    );
     // expect 3 left: values 100,101,2
     assert_eq!(loaded.len(), 3);
     let vals: Vec<_> = loaded.iter()
@@ -79,9 +80,9 @@ async fn test_batch_commit_with_updates_and_deletes() {
     assert!(vals.contains(&2));
 }
 
-#[tokio::test]
-async fn test_batch_commit_failure_propagates() {
-    let (db, _c) = setup().await;
+#[test]
+fn test_batch_commit_failure_propagates() {
+    let (db, _c) = setup_sync();
     let mut app = make_app(db.clone(), 2);
 
     // initial 5
@@ -89,21 +90,21 @@ async fn test_batch_commit_failure_propagates() {
         .map(|i| app.world_mut().spawn(Health { value: i }).id())
         .collect();
     app.update();
-    commit(&mut app).await.unwrap();
+    commit_sync(&mut app).unwrap();
 
     // induce conflict on the third entity
     let guid = app.world().get::<Guid>(ids[2]).unwrap().id().to_string();
-    let (_doc, ver) = db.fetch_document(&guid).await.unwrap().unwrap();
+    let (_doc, ver) = run_async(db.fetch_document(&guid)).unwrap().unwrap();
     // bump version directly
     let bad = serde_json::json!({"_key": guid,"bevy_persistence_version":ver+1});
-    db.execute_transaction(vec![
+    run_async(db.execute_transaction(vec![
         TransactionOperation::UpdateDocument {
             collection: Collection::Entities,
             key: guid.clone(),
             expected_current_version: ver,
             patch: bad.clone(),
         }
-    ]).await.unwrap();
+    ])).unwrap();
 
     // modify all locally
     for id in &ids {
@@ -111,13 +112,13 @@ async fn test_batch_commit_failure_propagates() {
     }
     app.update();
 
-    let res = commit(&mut app).await;
+    let res = commit_sync(&mut app);
     assert!(matches!(res, Err(PersistenceError::Conflict{ key }) if key == guid));
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 }
 
-#[tokio::test]
-async fn test_concurrent_batch_execution() {
+#[test]
+fn test_concurrent_batch_execution() {
     // Create a mock database that introduces a delay for each batch
     let mut db = MockDatabaseConnection::new();
     let batch_count = 5;
@@ -155,7 +156,7 @@ async fn test_concurrent_batch_execution() {
 
     // Measure time for the commit operation
     let start_time = Instant::now();
-    let res = commit(&mut app).await;
+    let res = commit_sync(&mut app);
     let elapsed = start_time.elapsed();
 
     assert!(res.is_ok());
@@ -180,8 +181,8 @@ async fn test_concurrent_batch_execution() {
     );
 }
 
-#[tokio::test]
-async fn test_atomic_multi_batch_commit() {
+#[test]
+fn test_atomic_multi_batch_commit() {
     // Create a mock database that will succeed for the first N-1 batches but fail on the last one
     let mut db = MockDatabaseConnection::new();
     let batch_count = 3;
@@ -209,30 +210,24 @@ async fn test_atomic_multi_batch_commit() {
         });
     
     let db_arc = Arc::new(db);
-    
-    // Create an app with a small batch size to ensure multiple batches
     let config = PersistencePluginConfig {
         batching_enabled: true,
-        commit_batch_size: 3, // Small batch size to ensure multiple batches
+        commit_batch_size: 3,
         thread_count: 2,
     };
-    
-    // Store the batch size before moving config
-    let batch_size = config.commit_batch_size;
-    
     let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config);
     let mut app = App::new();
     app.add_plugins(plugin);
     
     // Spawn enough entities to create multiple batches
-    let entity_count = batch_count * batch_size;
+    let entity_count = batch_count * 3; // use commit_batch_size = 3
     for i in 0..entity_count {
         app.world_mut().spawn(Health { value: i as i32 });
     }
     app.update();
     
     // Attempt the commit operation
-    let result = commit(&mut app).await;
+    let result = commit_sync(&mut app);
     
     // The entire operation should fail due to the failure in one batch
     assert!(result.is_err());
