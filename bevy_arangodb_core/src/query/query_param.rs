@@ -149,13 +149,13 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                 // For now, just use the explicitly requested components
                 comp_names.extend(self.state.additional_components.iter().copied());
                 
+                // If no components were specified, we still proceed and will insert any registered
+                // components found in the documents.
                 if comp_names.is_empty() {
-                    bevy::log::warn!("No component types could be determined for query. Database query will be skipped.");
-                    self.state.loaded_this_frame = true;
-                    return self.query.iter();
+                    bevy::log::info!("No explicit component filters; will load documents and insert any registered components present.");
                 }
                 
-                bevy::log::debug!("Will query for components: {:?}", comp_names);
+                bevy::log::debug!("Will query for components (if any): {:?}", comp_names);
                 
                 // Build the synchronous query
                 let mut query = PersistenceQuery::new(self.db.0.clone());
@@ -237,14 +237,40 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                         version,
                     );
 
-                    // Queue a command per component; Bevy will apply after the schedule
-                    for &comp_name in comp_names {
-                        if let Some(val) = doc.get(comp_name) {
-                            self.commands.queue(DeserializeComponentCommand {
-                                entity: entity_id,
-                                component_name: comp_name,
-                                json_value: val.clone(),
-                            });
+                    // Determine which components to insert:
+                    // - if comp_names is non-empty, use it
+                    // - otherwise, insert all registered components present in the document
+                    if !comp_names.is_empty() {
+                        for &comp_name in comp_names {
+                            if let Some(val) = doc.get(comp_name) {
+                                self.commands.queue(DeserializeComponentCommand {
+                                    entity: entity_id,
+                                    component_name: comp_name,
+                                    json_value: val.clone(),
+                                });
+                            }
+                        }
+                    } else {
+                        for (registered_name, _) in self.session.component_deserializers.iter() {
+                            if let Some(val) = doc.get(registered_name) {
+                                // registered_name is String; convert to &'static str is not possible.
+                                // But our deserializer map is String-keyed; the command stores &'static str.
+                                // Instead, directly queue a command per discovered component using the string key.
+                                // We use a small bridging: clone the value and look up by string at apply time.
+                                // Reuse DeserializeComponentCommand by passing a &'static str only for known static names.
+                                // For dynamic keys, dispatch via a tiny inline closure command.
+                                let registered_name_owned = registered_name.clone();
+                                let val_clone = val.clone();
+                                self.commands.queue(move |world: &mut bevy::prelude::World| {
+                                    world.resource_scope(|world, session: Mut<PersistenceSession>| {
+                                        if let Some(deser) = session.component_deserializers.get(&registered_name_owned) {
+                                            if let Err(e) = deser(world, entity_id, val_clone.clone()) {
+                                                bevy::log::error!("Failed to deserialize component {}: {}", registered_name_owned, e);
+                                            }
+                                        }
+                                    });
+                                });
+                            }
                         }
                     }
                 }
