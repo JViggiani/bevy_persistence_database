@@ -44,6 +44,9 @@ pub struct PersistenceSession {
     component_serializers: HashMap<TypeId, ComponentSerializer>,
     pub(crate) component_deserializers: HashMap<String, ComponentDeserializer>,
     pub(crate) component_type_id_to_name: HashMap<TypeId, &'static str>,
+    // New: reverse lookup and presence checkers
+    pub(crate) component_name_to_type_id: HashMap<String, TypeId>,
+    pub(crate) component_presence: HashMap<String, Box<dyn Fn(&World, Entity) -> bool + Send + Sync>>,
     resource_serializers: HashMap<TypeId, ResourceSerializer>,
     resource_deserializers: HashMap<String, ResourceDeserializer>,
     resource_name_to_type_id: HashMap<String, TypeId>,
@@ -63,6 +66,13 @@ impl PersistenceSession {
         let ser_key = T::name();
         let type_id = TypeId::of::<T>();
         self.component_type_id_to_name.insert(type_id, ser_key);
+        // reverse lookup
+        self.component_name_to_type_id.insert(ser_key.to_string(), type_id);
+        // presence checker
+        self.component_presence.insert(
+            ser_key.to_string(),
+            Box::new(|world: &World, entity: Entity| world.entity(entity).contains::<T>()),
+        );
         self.component_serializers.insert(type_id, Box::new(
             move |entity, world| -> Result<Option<(String, Value)>, PersistenceError> {
                 if let Some(c) = world.get::<T>(entity) {
@@ -137,6 +147,8 @@ impl PersistenceSession {
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
             component_type_id_to_name: HashMap::new(),
+            component_name_to_type_id: HashMap::new(),
+            component_presence: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),
@@ -155,6 +167,8 @@ impl PersistenceSession {
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
             component_type_id_to_name: HashMap::new(),
+            component_name_to_type_id: HashMap::new(),
+            component_presence: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),

@@ -379,7 +379,6 @@ fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>
     }
 }
 
-// Replace the async tokio test with a sync test that owns its own runtime
 #[test]
 fn test_persistent_query_system_param() {
     // Use sync setup with a guard that drops inside a runtime
@@ -635,4 +634,136 @@ impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
     ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
         self.inner.clear_resources()
     }
+}
+
+#[test]
+fn test_entity_not_overwritten_on_second_query_without_refresh() {
+    // GIVEN an entity persisted with Health { value: 100 }
+    let (db, _container) = setup_sync();
+    let mut app1 = App::new();
+    app1.add_plugins(PersistencePlugins(db.clone()));
+    let _e = app1.world_mut().spawn(Health { value: 100 }).id();
+    app1.update();
+    commit_sync(&mut app1).expect("commit failed");
+
+    // WHEN we load it into a fresh world via systems
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.insert_resource(TestState::default());
+
+    // 1) Load and capture GUID
+    app2.add_systems(bevy::prelude::Update, system_load_and_capture);
+    app2.update();
+
+    // 2) Mutate locally inside a system
+    app2.add_systems(bevy::prelude::Update, system_mutate_once);
+    app2.update();
+
+    // 3) Run another query via system that would fetch the same entity again
+    app2.add_systems(bevy::prelude::Update, system_second_load);
+    app2.update();
+
+    // THEN the local mutation is preserved (no overwrite by default)
+    // Read back health using the captured entity
+    let state = app2.world().resource::<TestState>();
+    let entity = state.entity.expect("Entity should be captured");
+    let health = app2.world().get::<Health>(entity).expect("Health not found");
+    assert_eq!(health.value, 123, "Local mutation should be preserved");
+}
+
+#[derive(bevy::prelude::Resource, Default)]
+struct TestState {
+    entity: Option<bevy::prelude::Entity>,
+    mutated: bool,
+}
+
+fn system_load_and_capture(
+    mut pq: PersistentQuery<&Health>,
+    mut state: bevy::prelude::ResMut<TestState>,
+) {
+    for (e, _) in pq.iter_with_loading() {
+        if state.entity.is_none() {
+            state.entity = Some(e);
+            break;
+        }
+    }
+}
+
+// Mutate once by entity. Avoids scanning by guid string.
+fn system_mutate_once(
+    mut q: bevy::prelude::Query<&mut Health>,
+    mut state: bevy::prelude::ResMut<TestState>,
+) {
+    if state.mutated {
+        return;
+    }
+    if let Some(e) = state.entity {
+        if let Ok(mut health) = q.get_mut(e) {
+            health.value = 123;
+            state.mutated = true;
+        }
+    }
+}
+
+// Second load: derive the key at runtime from the stored entity inside the system.
+fn system_second_load(
+    pq: PersistentQuery<&Health>,
+    q_guid: bevy::prelude::Query<&Guid>,
+    state: bevy::prelude::Res<TestState>,
+) {
+    if let Some(e) = state.entity {
+        if let Ok(g) = q_guid.get(e) {
+            let _ = pq
+                .filter(Guid::key_field().eq(g.id()))
+                .iter_with_loading()
+                .count();
+        }
+    }
+}
+
+#[test]
+fn test_force_refresh_overwrites() {
+    // GIVEN an entity persisted with Health { value: 100 }
+    let (db, _container) = setup_sync();
+    let mut app1 = App::new();
+    app1.add_plugins(PersistencePlugins(db.clone()));
+    let _e = app1.world_mut().spawn(Health { value: 100 }).id();
+    app1.update();
+    commit_sync(&mut app1).expect("commit failed");
+
+    // Load into app2 via manual builder, then mutate locally
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    let loaded = run_async(
+        PersistenceQuery::new(db.clone())
+            .with::<Health>()
+            .fetch_into(app2.world_mut()),
+    );
+    assert_eq!(loaded.len(), 1);
+    let e = loaded[0];
+    let guid = app2.world().get::<Guid>(e).unwrap().id().to_string();
+
+    // Local mutation
+    app2.world_mut().get_mut::<Health>(e).unwrap().value = 123;
+    app2.update();
+
+    // WHEN we run a system-param PersistentQuery with force_refresh
+    app2.insert_resource(TestKey(guid.clone()));
+    app2.add_systems(bevy::prelude::Update, force_refresh_system);
+    app2.update();
+
+    // THEN the DB value overwrites the local change
+    assert_eq!(app2.world().get::<Health>(e).unwrap().value, 100);
+}
+
+#[derive(bevy::prelude::Resource, Clone)]
+struct TestKey(String);
+
+fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res<TestKey>) {
+    // filter by key and force refresh
+    let _ = query
+        .filter(Guid::key_field().eq(key.0.as_str()))
+        .force_refresh()
+        .iter_with_loading()
+        .count();
 }

@@ -128,8 +128,9 @@ impl PersistenceQuery {
             for doc in documents {
                 let key_field = self.db.document_key_field();
                 let key = doc[key_field].as_str().unwrap().to_string();
-                let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap();
+                let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap_or(1);
 
+                // Resolve entity (reuse if already present by Guid, otherwise spawn)
                 let entity = if let Some(&e) = existing.get(&key) {
                     e
                 } else {
@@ -138,13 +139,22 @@ impl PersistenceQuery {
                     e
                 };
 
-                session.version_manager.set_version(VersionKey::Entity(key.clone()), version);
+                // Ensure the session knows about this entity<->key mapping for future operations
+                session.entity_keys.insert(entity, key.clone());
 
+                // Cache/refresh version for both new and existing entities
+                session
+                    .version_manager
+                    .set_version(VersionKey::Entity(key.clone()), version);
+
+                // For manual builder: overwrite requested components on existing entities,
+                // and insert for new entities. Do not add unrequested components.
                 for &comp in &self.component_names {
                     if let Some(val) = doc.get(comp) {
-                        let deser = &session.component_deserializers[comp];
-                        deser(world, entity, val.clone())
-                            .expect("component deserialization failed");
+                        if let Some(deser) = session.component_deserializers.get(comp) {
+                            deser(world, entity, val.clone())
+                                .expect("component deserialization failed");
+                        }
                     }
                 }
 

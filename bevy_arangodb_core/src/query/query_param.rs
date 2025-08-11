@@ -159,7 +159,9 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
             match self.runtime.block_on(self.db.0.query_documents(aql, bind_vars)) {
                 Ok(documents) => {
                     bevy::log::debug!("Retrieved {} documents (async via runtime)", documents.len());
-                    self.process_documents(documents, &comp_names);
+                    // Allow overwrite only when ForceRefresh was requested
+                    let allow_overwrite = matches!(cache_policy, CachePolicy::ForceRefresh);
+                    self.process_documents(documents, &comp_names, allow_overwrite);
                     self.cache.insert(query_hash);
                 }
                 Err(e) => {
@@ -175,7 +177,7 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
     }
 
     // Queue per-document closures that will apply all mutations atomically when drained.
-    fn process_documents(&mut self, documents: Vec<serde_json::Value>, comp_names: &[&'static str]) {
+    fn process_documents(&mut self, documents: Vec<serde_json::Value>, comp_names: &[&'static str], allow_overwrite: bool) {
         let key_field = self.db.0.document_key_field();
         let explicit_components = comp_names.to_vec();
 
@@ -191,24 +193,31 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
 
             let doc_clone = doc.clone();
             let comps = explicit_components.clone();
+            let allow = allow_overwrite;
 
             self.ops.push(Box::new(move |world: &mut World| {
                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                    // Resolve or spawn the entity for this key
-                    let entity = if let Some((e, _)) = session
+                    // Resolve or spawn the entity for this key and detect existence
+                    let (entity, existed) = if let Some((e, _)) = session
                         .entity_keys
                         .iter()
                         .find(|(_, k)| **k == key)
                         .map(|(e, k)| (*e, k.clone()))
                     {
-                        e
+                        (e, true)
                     } else {
                         let e = world.spawn(Guid::new(key.clone())).id();
                         session.entity_keys.insert(e, key.clone());
-                        e
+                        (e, false)
                     };
 
-                    // Cache version
+                    // If the entity already exists and we're not force-refreshing, do nothing.
+                    if existed && !allow {
+                        bevy::log::trace!("Skipping update for existing entity {} (no force refresh)", key);
+                        return;
+                    }
+
+                    // Cache version (for new entities or when forcing refresh)
                     session
                         .version_manager
                         .set_version(VersionKey::Entity(key.clone()), version);
@@ -216,6 +225,7 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> Per
                     // Insert components
                     if !comps.is_empty() {
                         for &comp_name in &comps {
+                            // When forcing refresh, we overwrite; otherwise this path is only for brand-new entities
                             if let Some(val) = doc_clone.get(comp_name) {
                                 if let Some(deser) = session.component_deserializers.get(comp_name) {
                                     if let Err(e) = deser(world, entity, val.clone()) {
