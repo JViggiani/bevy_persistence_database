@@ -1,8 +1,7 @@
 //! Defines a Domain-Specific Language (DSL) for building type-safe database queries.
 //!
-//! This module provides the `Expression` enum and related structures to represent
-//! query components like fields, literals, and operations, allowing for the
-//! programmatic construction of complex, safe query filters.
+//! TODO(deprecation): Migrate callers to type-driven filters and backend-specific
+//! query builders (see roadmap Step 2b/4). Keep this module until migration is complete.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -10,6 +9,10 @@ use std::collections::HashMap;
 use crate::DatabaseConnection;
 
 /// Represents a part of a database query, forming an expression tree.
+#[deprecated(
+    since = "0.1.0",
+    note = "Query DSL is deprecated; prefer type-driven filters on PersistentQuery and backend query builders."
+)]
 #[derive(Clone, Debug)]
 pub enum Expression {
     /// A literal value, like a number or string.
@@ -27,6 +30,11 @@ pub enum Expression {
     },
     /// A reference to the document's unique key field.
     DocumentKey,
+    /// A presence check on a component: present => doc.`T` != null, absent => doc.`T` == null
+    Presence {
+        component_name: &'static str,
+        present: bool,
+    },
 }
 
 /// Represents the different binary operators available in database queries.
@@ -36,6 +44,7 @@ pub enum BinaryOperator {
 }
 
 impl Expression {
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Combines this expression with another using the `AND` operator.
     pub fn and(self, other: Expression) -> Expression {
         Expression::BinaryOp {
@@ -45,6 +54,7 @@ impl Expression {
         }
     }
 
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Combines this expression with another using the `OR` operator.
     pub fn or(self, other: Expression) -> Expression {
         Expression::BinaryOp {
@@ -54,6 +64,7 @@ impl Expression {
         }
     }
 
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Creates an equality comparison (`==`).
     pub fn eq<T: Serialize>(self, value: T) -> Expression {
         Expression::BinaryOp {
@@ -63,6 +74,7 @@ impl Expression {
         }
     }
 
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Creates a greater-than comparison (`>`).
     pub fn gt<T: Serialize>(self, value: T) -> Expression {
         Expression::BinaryOp {
@@ -72,6 +84,7 @@ impl Expression {
         }
     }
 
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Creates a greater-than-or-equal comparison (`>=`).
     pub fn gte<T: Serialize>(self, value: T) -> Expression {
         Expression::BinaryOp {
@@ -81,6 +94,7 @@ impl Expression {
         }
     }
 
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Creates a less-than comparison (`<`).
     pub fn lt<T: Serialize>(self, value: T) -> Expression {
         Expression::BinaryOp {
@@ -90,6 +104,7 @@ impl Expression {
         }
     }
 
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
     /// Creates a less-than-or-equal comparison (`<=`).
     pub fn lte<T: Serialize>(self, value: T) -> Expression {
         Expression::BinaryOp {
@@ -97,6 +112,18 @@ impl Expression {
             lhs: Box::new(self),
             rhs: Box::new(Expression::Literal(serde_json::to_value(value).unwrap())),
         }
+    }
+
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
+    /// Presence check: doc.`component_name` != null
+    pub fn with_component(component_name: &'static str) -> Expression {
+        Expression::Presence { component_name, present: true }
+    }
+
+    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
+    /// Absence check: doc.`component_name` == null
+    pub fn without_component(component_name: &'static str) -> Expression {
+        Expression::Presence { component_name, present: false }
     }
 }
 
@@ -144,6 +171,13 @@ pub(crate) fn translate_expression(
                     let rhs_str = translate_expression(rhs, bind_vars, db);
                     format!("({} {} {})", lhs_str, op_str, rhs_str)
                 }
+            }
+        }
+        Expression::Presence { component_name, present } => {
+            if *present {
+                format!("doc.`{}` != null", component_name)
+            } else {
+                format!("doc.`{}` == null", component_name)
             }
         }
     }

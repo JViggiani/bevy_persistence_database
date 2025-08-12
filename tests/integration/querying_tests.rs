@@ -767,3 +767,139 @@ fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res
         .iter_with_loading()
         .count();
 }
+
+fn system_without_creature(pq: PersistentQuery<&Guid>) {
+    // Load only entities WITHOUT Creature
+    let _ = pq.without::<Creature>().iter_with_loading().count();
+}
+
+#[test]
+fn test_presence_without_filter() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one entity with Creature, one with only Health
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Creature { is_screaming: false });
+    app.world_mut().spawn(Health { value: 42 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: run a system that loads entities WITHOUT Creature
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_without_creature);
+    app2.update();
+
+    // THEN: only the Health-only entity is present, and none have Creature
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    let count = q_guid.iter(&app2.world()).count();
+    assert_eq!(count, 1, "Only one entity should be loaded (without Creature)");
+
+    let mut q_creature = app2.world_mut().query::<&Creature>();
+    assert_eq!(
+        q_creature.iter(&app2.world()).count(),
+        0,
+        "No entities should have Creature component"
+    );
+}
+
+fn system_type_driven_presence(mut pq: PersistentQuery<&Guid, (bevy::prelude::With<Health>, bevy::prelude::Without<Creature>)>) {
+    // Load entities that have Health but do NOT have Creature
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_type_driven_presence_filters() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one entity with Creature+Health, one with only Health
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
+    app.world_mut().spawn(Health { value: 2 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: run a system that uses type-level With/Without in F
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_type_driven_presence);
+    app2.update();
+
+    // THEN: only the Health-only entity is loaded (no Creature in world)
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    let count = q_guid.iter(&app2.world()).count();
+    assert_eq!(count, 1, "Type-driven presence should exclude Creature entities");
+
+    let mut q_creature = app2.world_mut().query::<&Creature>();
+    assert_eq!(q_creature.iter(&app2.world()).count(), 0, "Loaded entities must not have Creature");
+}
+
+fn system_type_driven_or_presence(
+    mut pq: PersistentQuery<
+        &Guid,
+        bevy::prelude::Or<(bevy::prelude::With<Health>, bevy::prelude::With<Creature>)>
+    >,
+) {
+    // Load entities that have Health OR Creature
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_type_driven_or_presence_filters() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one with Health, one with Creature, one with neither
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Health { value: 10 });
+    app.world_mut().spawn(Creature { is_screaming: false });
+    app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: run a system that uses OR(With<Health>, With<Creature>) in F
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_type_driven_or_presence);
+    app2.update();
+
+    // THEN: exactly two entities are loaded (those with Health OR Creature)
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    let count = q_guid.iter(&app2.world()).count();
+    assert_eq!(count, 2, "OR presence should include entities with Health or Creature");
+}
+
+fn system_optional_component_fetch(mut pq: PersistentQuery<(&Health, Option<&Position>)>) {
+    // Request Health and optionally Position via Q; no explicit presence filter needed.
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_optional_component_in_q_is_fetched_if_present() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one entity with Health only, one with Health+Position
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Health { value: 1 });
+    app.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 2.0 }));
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: run a system with Q = (&Health, Option<&Position>)
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_optional_component_fetch);
+    app2.update();
+
+    // THEN: both entities with Health are loaded; Position is present for one
+    let mut q_health = app2.world_mut().query::<&Health>();
+    let health_count = q_health.iter(&app2.world()).count();
+    assert_eq!(health_count, 2, "Both Health-bearing entities should be loaded");
+
+    let mut q_position = app2.world_mut().query::<&Position>();
+    let position_count = q_position.iter(&app2.world()).count();
+    assert_eq!(position_count, 1, "Position should be loaded only where present");
+}
