@@ -21,7 +21,7 @@ use std::sync::{
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
-use crate::query::query_param::DeferredWorldOps;
+use crate::query::persistence_query_system_param::DeferredWorldOperations;
 use crate::query::PersistenceQueryCache;
 
 static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
@@ -620,7 +620,7 @@ impl Plugin for PersistencePluginCore {
         // Add the query cache
         app.init_resource::<PersistenceQueryCache>();
         // Initialize deferred world ops queue
-        app.init_resource::<DeferredWorldOps>();
+        app.init_resource::<DeferredWorldOperations>();
 
         // Remove the process_queued_component_data system - we don't need it anymore
 
@@ -641,7 +641,7 @@ impl Plugin for PersistencePluginCore {
         // Use an exclusive system to get &mut World.
         fn apply_deferred_world_ops(world: &mut World) {
             // Drain the queue via the public method
-            let mut pending = world.resource::<DeferredWorldOps>().drain();
+            let mut pending = world.resource::<DeferredWorldOperations>().drain();
             // Apply all queued ops
             for op in pending.drain(..) {
                 op(world);

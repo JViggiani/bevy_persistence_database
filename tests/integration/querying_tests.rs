@@ -574,7 +574,7 @@ impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
 
     fn build_query(
         &self,
-        spec: &bevy_arangodb_core::query::spec::QuerySpec,
+        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
     ) -> (String, std::collections::HashMap<String, serde_json::Value>) {
         self.inner.build_query(spec)
     }

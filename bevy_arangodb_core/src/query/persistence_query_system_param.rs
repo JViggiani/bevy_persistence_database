@@ -4,17 +4,18 @@
 //! TODO(deprecation): Remove runtime DSL helpers once type-driven filters fully replace them.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
-use bevy::prelude::{Entity, Query, Res, Resource, Mut, World, With, Without, Or};
-use bevy::ecs::query::{QueryData, QueryFilter};
-use bevy::ecs::system::SystemParam;
-
-use crate::query::spec::{QuerySpec, ValueExpr};
-use crate::{DatabaseConnectionResource, PersistenceSession, Guid, BEVY_PERSISTENCE_VERSION_FIELD};
-use crate::plugins::persistence_plugin::TokioRuntime;
-use crate::versioning::version_manager::VersionKey;
-use bevy::ecs::query::ReadOnlyQueryData;
 use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
+
+use bevy::ecs::query::{QueryData, QueryFilter, ReadOnlyQueryData};
+use bevy::ecs::system::SystemParam;
+use bevy::prelude::{Entity, Mut, Or, Query, Res, Resource, With, Without, World};
+
+use crate::plugins::persistence_plugin::TokioRuntime;
+use crate::query::persistence_query_specification::PersistenceQuerySpecification;
+use crate::query::filter_expression::{BinaryOperator, FilterExpression};
+use crate::versioning::version_manager::VersionKey;
+use crate::{DatabaseConnectionResource, Guid, PersistenceSession, BEVY_PERSISTENCE_VERSION_FIELD};
 
 /// Caching policy for persistent queries
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,23 +44,29 @@ impl PersistenceQueryCache {
     pub fn contains(&self, hash: u64) -> bool {
         bevy::log::trace!("PersistenceQueryCache::contains - attempting to lock cache");
         let result = self.cache.lock().unwrap().contains(&hash);
-        bevy::log::trace!("PersistenceQueryCache::contains - lock released, result: {}", result);
+        bevy::log::trace!(
+            "PersistenceQueryCache::contains - lock released, result: {}",
+            result
+        );
         result
     }
-    
+
     /// Insert a query hash into the cache
     pub fn insert(&self, hash: u64) {
         bevy::log::trace!("PersistenceQueryCache::insert - attempting to lock cache");
         self.cache.lock().unwrap().insert(hash);
-        bevy::log::trace!("PersistenceQueryCache::insert - lock released, hash {} inserted", hash);
+        bevy::log::trace!(
+            "PersistenceQueryCache::insert - lock released, hash {} inserted",
+            hash
+        );
     }
 }
 
 /// Thread-safe queue of world mutations to be applied later in the frame.
 #[derive(Resource, Default)]
-pub(crate) struct DeferredWorldOps(Mutex<Vec<Box<dyn FnOnce(&mut World) + Send>>>);
+pub(crate) struct DeferredWorldOperations(Mutex<Vec<Box<dyn FnOnce(&mut World) + Send>>>);
 
-impl DeferredWorldOps {
+impl DeferredWorldOperations {
     pub fn push(&self, op: Box<dyn FnOnce(&mut World) + Send>) {
         self.0.lock().unwrap().push(op);
     }
@@ -77,7 +84,7 @@ impl DeferredWorldOps {
 // This avoids Local<T> so multiple PersistentQuery params can coexist in one system.
 thread_local! {
     static PQ_ADDITIONAL_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = Default::default();
-    static PQ_VALUE_EXPR: std::cell::RefCell<Option<ValueExpr>> = const { std::cell::RefCell::new(None) };
+    static PQ_FILTER_EXPRESSION: std::cell::RefCell<Option<FilterExpression>> = const { std::cell::RefCell::new(None) };
     static PQ_CACHE_POLICY: std::cell::RefCell<CachePolicy> = const { std::cell::RefCell::new(CachePolicy::UseCache) };
     static PQ_WITHOUT_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = Default::default();
 }
@@ -94,10 +101,11 @@ pub struct PersistentQuery<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'sta
     /// Runtime to drive async DB calls
     runtime: Res<'w, TokioRuntime>,
     /// Add access to the deferred ops queue (immutable; interior mutability)
-    ops: Res<'w, DeferredWorldOps>,
+    ops: Res<'w, DeferredWorldOperations>,
 }
 
-impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static> PersistentQuery<'w, 's, Q, F>
+impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static>
+    PersistentQuery<'w, 's, Q, F>
 where
     F: ToPresenceSpec + FilterSupported,
     Q: QueryDataToComponents,
@@ -115,7 +123,8 @@ where
         PQ_ADDITIONAL_COMPONENTS.with(|c| presence_names.extend(c.borrow_mut().drain(..)));
         let mut without_names: Vec<&'static str> = Vec::new();
         PQ_WITHOUT_COMPONENTS.with(|w| without_names.extend(w.borrow_mut().drain(..)));
-        let tls_value_expr: Option<ValueExpr> = PQ_VALUE_EXPR.with(|f| f.borrow_mut().take());
+        let tls_filter_expression: Option<FilterExpression> =
+            PQ_FILTER_EXPRESSION.with(|f| f.borrow_mut().take());
         let cache_policy: CachePolicy = PQ_CACHE_POLICY.with(|p| *p.borrow());
         // Reset cache policy to default for the next call
         PQ_CACHE_POLICY.with(|p| *p.borrow_mut() = CachePolicy::UseCache);
@@ -144,7 +153,7 @@ where
         without_names.dedup();
 
         // 3) Combine presence-derived expression (from Or cases) with TLS filter via AND
-        let combined_expr: Option<ValueExpr> = match (type_presence.expr, tls_value_expr) {
+        let combined_expr: Option<FilterExpression> = match (type_presence.expr, tls_filter_expression) {
             (Some(a), Some(b)) => Some(a.and(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
@@ -154,10 +163,18 @@ where
         // Compute a hash from Q + presence + fetch + filter to drive the cache
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::any::type_name::<Q>().hash(&mut hasher);
-        for &name in &presence_names { name.hash(&mut hasher); }
-        for &name in &without_names { name.hash(&mut hasher); }
-        for &name in &fetch_names { name.hash(&mut hasher); }
-        if let Some(expr) = &combined_expr { format!("{:?}", expr).hash(&mut hasher); }
+        for &name in &presence_names {
+            name.hash(&mut hasher);
+        }
+        for &name in &without_names {
+            name.hash(&mut hasher);
+        }
+        for &name in &fetch_names {
+            name.hash(&mut hasher);
+        }
+        if let Some(expr) = &combined_expr {
+            format!("{:?}", expr).hash(&mut hasher);
+        }
         let query_hash = hasher.finish();
         bevy::log::trace!("Computed query hash: {}", query_hash);
 
@@ -179,12 +196,14 @@ where
             bevy::log::debug!("Querying database");
 
             if presence_names.is_empty() {
-                bevy::log::info!("No explicit component filters; will load documents and insert any registered components present.");
+                bevy::log::info!(
+                    "No explicit component filters; will load documents and insert any registered components present."
+                );
             }
             bevy::log::debug!("Will query for components (if any): {:?}", presence_names);
 
             // Build backend-agnostic spec and delegate to the db
-            let spec = QuerySpec {
+            let spec = PersistenceQuerySpecification {
                 presence_with: presence_names.clone(),
                 presence_without: without_names.clone(),
                 fetch_only: fetch_names.clone(),
@@ -195,10 +214,13 @@ where
 
             match self.runtime.block_on(self.db.0.query_documents(aql, bind_vars)) {
                 Ok(documents) => {
-                    bevy::log::debug!("Retrieved {} documents (async via runtime)", documents.len());
+                    bevy::log::debug!(
+                        "Retrieved {} documents (async via runtime)",
+                        documents.len()
+                    );
                     // Allow overwrite when explicitly requested or when presence gates are used.
-                    let allow_overwrite =
-                        matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_names.is_empty();
+                    let allow_overwrite = matches!(cache_policy, CachePolicy::ForceRefresh)
+                        || !presence_names.is_empty();
                     // Deserialize components:
                     // - If presence gates are provided, load only requested components (presence + fetch-only).
                     // - If no presence gates, load any registered components found in each document.
@@ -214,8 +236,12 @@ where
                     let db = self.db.0.clone();
                     self.ops.push(Box::new(move |world: &mut World| {
                         world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                            let rt = world.resource::<crate::plugins::persistence_plugin::TokioRuntime>().0.clone();
-                            rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                            let rt = world
+                                .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
+                                .0
+                                .clone();
+                            rt.block_on(session.fetch_and_insert_resources(&*db, world))
+                                .ok();
                         });
                     }));
 
@@ -234,7 +260,12 @@ where
     }
 
     // Queue per-document closures that will apply all mutations atomically when drained.
-    fn process_documents(&mut self, documents: Vec<serde_json::Value>, comp_names: &[&'static str], allow_overwrite: bool) {
+    fn process_documents(
+        &mut self,
+        documents: Vec<serde_json::Value>,
+        comp_names: &[&'static str],
+        allow_overwrite: bool,
+    ) {
         let key_field = self.db.0.document_key_field();
         let explicit_components = comp_names.to_vec();
 
@@ -254,8 +285,7 @@ where
 
             self.ops.push(Box::new(move |world: &mut World| {
                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                    // Resolve or spawn the entity for this key and detect true existence in the world.
-                    // The session map may contain stale entries for entities that were despawned; check world.
+                    // Resolve or spawn the entity for this key
                     let (entity, existed) = if let Some((candidate, _)) = session
                         .entity_keys
                         .iter()
@@ -278,7 +308,10 @@ where
 
                     // If the entity already exists and we're not force-refreshing (or presence-merge), do nothing.
                     if existed && !allow {
-                        bevy::log::trace!("Skipping update for existing entity {} (no overwrite allowed)", key);
+                        bevy::log::trace!(
+                            "Skipping update for existing entity {} (no overwrite allowed)",
+                            key
+                        );
                         return;
                     }
 
@@ -292,7 +325,8 @@ where
                         for &comp_name in &comps {
                             // When forcing refresh or presence-merge, we overwrite; otherwise only for brand-new entities
                             if let Some(val) = doc_clone.get(comp_name) {
-                                if let Some(deser) = session.component_deserializers.get(comp_name) {
+                                if let Some(deser) = session.component_deserializers.get(comp_name)
+                                {
                                     if let Err(e) = deser(world, entity, val.clone()) {
                                         bevy::log::error!(
                                             "Failed to deserialize component {}: {}",
@@ -342,17 +376,13 @@ where
     }
 
     /// Get the single matching item from the world only
-    pub fn single(
-        &self,
-    ) -> Result<(Entity, Q::Item<'_>), bevy::ecs::query::QuerySingleError> {
+    pub fn single(&self) -> Result<(Entity, Q::Item<'_>), bevy::ecs::query::QuerySingleError> {
         self.query.single()
     }
 
     /// Iterate over all K-combinations (immutable) from the world only.
     /// No DB loads are performed.
-    pub fn iter_combinations<const K: usize>(
-        &self,
-    ) -> impl Iterator<Item = [(Entity, Q::Item<'_>); K]>
+    pub fn iter_combinations<const K: usize>(&self) -> impl Iterator<Item = [(Entity, Q::Item<'_>); K]>
     where
         Q: ReadOnlyQueryData,
     {
@@ -372,13 +402,13 @@ where
 
     /// Add a value filter pushed down to the backend.
     /// Alias for `where(...)` to avoid raw-identifier call sites.
-    pub fn filter(self, expr: ValueExpr) -> Self {
+    pub fn filter(self, expr: FilterExpression) -> Self {
         self.r#where(expr)
     }
 
     /// Add a value filter pushed down to the backend.
-    pub fn r#where(self, expr: ValueExpr) -> Self {
-        PQ_VALUE_EXPR.with(|f| *f.borrow_mut() = Some(expr));
+    pub fn r#where(self, expr: FilterExpression) -> Self {
+        PQ_FILTER_EXPRESSION.with(|f| *f.borrow_mut() = Some(expr));
         self
     }
 
@@ -389,12 +419,12 @@ where
     }
 }
 
-// PresenceSpec now uses ValueExpr internally
+// PresenceSpec now uses FilterExpression internally
 #[derive(Default)]
 pub struct PresenceSpec {
     withs: Vec<&'static str>,
     withouts: Vec<&'static str>,
-    expr: Option<ValueExpr>,
+    expr: Option<FilterExpression>,
 }
 
 impl PresenceSpec {
@@ -410,16 +440,16 @@ impl PresenceSpec {
         self
     }
 
-    fn to_expr(&self) -> Option<ValueExpr> {
+    fn to_expr(&self) -> Option<FilterExpression> {
         // Build an AND of presence lists using (doc.`Comp` != null) and (doc.`Comp` == null),
         // then AND with self.expr if present.
-        let mut acc: Option<ValueExpr> = None;
+        let mut acc: Option<FilterExpression> = None;
         for n in &self.withs {
-            let field = ValueExpr::field(*n, "");
-            let e = ValueExpr::BinaryOp {
-                op: crate::query::spec::BinaryOp::Ne,
+            let field = FilterExpression::field(*n, "");
+            let e = FilterExpression::BinaryOperator {
+                op: BinaryOperator::Ne,
                 lhs: Box::new(field),
-                rhs: Box::new(ValueExpr::Literal(serde_json::Value::Null)),
+                rhs: Box::new(FilterExpression::Literal(serde_json::Value::Null)),
             };
             acc = Some(match acc {
                 Some(cur) => cur.and(e),
@@ -427,11 +457,11 @@ impl PresenceSpec {
             });
         }
         for n in &self.withouts {
-            let field = ValueExpr::field(*n, "");
-            let e = ValueExpr::BinaryOp {
-                op: crate::query::spec::BinaryOp::Eq,
+            let field = FilterExpression::field(*n, "");
+            let e = FilterExpression::BinaryOperator {
+                op: BinaryOperator::Eq,
                 lhs: Box::new(field),
-                rhs: Box::new(ValueExpr::Literal(serde_json::Value::Null)),
+                rhs: Box::new(FilterExpression::Literal(serde_json::Value::Null)),
             };
             acc = Some(match acc {
                 Some(cur) => cur.and(e),
@@ -515,11 +545,11 @@ macro_rules! impl_to_presence_for_or_tuple {
     ( $( $name:ident ),+ ) => {
         impl<$( $name: ToPresenceSpec ),+> ToPresenceSpec for Or<( $( $name, )+ )> {
             fn to_presence_spec() -> PresenceSpec {
-                let parts: Vec<Option<ValueExpr>> = vec![
+                let parts: Vec<Option<FilterExpression>> = vec![
                     $( <$name as ToPresenceSpec>::to_presence_spec().to_expr(), )+
                 ];
                 // Build OR chain of non-empty expressions
-                let mut or_expr: Option<ValueExpr> = None;
+                let mut or_expr: Option<FilterExpression> = None;
                 for p in parts.into_iter().flatten() {
                     or_expr = Some(match or_expr {
                         Some(cur) => cur.or(p),

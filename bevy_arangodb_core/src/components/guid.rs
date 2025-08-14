@@ -39,7 +39,7 @@ impl Guid {
     }
 
     /// Creates a value-expression for the document key field
-    pub fn key_field() -> crate::query::spec::ValueExpr {
-        crate::query::spec::ValueExpr::DocumentKey
+    pub fn key_field() -> crate::query::filter_expression::FilterExpression {
+        crate::query::filter_expression::FilterExpression::DocumentKey
     }
 }

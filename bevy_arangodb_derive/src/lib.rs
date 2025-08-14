@@ -128,8 +128,8 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         let methods = s.fields.iter().filter_map(|f| f.ident.as_ref()).map(|ident| {
             let field_str = LitStr::new(&ident.to_string(), proc_macro2::Span::call_site());
             quote! {
-                pub fn #ident() -> #crate_path::query::spec::ValueExpr {
-                    #crate_path::query::spec::ValueExpr::field(<Self as #crate_path::Persist>::name(), #field_str)
+                pub fn #ident() -> #crate_path::query::filter_expression::FilterExpression {
+                    #crate_path::query::filter_expression::FilterExpression::field(<Self as #crate_path::Persist>::name(), #field_str)
                 }
             }
         });

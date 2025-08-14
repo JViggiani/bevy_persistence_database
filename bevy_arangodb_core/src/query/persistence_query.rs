@@ -1,13 +1,14 @@
 //! A manual builder for creating and executing database queries outside of Bevy systems.
 //!
-//! TODO(deprecation): Replace with backend-agnostic QuerySpec + DatabaseConnection::build_query (Step 4).
+//! TODO(deprecation): Replace with backend-agnostic PersistenceQuerySpecification + DatabaseConnection::build_query (Step 4).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
-use crate::query::spec::{QuerySpec, ValueExpr};
+use crate::query::persistence_query_specification::PersistenceQuerySpecification;
+use crate::query::filter_expression::FilterExpression;
 use crate::versioning::version_manager::VersionKey;
 use bevy::prelude::{Component, World};
 
@@ -15,7 +16,7 @@ use bevy::prelude::{Component, World};
 pub struct PersistenceQuery {
     db: Arc<dyn DatabaseConnection>,
     pub component_names: Vec<&'static str>,
-    filter_expr: Option<ValueExpr>,
+    filter_expr: Option<FilterExpression>,
 
     /// Track explicit absence filters for components
     pub(crate) without_component_names: Vec<&'static str>,
@@ -55,7 +56,7 @@ impl PersistenceQuery {
     }
 
     /// Combine current filter with OR.
-    pub fn or(mut self, expression: ValueExpr) -> Self {
+    pub fn or(mut self, expression: FilterExpression) -> Self {
         self.filter_expr = Some(match self.filter_expr.take() {
             Some(existing) => existing.or(expression),
             None => expression,
@@ -63,22 +64,22 @@ impl PersistenceQuery {
         self
     }
 
-    /// Sets the filter for the query using a `ValueExpr`.
-    pub fn filter(mut self, expression: ValueExpr) -> Self {
+    /// Sets the filter for the query using a `FilterExpression`.
+    pub fn filter(mut self, expression: FilterExpression) -> Self {
         // Collect any component names referenced in the filter expression
-        fn collect(expr: &ValueExpr, names: &mut Vec<&'static str>) {
+        fn collect(expr: &FilterExpression, names: &mut Vec<&'static str>) {
             match expr {
-                ValueExpr::Field { component_name, .. } => {
+                FilterExpression::Field { component_name, .. } => {
                     if !names.contains(component_name) {
                         names.push(component_name);
                     }
                 }
-                ValueExpr::DocumentKey => { /* no component */ }
-                ValueExpr::BinaryOp { lhs, rhs, .. } => {
+                FilterExpression::DocumentKey => { /* no component */ }
+                FilterExpression::BinaryOperator { lhs, rhs, .. } => {
                     collect(lhs, names);
                     collect(rhs, names);
                 }
-                ValueExpr::Literal(_) => {}
+                FilterExpression::Literal(_) => {}
             }
         }
         let mut names = self.component_names.clone();
@@ -97,7 +98,7 @@ impl PersistenceQuery {
         fetch_only.sort_unstable();
         fetch_only.dedup();
 
-        let spec = QuerySpec {
+        let spec = PersistenceQuerySpecification {
             presence_with: self.component_names.clone(),
             presence_without: self.without_component_names.clone(),
             fetch_only,
