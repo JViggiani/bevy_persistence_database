@@ -903,3 +903,219 @@ fn test_optional_component_in_q_is_fetched_if_present() {
     let position_count = q_position.iter(&app2.world()).count();
     assert_eq!(position_count, 1, "Position should be loaded only where present");
 }
+
+// System: With<Health> AND (Without<Creature> AND With<Position>)
+fn system_nested_tuple_presence(
+    mut pq: PersistentQuery<
+        &Guid,
+        (
+            bevy::prelude::With<Health>,
+            (bevy::prelude::Without<Creature>, bevy::prelude::With<Position>),
+        ),
+    >,
+) {
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_nested_tuple_presence_and() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: H+P, H+C, P-only
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }));
+    app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
+    app.world_mut().spawn(Position { x: 1.0, y: 1.0 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_nested_tuple_presence);
+    app2.update();
+
+    // THEN: only H+P passes (Health AND Position AND NOT Creature)
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    assert_eq!(q_guid.iter(&app2.world()).count(), 1);
+    let mut q_health = app2.world_mut().query::<&Health>();
+    assert_eq!(q_health.iter(&app2.world()).count(), 1);
+    let mut q_position = app2.world_mut().query::<&Position>();
+    assert_eq!(q_position.iter(&app2.world()).count(), 1);
+    let mut q_creature = app2.world_mut().query::<&Creature>();
+    assert_eq!(q_creature.iter(&app2.world()).count(), 0);
+}
+
+// System: With<Health> AND (With<Creature> OR With<Position> OR With<PlayerName>) AND Without<PlayerName>
+fn system_and_or_mix_with_without(
+    mut pq: PersistentQuery<
+        &Guid,
+        (
+            bevy::prelude::With<Health>,
+            bevy::prelude::Or<(
+                bevy::prelude::With<Creature>,
+                bevy::prelude::With<Position>,
+                bevy::prelude::With<PlayerName>,
+            )>,
+            bevy::prelude::Without<PlayerName>,
+        ),
+    >,
+) {
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_and_or_mix_with_without_filters() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: H+C, H+P, H+C+PlayerName, H-only
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
+    app.world_mut().spawn((Health { value: 2 }, Position { x: 0.0, y: 0.0 }));
+    app.world_mut().spawn((Health { value: 3 }, Creature { is_screaming: true }, PlayerName { name: "X".into() }));
+    app.world_mut().spawn(Health { value: 4 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_and_or_mix_with_without);
+    app2.update();
+
+    // THEN: H+C and H+P match (2 entities). H+C+PlayerName excluded by Without<PlayerName>, H-only excluded by OR
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    assert_eq!(q_guid.iter(&app2.world()).count(), 2);
+    let mut q_player = app2.world_mut().query::<&PlayerName>();
+    assert_eq!(q_player.iter(&app2.world()).count(), 0);
+}
+
+// System: Optional in Q with type-driven Without in F
+fn system_optional_q_with_without(
+    mut pq: PersistentQuery<(Option<&Creature>, &Health), bevy::prelude::Without<Creature>>,
+) {
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_optional_q_with_without_exclusion() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: H-only, H+Creature
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Health { value: 1 });
+    app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: Q asks for Option<&Creature> but F excludes Creature
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_optional_q_with_without);
+    app2.update();
+
+    // THEN: only H-only entity is loaded; no Creature present after load
+    let mut q_health = app2.world_mut().query::<&Health>();
+    assert_eq!(q_health.iter(&app2.world()).count(), 1);
+    let mut q_creature = app2.world_mut().query::<&Creature>();
+    assert_eq!(q_creature.iter(&app2.world()).count(), 0);
+}
+
+// System: No presence filters; optional fetch-only for two components
+fn system_no_presence_optional_fetch(mut pq: PersistentQuery<(Option<&Health>, Option<&Position>)>) {
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_no_presence_loads_all_docs_requested_by_optional_q() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one Health-only, one Position-only
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Health { value: 10 });
+    app.world_mut().spawn(Position { x: 3.0, y: 4.0 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: Q has only Option<&Health> and Option<&Position>, no F presence filters
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_no_presence_optional_fetch);
+    app2.update();
+
+    // THEN: both docs load; each component present where it existed
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    assert_eq!(q_guid.iter(&app2.world()).count(), 2);
+    let mut q_h = app2.world_mut().query::<&Health>();
+    assert_eq!(q_h.iter(&app2.world()).count(), 1);
+    let mut q_p = app2.world_mut().query::<&Position>();
+    assert_eq!(q_p.iter(&app2.world()).count(), 1);
+}
+
+// System: Duplicate component in Q should be deduped in fetch list
+fn system_duplicate_q_components(mut pq: PersistentQuery<(&Health, Option<&Health>)>) {
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_duplicate_q_entries_are_deduped_and_work() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one Health-only entity
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Health { value: 99 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: Q requests &Health and Option<&Health> (duplicate)
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_duplicate_q_components);
+    app2.update();
+
+    // THEN: loads once; Health present
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    assert_eq!(q_guid.iter(&app2.world()).count(), 1);
+    let mut q_health = app2.world_mut().query::<&Health>();
+    assert_eq!(q_health.iter(&app2.world()).count(), 1);
+}
+
+// System: OR with 3 arms
+fn system_or_three_arms(
+    mut pq: PersistentQuery<
+        &Guid,
+        bevy::prelude::Or<(bevy::prelude::With<Health>, bevy::prelude::With<Creature>, bevy::prelude::With<PlayerName>)>,
+    >,
+) {
+    let _ = pq.iter_with_loading().count();
+}
+
+#[test]
+fn test_or_presence_three_arms() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: Health-only, Creature-only, PlayerName-only, Position-only
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn(Health { value: 1 });
+    app.world_mut().spawn(Creature { is_screaming: true });
+    app.world_mut().spawn(PlayerName { name: "P".into() });
+    app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_systems(bevy::prelude::Update, system_or_three_arms);
+    app2.update();
+
+    // THEN: 3 entities loaded (H or C or Name)
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    assert_eq!(q_guid.iter(&app2.world()).count(), 3);
+}
