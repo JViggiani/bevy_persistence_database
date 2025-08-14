@@ -1,7 +1,7 @@
 use crate::query::filter_expression::FilterExpression;
 
-/// Backend-agnostic query specification constructed by the SystemParam.
-/// Public so DatabaseConnection::build_query can accept it.
+/// Backend-agnostic query specification constructed by the SystemParam and manual builder.
+/// Public so DatabaseConnection::execute_* methods can accept it.
 #[derive(Clone, Debug, Default)]
 pub struct PersistenceQuerySpecification {
     pub presence_with: Vec<&'static str>,

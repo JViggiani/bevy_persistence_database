@@ -378,7 +378,9 @@ impl PersistenceSession {
                                         BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                                         serde_json::json!(1u64),
                                     );
-                                    obj.insert("_key".to_string(), Value::String(name.clone()));
+                                    // Use backend-specific key field instead of hardcoding "_key"
+                                    let key_field = session.db.document_key_field();
+                                    obj.insert(key_field.to_string(), Value::String(name.clone()));
                                 }
                                 resource_ops.push(TransactionOperation::CreateDocument {
                                     collection: Collection::Resources,
