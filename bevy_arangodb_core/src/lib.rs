@@ -24,12 +24,15 @@ pub use plugins::persistence_plugin;
 pub use components::Guid;
 pub use db::{
     DatabaseConnection,
-    ArangoDbConnection,
     Collection,
     PersistenceError,
     TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD,
 };
+#[cfg(feature = "arango")]
+pub use db::ArangoDbConnection;
+#[cfg(feature = "postgres")]
+pub use db::PostgresDbConnection;
 pub use db::connection::DatabaseConnectionResource;
 pub use db::MockDatabaseConnection;
 pub use plugins::{
