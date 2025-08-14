@@ -88,34 +88,34 @@ pub enum TransactionOperation {
 #[automock]
 pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     /// Returns the name of the field used as the primary key for documents.
+    /// The backend must include this field in any full-document results.
     fn document_key_field(&self) -> &'static str;
+
+    /// Execute a backend-agnostic spec and return document keys only.
+    fn execute_keys(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
+
+    /// Execute a backend-agnostic spec and return full documents.
+    fn execute_documents(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>>;
+
+    /// Synchronous variant for tests/system-param runtime.
+    /// Default implementation just panics - implementations should override this
+    fn execute_documents_sync(
+        &self,
+        _spec: &PersistenceQuerySpecification,
+    ) -> Result<Vec<Value>, PersistenceError> {
+        panic!("execute_documents_sync not implemented");
+    }
 
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
-
-    fn query_keys(
-        &self,
-        aql: String,
-        bind_vars: std::collections::HashMap<String, Value>,
-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>>;
-
-    fn query_documents(
-        &self,
-        aql: String,
-        bind_vars: std::collections::HashMap<String, Value>,
-    ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>>;
-
-    /// Synchronous version of query_documents for testing and system parameters
-    /// Default implementation just panics - implementations should override this
-    fn query_documents_sync(
-        &self,
-        _aql: String,
-        _bind_vars: std::collections::HashMap<String, Value>,
-    ) -> Result<Vec<Value>, PersistenceError> {
-        panic!("query_documents_sync not implemented");
-    }
 
     fn fetch_document(
         &self,
@@ -136,15 +136,6 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
 
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
-
-    /// Backend-agnostic: build a query string and bind vars from a PersistenceQuerySpecification.
-    /// Default panics to force backend implementation.
-    fn build_query(
-        &self,
-        _spec: &PersistenceQuerySpecification,
-    ) -> (String, std::collections::HashMap<String, Value>) {
-        panic!("DatabaseConnection::build_query not implemented for this backend")
-    }
 }
 impl_downcast!(DatabaseConnection);
 

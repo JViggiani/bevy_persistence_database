@@ -137,6 +137,49 @@ impl ArangoDbConnection {
             }
         }
     }
+
+    // Private: build AQL and bind vars for a given spec
+    fn build_query_internal(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> (String, HashMap<String, Value>) {
+        let mut bind_vars = HashMap::new();
+        let mut aql = format!("FOR doc IN {}", Collection::Entities);
+        let mut filters: Vec<String> = Vec::new();
+
+        if !spec.presence_with.is_empty() {
+            let s = spec.presence_with
+                .iter()
+                .map(|n| format!("doc.`{}` != null", n))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            filters.push(format!("({})", s));
+        }
+        if !spec.presence_without.is_empty() {
+            let s = spec.presence_without
+                .iter()
+                .map(|n| format!("doc.`{}` == null", n))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            filters.push(format!("({})", s));
+        }
+        if let Some(expr) = &spec.value_filters {
+            let s = Self::translate_filter_expression(expr, &mut bind_vars, self.document_key_field());
+            filters.push(s);
+        }
+        if filters.is_empty() {
+            aql.push_str("\n  FILTER true");
+        } else {
+            aql.push_str("\n  FILTER ");
+            aql.push_str(&filters.join(" AND "));
+        }
+        if spec.return_full_docs {
+            aql.push_str("\n  RETURN doc");
+        } else {
+            aql.push_str(&format!("\n  RETURN doc.{}", self.document_key_field()));
+        }
+        (aql, bind_vars)
+    }
 }
 
 // Shared multi-thread runtime for sync operations (avoid per-call runtimes)
@@ -152,12 +195,15 @@ impl DatabaseConnection for ArangoDbConnection {
         "_key"
     }
 
-    fn query_keys(
+    fn execute_keys(
         &self,
-        aql: String,
-        bind_vars: HashMap<String, Value>,
+        spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
         let db = self.db.clone();
+        // enforce key-only selection
+        let mut spec = spec.clone();
+        spec.return_full_docs = false;
+        let (aql, bind_vars) = self.build_query_internal(&spec);
         async move {
             let query = AqlQuery::builder()
                 .query(&aql)
@@ -176,12 +222,14 @@ impl DatabaseConnection for ArangoDbConnection {
         .boxed()
     }
 
-    fn query_documents(
+    fn execute_documents(
         &self,
-        aql: String,
-        bind_vars: HashMap<String, Value>,
+        spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>> {
         let db = self.db.clone();
+        let mut spec = spec.clone();
+        spec.return_full_docs = true;
+        let (aql, bind_vars) = self.build_query_internal(&spec);
         async move {
             let query = AqlQuery::builder()
                 .query(&aql)
@@ -198,6 +246,30 @@ impl DatabaseConnection for ArangoDbConnection {
             Ok(result)
         }
         .boxed()
+    }
+
+    fn execute_documents_sync(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> Result<Vec<Value>, PersistenceError> {
+        let mut spec = spec.clone();
+        spec.return_full_docs = true;
+        let (aql, bind_vars) = self.build_query_internal(&spec);
+        SYNC_RT.block_on(async {
+            let query = AqlQuery::builder()
+                .query(&aql)
+                .bind_vars(
+                    bind_vars.iter()
+                        .map(|(k,v)| (k.as_str(), v.clone()))
+                        .collect()
+                )
+                .build();
+
+            self.db
+                .aql_query(query)
+                .await
+                .map_err(|e| PersistenceError::new(e.to_string()))
+        })
     }
 
     fn fetch_document(
@@ -450,67 +522,5 @@ impl DatabaseConnection for ArangoDbConnection {
             Ok(new_keys)
         }
         .boxed()
-    }
-
-    fn query_documents_sync(
-        &self,
-        aql: String,
-        bind_vars: HashMap<String, Value>,
-    ) -> Result<Vec<Value>, PersistenceError> {
-        // Drive the async query on the shared multi-thread runtime.
-        SYNC_RT.block_on(async {
-            let query = AqlQuery::builder()
-                .query(&aql)
-                .bind_vars(
-                    bind_vars.iter()
-                        .map(|(k,v)| (k.as_str(), v.clone()))
-                        .collect()
-                )
-                .build();
-
-            self.db
-                .aql_query(query)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))
-        })
-    }
-
-    fn build_query(&self, spec: &PersistenceQuerySpecification) -> (String, HashMap<String, Value>) {
-        let mut bind_vars = HashMap::new();
-        let mut aql = format!("FOR doc IN {}", Collection::Entities);
-        let mut filters: Vec<String> = Vec::new();
-
-        if !spec.presence_with.is_empty() {
-            let s = spec.presence_with
-                .iter()
-                .map(|n| format!("doc.`{}` != null", n))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            filters.push(format!("({})", s));
-        }
-        if !spec.presence_without.is_empty() {
-            let s = spec.presence_without
-                .iter()
-                .map(|n| format!("doc.`{}` == null", n))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            filters.push(format!("({})", s));
-        }
-        if let Some(expr) = &spec.value_filters {
-            let s = Self::translate_filter_expression(expr, &mut bind_vars, self.document_key_field());
-            filters.push(s);
-        }
-        if filters.is_empty() {
-            aql.push_str("\n  FILTER true");
-        } else {
-            aql.push_str("\n  FILTER ");
-            aql.push_str(&filters.join(" AND "));
-        }
-        if spec.return_full_docs {
-            aql.push_str("\n  RETURN doc");
-        } else {
-            aql.push_str(&format!("\n  RETURN doc.{}", self.document_key_field()));
-        }
-        (aql, bind_vars)
     }
 }

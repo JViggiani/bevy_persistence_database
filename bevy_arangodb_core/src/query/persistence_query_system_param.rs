@@ -1,7 +1,5 @@
 //! Implements a Bevy SystemParam for querying entities from both world and database
 //! in a seamless, integrated way.
-//!
-//! TODO(deprecation): Remove runtime DSL helpers once type-driven filters fully replace them.
 
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
@@ -202,7 +200,6 @@ where
             }
             bevy::log::debug!("Will query for components (if any): {:?}", presence_names);
 
-            // Build backend-agnostic spec and delegate to the db
             let spec = PersistenceQuerySpecification {
                 presence_with: presence_names.clone(),
                 presence_without: without_names.clone(),
@@ -210,9 +207,8 @@ where
                 value_filters: combined_expr.clone(),
                 return_full_docs: true,
             };
-            let (aql, bind_vars) = self.db.build_query(&spec);
 
-            match self.runtime.block_on(self.db.0.query_documents(aql, bind_vars)) {
+            match self.runtime.block_on(self.db.0.execute_documents(&spec)) {
                 Ok(documents) => {
                     bevy::log::debug!(
                         "Retrieved {} documents (async via runtime)",

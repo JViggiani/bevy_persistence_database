@@ -479,7 +479,7 @@ fn test_persistent_query_caching() {
     assert_eq!(query_count.load(Ordering::SeqCst), 2, "Force refresh should bypass cache and query again");
 }
 
-// Add a small adapter that wraps a real DatabaseConnection and counts query_documents calls.
+// Add a small adapter that wraps a real DatabaseConnection and counts execute_documents calls.
 #[derive(Debug)]
 struct CountingDbConnection {
     inner: std::sync::Arc<dyn DatabaseConnection>,
@@ -507,35 +507,34 @@ impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
         self.inner.execute_transaction(operations)
     }
 
-    fn query_keys(
+    fn execute_keys(
         &self,
-        aql: String,
-        bind_vars: std::collections::HashMap<String, serde_json::Value>,
+        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
     ) -> futures::future::BoxFuture<'static, Result<Vec<String>, bevy_arangodb_core::PersistenceError>> {
-        self.inner.query_keys(aql, bind_vars)
+        self.inner.execute_keys(spec)
     }
 
-    fn query_documents(
+    fn execute_documents(
         &self,
-        aql: String,
-        bind_vars: std::collections::HashMap<String, serde_json::Value>,
+        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
     ) -> futures::future::BoxFuture<'static, Result<Vec<serde_json::Value>, bevy_arangodb_core::PersistenceError>> {
         use futures::FutureExt;
         let inner = self.inner.clone();
         let counter = self.queries.clone();
+        // Avoid capturing `spec` non-'static by first creating the inner 'static future.
+        let fut = inner.execute_documents(spec);
         async move {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            inner.query_documents(aql, bind_vars).await
+            fut.await
         }
         .boxed()
     }
 
-    fn query_documents_sync(
+    fn execute_documents_sync(
         &self,
-        aql: String,
-        bind_vars: std::collections::HashMap<String, serde_json::Value>,
+        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
     ) -> Result<Vec<serde_json::Value>, bevy_arangodb_core::PersistenceError> {
-        self.inner.query_documents_sync(aql, bind_vars)
+        self.inner.execute_documents_sync(spec)
     }
 
     fn fetch_document(
@@ -570,13 +569,6 @@ impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
         &self,
     ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
         self.inner.clear_resources()
-    }
-
-    fn build_query(
-        &self,
-        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
-    ) -> (String, std::collections::HashMap<String, serde_json::Value>) {
-        self.inner.build_query(spec)
     }
 }
 

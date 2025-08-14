@@ -1,10 +1,6 @@
 //! A manual builder for creating and executing database queries outside of Bevy systems.
-//!
-//! TODO(deprecation): Replace with backend-agnostic PersistenceQuerySpecification + DatabaseConnection::build_query (Step 4).
 
-use std::collections::HashMap;
 use std::sync::Arc;
-use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
 use crate::query::persistence_query_specification::PersistenceQuerySpecification;
@@ -21,7 +17,7 @@ pub struct PersistenceQuery {
     /// Track explicit absence filters for components
     pub(crate) without_component_names: Vec<&'static str>,
 
-    /// Components to fetch/deserialize without gating presence in AQL
+    /// Components to fetch/deserialize without gating presence in backend
     pub(crate) fetch_only_component_names: Vec<&'static str>,
 }
 
@@ -43,7 +39,7 @@ impl PersistenceQuery {
         self
     }
 
-    /// Request absence of component `T` (doc.`T` == null)
+    /// Request absence of component `T`
     pub fn without<T: Component + Persist>(mut self) -> Self {
         self.without_component_names.push(T::name());
         self
@@ -90,30 +86,28 @@ impl PersistenceQuery {
         self
     }
 
-    /// Construct the query and bind variables by delegating to the backend.
-    pub(crate) fn build_query(&self, full_docs: bool) -> (String, HashMap<String, Value>) {
-        // Build a backend-agnostic spec and delegate to the db
+    /// Build a backend-agnostic spec
+    pub(crate) fn build_spec(&self, full_docs: bool) -> PersistenceQuerySpecification {
         let mut fetch_only = self.component_names.clone();
         fetch_only.extend(self.fetch_only_component_names.iter().copied());
         fetch_only.sort_unstable();
         fetch_only.dedup();
 
-        let spec = PersistenceQuerySpecification {
+        PersistenceQuerySpecification {
             presence_with: self.component_names.clone(),
             presence_without: self.without_component_names.clone(),
             fetch_only,
             value_filters: self.filter_expr.clone(),
             return_full_docs: full_docs,
-        };
-        self.db.build_query(&spec)
+        }
     }
 
     /// Run the query for keys only.
     pub async fn fetch_ids(&self) -> Vec<String> {
-        let (aql, bind_vars) = self.build_query(false);
-        self.db.query_keys(aql, bind_vars)
+        let spec = self.build_spec(false);
+        self.db.execute_keys(&spec)
             .await
-            .expect("AQL query failed")
+            .expect("query failed")
     }
 
     /// Load matching entities into the World.
@@ -122,15 +116,15 @@ impl PersistenceQuery {
         let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
         // fetch full documents in one go
-        let (aql, bind_vars) = self.build_query(true);
-        let documents = self.db.query_documents(aql, bind_vars)
+        let spec = self.build_spec(true);
+        let documents = self.db.execute_documents(&spec)
             .await
             .expect("Batch document fetch failed");
 
         let mut result = Vec::with_capacity(documents.len());
         if !documents.is_empty() {
             // map existing GUIDs→entities
-            let mut existing = HashMap::new();
+            let mut existing = std::collections::HashMap::new();
             for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
                 existing.insert(guid.id().to_string(), e);
             }
@@ -157,9 +151,7 @@ impl PersistenceQuery {
                     .version_manager
                     .set_version(VersionKey::Entity(key.clone()), version);
 
-                // For manual builder: overwrite requested components on existing entities,
-                // and insert for new entities. Do not add unrequested components.
-                // Union of presence-gated names and fetch-only names
+                // Overwrite requested components on existing entities (manual builder policy)
                 let mut to_deser = self.component_names.clone();
                 to_deser.extend(self.fetch_only_component_names.iter().copied());
                 to_deser.sort_unstable();
@@ -190,7 +182,7 @@ impl PersistenceQuery {
 pub trait WithComponentExt {
     fn with_component(self, component_name: &'static str) -> Self;
     fn without_component(self, component_name: &'static str) -> Self;
-    /// Fetch component without requiring presence in AQL filters
+    /// Fetch component without requiring presence in backend filters
     fn fetch_only_component(self, component_name: &'static str) -> Self;
 }
 
@@ -227,53 +219,38 @@ mod tests {
     struct B { name: String }
 
     #[test]
-    fn build_query_with_dsl() {
-        let mut db = MockDatabaseConnection::new();
-        db.expect_document_key_field().return_const("_key");
-        let db = Arc::new(db);
+    fn build_spec_with_dsl() {
+        let db = Arc::new(MockDatabaseConnection::new());
         let q = PersistenceQuery::new(db.clone())
             .with::<A>()
             .filter(
                 A::value().gt(10)
                 .and(B::name().eq("test"))
             );
-
-        let (aql, bind_vars) = q.build_query(false);
+        let spec = q.build_spec(false);
 
         // Should require presence of both components by their Persist::name()
-        assert!(aql.contains(&format!("doc.`{}` != null", <A as Persist>::name())));
-        assert!(aql.contains(&format!("doc.`{}` != null", <B as Persist>::name())));
+        assert!(spec.presence_with.contains(&<A as Persist>::name()));
+        assert!(spec.presence_with.contains(&<B as Persist>::name()));
 
-        // Should contain the filter expression using Persist::name()
-        let expected_expr = format!(
-            "((doc.`{}`.`value` > @bevy_arangodb_bind_0) AND (doc.`{}`.`name` == @bevy_arangodb_bind_1))",
-            <A as Persist>::name(),
-            <B as Persist>::name()
-        );
-        assert!(aql.contains(&expected_expr));
-
-        assert_eq!(bind_vars.get("bevy_arangodb_bind_0").unwrap(), &json!(10));
-        assert_eq!(bind_vars.get("bevy_arangodb_bind_1").unwrap(), &json!("test"));
+        // Should contain some value filter
+        assert!(spec.value_filters.is_some());
+        assert!(!spec.return_full_docs);
     }
 
     #[test]
-    fn build_query_with_or_combiner() {
-        let mut db = MockDatabaseConnection::new();
-        db.expect_document_key_field().return_const("_key");
-        let db = Arc::new(db);
+    fn build_spec_with_or_combiner() {
+        let db = Arc::new(MockDatabaseConnection::new());
 
         // Start with a filter, then OR another
         let q = PersistenceQuery::new(db.clone())
             .filter(A::value().gt(10))
             .or(B::name().eq("foo"));
 
-        let (aql, bind_vars) = q.build_query(false);
-        // Expect both branches joined with OR
-        assert!(
-            aql.contains("(doc.`A`.`value` > @bevy_arangodb_bind_0) OR (doc.`B`.`name` == @bevy_arangodb_bind_1)"),
-            "AQL should contain OR-combined expression, got: {aql}"
-        );
-        assert_eq!(bind_vars.len(), 2);
+        let spec = q.build_spec(false);
+        // Expect filter present and not full-docs
+        assert!(spec.value_filters.is_some());
+        assert!(!spec.return_full_docs);
     }
 
     // Real component types for fetch_into
@@ -286,11 +263,15 @@ mod tests {
     async fn fetch_into_loads_new_entities() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_document_key_field().return_const("_key");
-        mock_db.expect_query_documents()
-            .returning(|_, _| Box::pin(async { Ok(vec![
-                json!({"_key":"k1",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
-                json!({"_key":"k2",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
-            ]) }));
+        mock_db
+            .expect_execute_documents()
+            .returning(|spec| {
+                assert!(spec.return_full_docs, "execute_documents must be full-docs");
+                Box::pin(async { Ok(vec![
+                    json!({"_key":"k1",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
+                    json!({"_key":"k2",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
+                ]) })
+            });
 
         // Due to test pollution from other modules, other resource types might be registered.
         // We must expect `fetch_resource` to be called, and we can just return `None`.
@@ -315,22 +296,24 @@ mod tests {
     }
 
     #[test]
-    fn build_query_empty_filters() {
-        let mut db = MockDatabaseConnection::new();
-        db.expect_document_key_field().return_const("_key");
-        let db = Arc::new(db);
-        let (aql, _) = PersistenceQuery::new(db).build_query(false);
-        assert!(aql.contains("FILTER true"));
+    fn build_spec_empty_filters() {
+        let db = Arc::new(MockDatabaseConnection::new());
+        let spec = PersistenceQuery::new(db).build_spec(false);
+        assert!(spec.value_filters.is_none());
+        assert!(spec.presence_with.is_empty());
+        assert!(spec.presence_without.is_empty());
+        assert!(!spec.return_full_docs);
     }
 
     #[test]
-    #[should_panic(expected = "AQL query failed")]
+    #[should_panic(expected = "query failed")]
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db.expect_document_key_field().return_const("_key");
-        mock_db.expect_query_keys().returning(|_, _| {
-            Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
-        });
+        mock_db
+            .expect_execute_keys()
+            .returning(|_spec| {
+                Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
+            });
         let db = Arc::new(mock_db);
         let query = PersistenceQuery::new(db);
         block_on(query.fetch_ids());
@@ -343,18 +326,16 @@ mod tests {
     struct P;
 
     #[test]
-    fn build_query_single_and_multi() {
-        let mut db = MockDatabaseConnection::new();
-        db.expect_document_key_field().return_const("_key");
-        let db = Arc::new(db);
-        let (a_single, _) = PersistenceQuery::new(db.clone()).with::<H>().build_query(false);
-        assert!(a_single.contains(&format!("doc.`{}` != null", H::name())));
+    fn build_spec_single_and_multi() {
+        let db = Arc::new(MockDatabaseConnection::new());
+        let spec_single = PersistenceQuery::new(db.clone()).with::<H>().build_spec(false);
+        assert!(spec_single.presence_with.contains(&H::name()));
 
-        let (a_multi, _) = PersistenceQuery::new(db)
+        let spec_multi = PersistenceQuery::new(db)
             .with::<H>()
             .with::<P>()
-            .build_query(false);
-        assert!(a_multi.contains(&format!("doc.`{}` != null", H::name())));
-        assert!(a_multi.contains(&format!("doc.`{}` != null", P::name())));
+            .build_spec(false);
+        assert!(spec_multi.presence_with.contains(&H::name()));
+        assert!(spec_multi.presence_with.contains(&P::name()));
     }
 }
