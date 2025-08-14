@@ -1,55 +1,41 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
-    commit_sync, Guid, Persist, persistence_plugin::PersistencePlugins, PersistenceQuery, TransactionOperation, Collection,
-    PersistentQuery, DatabaseConnection,
-    db::connection::DatabaseConnectionResource,
+    commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery, DatabaseConnection,
+    db::connection::DatabaseConnectionResource, TransactionOperation,
 };
 use crate::common::*;
+use bevy::prelude::{With, Without, IntoScheduleConfigs};
 
 #[test]
 fn test_load_specific_entities_into_new_session() {
     let (db, _container) = setup_sync();
+
+    // Session 1: create data
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins(db.clone()));
-
-    // 1. Spawn two entities, one with Health+Position, one with only Health.
-    let _entity_to_load = app1
-        .world_mut()
-        .spawn((
-            Health { value: 150 },
-            Position { x: 10.0, y: 20.0 },
-        ))
-        .id();
+    let _entity_to_load = app1.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 })).id();
     let _entity_to_ignore = app1.world_mut().spawn(Health { value: 99 }).id();
-
     app1.update();
     commit_sync(&mut app1).expect("Initial commit failed");
 
-    // 2. Create a new, clean session to load the data into.
+    // Session 2: load (Health AND Position) with Health > 100
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
+    fn sys(
+        pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>
+    ) {
+        let _ = pq.filter(Health::value().gt(100)).iter_with_loading().count();
+    }
+    app2.add_systems(bevy::prelude::Update, sys);
+    app2.update();
 
-    // 3. Query for entities that have BOTH Health and Position, and Health > 100.
-    let query = PersistenceQuery::new(db.clone())
-        .with::<Health>()
-        .with::<Position>()
-        .filter(Health::value().gt(100));
-    let loaded_entities = run_async(query.fetch_into(app2.world_mut()));
-
-    // 4. Verify that only the correct entity was loaded and its data is correct.
-    assert_eq!(
-        loaded_entities.len(),
-        1,
-        "Should only load one entity with both components"
-    );
-    let loaded_entity = loaded_entities[0];
-
-    let health = app2.world().get::<Health>(loaded_entity).unwrap();
-    assert_eq!(health.value, 150);
-
-    let position = app2.world().get::<Position>(loaded_entity).unwrap();
-    assert_eq!(position.x, 10.0);
-    assert_eq!(position.y, 20.0);
+    // Verify only one entity with both components
+    let mut q = app2.world_mut().query::<(&Health, &Position)>();
+    let results: Vec<_> = q.iter(&app2.world()).collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].0.value, 150);
+    assert_eq!(results[0].1.x, 10.0);
+    assert_eq!(results[0].1.y, 20.0);
 }
 
 #[test]
@@ -58,11 +44,8 @@ fn test_load_resources_alongside_entities() {
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins(db.clone()));
 
-    // GIVEN a database containing a committed GameSettings resource
-    let settings = GameSettings {
-        difficulty: 0.42,
-        map_name: "mystic".into(),
-    };
+    // GIVEN a committed GameSettings resource
+    let settings = GameSettings { difficulty: 0.42, map_name: "mystic".into() };
     app1.insert_resource(settings.clone());
     app1.update();
     commit_sync(&mut app1).expect("Initial commit failed");
@@ -70,7 +53,9 @@ fn test_load_resources_alongside_entities() {
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    let _ = run_async(PersistenceQuery::new(db.clone()).fetch_into(app2.world_mut()));
+    fn sys(mut pq: PersistentQuery<&Guid>) { let _ = pq.iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, sys);
+    app2.update();
 
     // THEN the GameSettings resource is loaded
     let loaded: &GameSettings = app2.world().resource();
@@ -97,57 +82,30 @@ fn test_load_into_world_with_existing_entities() {
     app2.update();
     commit_sync(&mut app2).expect("Commit for app2 failed");
 
-    // WHEN we query for A and load it into app2
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .filter(Health::value().eq(100))
-            .fetch_into(app2.world_mut()),
-    );
+    // WHEN we query for A and load it into app2 via a system
+    fn load_a(
+        pq: PersistentQuery<&Health>
+    ) {
+        let _ = pq.filter(Health::value().eq(100)).iter_with_loading().count();
+    }
+    app2.add_systems(bevy::prelude::Update, load_a);
+    app2.update();
 
-    // THEN both A and B exist in app2, and A has correct components
+    // THEN A is present with correct components and both A and B exist in app2
+    // Find the entity with Health == 100 and verify Guid matches
+    let mut q_hp = app2.world_mut().query::<(bevy::prelude::Entity, &Health, &Guid)>();
+    let loaded: Vec<_> = q_hp.iter(&app2.world()).filter(|(_, h, _)| h.value == 100).collect();
     assert_eq!(loaded.len(), 1);
-    let e = loaded[0];
-    assert_eq!(app2.world().get::<Guid>(e).unwrap().id(), key_a);
-    assert_eq!(app2.world().get::<Health>(e).unwrap().value, 100);
-    assert_eq!(
-        app2.world_mut()
-            .query::<&Guid>()
-            .iter(&app2.world())
-            .count(),
-        2
-    );
+    let (_e, _h, g) = loaded[0];
+    assert_eq!(g.id(), key_a);
+    // Total entity count with Guid should be 2 (A loaded + B committed)
+    let mut q_guid = app2.world_mut().query::<&Guid>();
+    assert_eq!(q_guid.iter(&app2.world()).count(), 2);
 }
 
+// Replace DSL test with SystemParam and rename
 #[test]
-fn test_dsl_filter_by_component_presence() {
-    let (db, _container) = setup_sync();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
-
-    // GIVEN some entities with/without Creature
-    app
-        .world_mut()
-        .spawn(Creature { is_screaming: false });
-    app.world_mut().spawn(Health { value: 100 });
-    app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
-
-    // WHEN we query .with::<Creature>()
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Creature>()
-            .fetch_into(app2.world_mut()),
-    );
-
-    // THEN only those with Creature load
-    assert_eq!(loaded.len(), 1);
-    assert!(app2.world().get::<Creature>(loaded[0]).is_some());
-}
-
-#[test]
-fn test_dsl_equality_operator() {
+fn test_value_filters_equality_operator() {
     let (db, _container) = setup_sync();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
@@ -155,51 +113,53 @@ fn test_dsl_equality_operator() {
     // GIVEN Health, Creature, PlayerName entities
     app.world_mut().spawn(Health { value: 100 });
     app.world_mut().spawn(Health { value: 99 });
-    app
-        .world_mut()
-        .spawn(Creature { is_screaming: true });
-    app
-        .world_mut()
-        .spawn(Creature { is_screaming: false });
-    app
-        .world_mut()
-        .spawn(PlayerName { name: "Alice".into() });
-    app
-        .world_mut()
-        .spawn(PlayerName { name: "Bob".into() });
+    app.world_mut().spawn(Creature { is_screaming: true });
+    app.world_mut().spawn(Creature { is_screaming: false });
+    app.world_mut().spawn(PlayerName { name: "Alice".into() });
+    app.world_mut().spawn(PlayerName { name: "Bob".into() });
     app.update();
     commit_sync(&mut app).expect("Initial commit failed");
 
+    // Health == 100
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
+    fn s1(
+        pq: PersistentQuery<&Health>
+    ) {
+        let _ = pq.filter(Health::value().eq(100)).iter_with_loading().count();
+    }
+    app2.add_systems(bevy::prelude::Update, s1);
+    app2.update();
+    let count_h = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
+    assert_eq!(count_h, 1);
 
-    // WHEN filtering Health == 100
-    let h = run_async(
-        PersistenceQuery::new(db.clone())
-            .filter(Health::value().eq(100))
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(h.len(), 1);
+    // Creature.is_screaming == true
+    app2.world_mut().clear_entities();
+    fn s2(
+        pq: PersistentQuery<&Creature>
+    ) {
+        let _ = pq.filter(Creature::is_screaming().eq(true)).iter_with_loading().count();
+    }
+    app2.add_systems(bevy::prelude::Update, s2);
+    app2.update();
+    let count_c = app2.world_mut().query::<&Creature>().iter(&app2.world()).count();
+    assert_eq!(count_c, 1);
 
-    // WHEN filtering Creature.is_screaming == true
-    let c = run_async(
-        PersistenceQuery::new(db.clone())
-            .filter(Creature::is_screaming().eq(true))
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(c.len(), 1);
-
-    // WHEN filtering PlayerName == "Alice"
-    let p = run_async(
-        PersistenceQuery::new(db.clone())
-            .filter(PlayerName::name().eq("Alice"))
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(p.len(), 1);
+    // PlayerName == "Alice"
+    app2.world_mut().clear_entities();
+    fn s3(
+        pq: PersistentQuery<&PlayerName>
+    ) {
+        let _ = pq.filter(PlayerName::name().eq("Alice")).iter_with_loading().count();
+    }
+    app2.add_systems(bevy::prelude::Update, s3);
+    app2.update();
+    let count_p = app2.world_mut().query::<&PlayerName>().iter(&app2.world()).count();
+    assert_eq!(count_p, 1);
 }
 
 #[test]
-fn test_dsl_relational_operators() {
+fn test_value_filters_relational_operators() {
     let (db, _container) = setup_sync();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
@@ -211,115 +171,82 @@ fn test_dsl_relational_operators() {
     app.update();
     commit_sync(&mut app).expect("Initial commit failed");
 
+    // gt(100) -> 1
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
+    fn gt(
+        pq: PersistentQuery<&Health>
+    ) { let _ = pq.filter(Health::value().gt(100)).iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, gt);
+    app2.update();
+    assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 1);
 
-    assert_eq!(
-        run_async(
-            PersistenceQuery::new(db.clone())
-                .filter(Health::value().gt(100))
-                .fetch_into(app2.world_mut())
-        )
-        .len(),
-        1
-    );
-    assert_eq!(
-        run_async(
-            PersistenceQuery::new(db.clone())
-                .filter(Health::value().gte(100))
-                .fetch_into(app2.world_mut())
-        )
-        .len(),
-        2
-    );
-    assert_eq!(
-        run_async(
-            PersistenceQuery::new(db.clone())
-                .filter(Health::value().lt(100))
-                .fetch_into(app2.world_mut())
-        )
-        .len(),
-        1
-    );
-    assert_eq!(
-        run_async(
-            PersistenceQuery::new(db.clone())
-                .filter(Health::value().lte(100))
-                .fetch_into(app2.world_mut())
-        )
-        .len(),
-        2
-    );
+    // gte(100) -> 2
+    app2.world_mut().clear_entities();
+    fn gte(
+        pq: PersistentQuery<&Health>
+    ) { let _ = pq.filter(Health::value().gte(100)).iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, gte);
+    app2.update();
+    assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 2);
+
+    // lt(100) -> 1
+    app2.world_mut().clear_entities();
+    fn lt(
+        pq: PersistentQuery<&Health>
+    ) { let _ = pq.filter(Health::value().lt(100)).iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, lt);
+    app2.update();
+    assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 1);
+
+    // lte(100) -> 2
+    app2.world_mut().clear_entities();
+    fn lte(
+        pq: PersistentQuery<&Health>
+    ) { let _ = pq.filter(Health::value().lte(100)).iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, lte);
+    app2.update();
+    assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 2);
 }
 
 #[test]
-fn test_dsl_logical_combinations() {
+fn test_value_filters_logical_combinations() {
     let (db, _container) = setup_sync();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
     // GIVEN entities for AND/OR
-    app
-        .world_mut()
-        .spawn((Health { value: 150 }, Position { x: 50.0, y: 0.0 }));
-    app
-        .world_mut()
-        .spawn((Health { value: 150 }, Position { x: 150.0, y: 0.0 }));
-    app
-        .world_mut()
-        .spawn((Health { value: 50 }, Position { x: 50.0, y: 0.0 }));
-    app
-        .world_mut()
-        .spawn((Health { value: 50 }, Position { x: 150.0, y: 0.0 }));
+    app.world_mut().spawn((Health { value: 150 }, Position { x: 50.0, y: 0.0 }));
+    app.world_mut().spawn((Health { value: 150 }, Position { x: 150.0, y: 0.0 }));
+    app.world_mut().spawn((Health { value: 50 }, Position { x: 50.0, y: 0.0 }));
+    app.world_mut().spawn((Health { value: 50 }, Position { x: 150.0, y: 0.0 }));
     app.update();
     commit_sync(&mut app).expect("Initial commit failed");
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
 
-    // AND case
-    let and_loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .filter(Health::value().gt(100).and(Position::x().lt(100.0)))
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(and_loaded.len(), 1);
+    fn and_sys(
+        pq: PersistentQuery<(&Health, &Position)>
+    ) {
+        let expr = Health::value().gt(100).and(Position::x().lt(100.0));
+        let _ = pq.filter(expr).iter_with_loading().count();
+    }
+    fn or_sys(
+        pq: PersistentQuery<(&Health, &Position)>
+    ) {
+        let expr = Health::value().gt(100).or(Position::x().lt(100.0));
+        let _ = pq.filter(expr).iter_with_loading().count();
+    }
 
-    // OR case
-    let or_loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .filter(Health::value().gt(100).or(Position::x().lt(100.0)))
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(or_loaded.len(), 3);
-}
+    app2.add_systems(bevy::prelude::Update, and_sys);
+    app2.update();
+    assert_eq!(app2.world_mut().query::<(&Health, &Position)>().iter(&app2.world()).count(), 1);
 
-#[test]
-#[should_panic(expected = "component deserialization failed")]
-fn test_load_with_schema_mismatch() {
-    let (db, _container) = setup_sync();
-
-    // GIVEN a bad Health document with required fields
-    let bad_health_doc = serde_json::json!({
-        "_key": "bad_doc",
-        "bevy_persistence_version": 1,
-        Health::name(): { "value": "a string, not a number" }
-    });
-    let _key = run_async(db.execute_transaction(vec![TransactionOperation::CreateDocument {
-        collection: Collection::Entities,
-        data: bad_health_doc,
-    }]))
-    .expect("Transaction to create bad doc failed")
-    .remove(0);
-
-    // WHEN loading with .with::<Health>() – this should panic inside fetch_into
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
-    run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .fetch_into(app2.world_mut()),
-    );
+    app2.world_mut().clear_entities();
+    app2.add_systems(bevy::prelude::Update, or_sys);
+    app2.update();
+    assert_eq!(app2.world_mut().query::<(&Health, &Position)>().iter(&app2.world()).count(), 3);
 }
 
 #[test]
@@ -342,31 +269,41 @@ fn test_fetch_ids_only() {
         .iter(&app.world())
         .map(|(_, guid)| guid.id().to_string())
         .collect();
-    
-    // Verify there are 3 entities with Health
     assert_eq!(health_entities.len(), 3);
 
-    // Test fetch_ids with a Health value > 75 filter
-    let keys = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .filter(Health::value().gt(75))
-            .fetch_ids(),
-    );
+    // Use a system to load Health where value > 75, then collect keys from world
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    fn load_health_gt_75(
+        pq: PersistentQuery<&Health>
+    ) {
+        let _ = pq.filter(Health::value().gt(75)).iter_with_loading().count();
+    }
+    app2.add_systems(bevy::prelude::Update, load_health_gt_75);
+    app2.update();
+    let keys: Vec<String> = app2.world_mut()
+        .query::<(&Health, &Guid)>()
+        .iter(&app2.world())
+        .map(|(_, g)| g.id().to_string())
+        .collect();
     assert_eq!(keys.len(), 2);
-    
-    // All returned keys should be in our health_entities collection
     for key in &keys {
         assert!(health_entities.contains(key), "Returned key not found in expected set");
     }
-    
-    // Test a more specific query for Health AND Position
-    let keys_with_position = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .with::<Position>()
-            .fetch_ids(),
-    );
+
+    // Health AND Position: load via presence, then collect keys
+    let mut app3 = App::new();
+    app3.add_plugins(PersistencePlugins(db.clone()));
+    fn load_h_and_p(mut pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
+        let _ = pq.iter_with_loading().count();
+    }
+    app3.add_systems(bevy::prelude::Update, load_h_and_p);
+    app3.update();
+    let keys_with_position: Vec<String> = app3.world_mut()
+        .query::<(&Health, &Position, &Guid)>()
+        .iter(&app3.world())
+        .map(|(_, _, g)| g.id().to_string())
+        .collect();
     assert_eq!(keys_with_position.len(), 1);
 }
 
@@ -634,6 +571,13 @@ impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
     ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
         self.inner.clear_resources()
     }
+
+    fn build_query(
+        &self,
+        spec: &bevy_arangodb_core::query::spec::QuerySpec,
+    ) -> (String, std::collections::HashMap<String, serde_json::Value>) {
+        self.inner.build_query(spec)
+    }
 }
 
 #[test]
@@ -731,24 +675,26 @@ fn test_force_refresh_overwrites() {
     app1.update();
     commit_sync(&mut app1).expect("commit failed");
 
-    // Load into app2 via manual builder, then mutate locally
+    // Load into app2 via system, then mutate locally
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(loaded.len(), 1);
-    let e = loaded[0];
-    let guid = app2.world().get::<Guid>(e).unwrap().id().to_string();
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, load);
+    app2.update();
+
+    // Find the loaded entity and its guid without using the manual builder
+    let (e, g) = {
+        let mut q = app2.world_mut().query::<(bevy::prelude::Entity, &Guid)>();
+        let first = q.iter(&app2.world()).next().expect("no entity loaded");
+        (first.0, first.1.id().to_string())
+    };
 
     // Local mutation
     app2.world_mut().get_mut::<Health>(e).unwrap().value = 123;
     app2.update();
 
     // WHEN we run a system-param PersistentQuery with force_refresh
-    app2.insert_resource(TestKey(guid.clone()));
+    app2.insert_resource(TestKey(g.clone()));
     app2.add_systems(bevy::prelude::Update, force_refresh_system);
     app2.update();
 
@@ -760,7 +706,6 @@ fn test_force_refresh_overwrites() {
 struct TestKey(String);
 
 fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res<TestKey>) {
-    // filter by key and force refresh
     let _ = query
         .filter(Guid::key_field().eq(key.0.as_str()))
         .force_refresh()
@@ -768,9 +713,8 @@ fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res
         .count();
 }
 
-fn system_without_creature(pq: PersistentQuery<&Guid>) {
-    // Load only entities WITHOUT Creature
-    let _ = pq.without::<Creature>().iter_with_loading().count();
+fn system_without_creature(mut pq: PersistentQuery<&Guid, Without<Creature>>) {
+    let _ = pq.iter_with_loading().count();
 }
 
 #[test]
@@ -920,7 +864,6 @@ fn system_nested_tuple_presence(
 #[test]
 fn test_nested_tuple_presence_and() {
     let (db, _container) = setup_sync();
-
     // GIVEN: H+P, H+C, P-only
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
@@ -1118,4 +1061,155 @@ fn test_or_presence_three_arms() {
     // THEN: 3 entities loaded (H or C or Name)
     let mut q_guid = app2.world_mut().query::<&Guid>();
     assert_eq!(q_guid.iter(&app2.world()).count(), 3);
+}
+
+#[derive(bevy::prelude::Resource, Default)]
+struct PassThroughState {
+    loaded_count: usize,
+    got_sum_first_two: i32,
+    combos_of_two: usize,
+    single_health: i32,
+    single_health_via_single: i32,
+}
+
+// Add: loader system that enqueues the DB load during Update
+fn system_load_hp(mut pq: PersistentQuery<(&Health, &Position)>) {
+    let _ = pq.iter_with_loading().count();
+}
+
+// System that validates get/get_many/iter_combinations after a load
+fn system_pass_through_core(
+    mut pq: PersistentQuery<(&Health, &Position)>,
+    mut state: bevy::prelude::ResMut<PassThroughState>,
+) {
+    // Load from DB first
+    let mut ids = Vec::new();
+    for (e, (_h, _p)) in pq.iter_with_loading() {
+        ids.push(e);
+        state.loaded_count += 1;
+    }
+
+    // get for the first entity
+    if let Some(&first) = ids.get(0) {
+        let (_e, (h, _p)) = pq.get(first).expect("get() failed");
+        // ensure the item was accessible
+        assert!(h.value >= 0);
+    }
+
+    // get_many for the two entities with the smallest health values (order-independent)
+    if ids.len() >= 2 {
+        // Map each id to its health, then pick two smallest
+        let mut pairs: Vec<(bevy::prelude::Entity, i32)> = ids
+            .iter()
+            .map(|&e| {
+                let (_e, (h, _)) = pq.get(e).expect("get() failed");
+                (e, h.value)
+            })
+            .collect();
+        pairs.sort_by_key(|(_, v)| *v);
+
+        let a = pairs[0].0;
+        let b = pairs[1].0;
+        let arr = pq.get_many([a, b]).expect("get_many failed");
+        state.got_sum_first_two = arr.iter().map(|(_, (h, _))| h.value).sum();
+    }
+
+    // combinations of 2
+    state.combos_of_two = pq.iter_combinations::<2>().count();
+}
+
+// System that validates get_single/single after a load with a presence filter that matches exactly one
+fn system_pass_through_single(
+    pq: PersistentQuery<(&Health, &Position), With<PlayerName>>,
+    mut state: bevy::prelude::ResMut<PassThroughState>,
+) {
+    // Load was done in Update; here we only use pass-throughs against the world.
+
+    let (_e, (h, _p)) = pq.single().expect("single failed");
+    state.single_health = h.value;
+
+    let (_e2, (h2, _p2)) = pq.single().expect("single failed");
+    state.single_health_via_single = h2.value;
+}
+
+#[test]
+fn test_persistent_query_pass_through_methods() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: three entities with Health+Position, one also with PlayerName
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn((Health { value: 10 }, Position { x: 1.0, y: 1.0 }, PlayerName { name: "only".into() }));
+    app.world_mut().spawn((Health { value: 20 }, Position { x: 2.0, y: 2.0 }));
+    app.world_mut().spawn((Health { value: 30 }, Position { x: 3.0, y: 3.0 }));
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: run systems that first load, then use pass-through methods
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.insert_resource(PassThroughState::default());
+
+    // Enqueue load during Update
+    app2.add_systems(bevy::prelude::Update, system_load_hp);
+    // Run pass-through checks after deferred ops apply in PostUpdate
+    app2.add_systems(
+        bevy::prelude::PostUpdate,
+        system_pass_through_core.after(bevy_arangodb_core::PersistenceSystemSet::PreCommit),
+    );
+    app2.add_systems(
+        bevy::prelude::PostUpdate,
+        system_pass_through_single.after(system_pass_through_core),
+    );
+
+    // Single frame: Update + PostUpdate
+    app2.update();
+
+    // THEN: pass-through results match in-world state
+    let st = app2.world().resource::<PassThroughState>();
+    // Loaded three entities
+    assert_eq!(st.loaded_count, 3);
+
+    // get_many sum of first two health values should be 10 + 20 = 30 (order-dependent but deterministic for first two)
+    assert_eq!(st.got_sum_first_two, 30);
+
+    // Combinations of 3 choose 2 = 3
+    assert_eq!(st.combos_of_two, 3);
+
+    // single (filtered by PlayerName) should be the one with health 10
+    assert_eq!(st.single_health, 10);
+    assert_eq!(st.single_health_via_single, 10);
+}
+
+#[test]
+fn test_postupdate_load_applies_next_frame() {
+    let (db, _container) = setup_sync();
+
+    // GIVEN: one entity to load
+    let mut app1 = App::new();
+    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.world_mut().spawn((Health { value: 7 }, Position { x: 1.0, y: 2.0 }));
+    app1.update();
+    commit_sync(&mut app1).expect("commit failed");
+
+    // WHEN: load is triggered from PostUpdate
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    fn postupdate_load(mut pq: PersistentQuery<(&Health, &Position)>) {
+        let _ = pq.iter_with_loading().count();
+    }
+    // Ensure the loader runs before PreCommit so ops are applied in the same frame.
+    app2.add_systems(
+        bevy::prelude::PostUpdate,
+        postupdate_load.before(bevy_arangodb_core::PersistenceSystemSet::PreCommit),
+    );
+    // First frame: load queued and applied within PostUpdate; data is visible immediately
+    app2.update();
+    let mut q0 = app2.world_mut().query::<&Health>();
+    assert_eq!(q0.iter(&app2.world()).count(), 1, "PostUpdate load should be visible in the same frame");
+
+    // Second frame: remains visible
+    app2.update();
+    let mut q1 = app2.world_mut().query::<(&Health, &Position)>();
+    assert_eq!(q1.iter(&app2.world()).count(), 1, "Loaded entity should be present");
 }

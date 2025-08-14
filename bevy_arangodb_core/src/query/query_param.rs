@@ -9,12 +9,11 @@ use bevy::prelude::{Entity, Query, Res, Resource, Mut, World, With, Without, Or}
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
 
-use crate::query::expression::Expression;
-use crate::query::persistence_query::WithComponentExt;
+use crate::query::spec::{QuerySpec, ValueExpr};
 use crate::{DatabaseConnectionResource, PersistenceSession, Guid, BEVY_PERSISTENCE_VERSION_FIELD};
-use crate::query::PersistenceQuery;
-use crate::versioning::version_manager::VersionKey;
 use crate::plugins::persistence_plugin::TokioRuntime;
+use crate::versioning::version_manager::VersionKey;
+use bevy::ecs::query::ReadOnlyQueryData;
 use std::hash::{Hash, Hasher};
 
 /// Caching policy for persistent queries
@@ -78,9 +77,8 @@ impl DeferredWorldOps {
 // This avoids Local<T> so multiple PersistentQuery params can coexist in one system.
 thread_local! {
     static PQ_ADDITIONAL_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = Default::default();
-    static PQ_FILTER_EXPR: std::cell::RefCell<Option<Expression>> = const { std::cell::RefCell::new(None) };
+    static PQ_VALUE_EXPR: std::cell::RefCell<Option<ValueExpr>> = const { std::cell::RefCell::new(None) };
     static PQ_CACHE_POLICY: std::cell::RefCell<CachePolicy> = const { std::cell::RefCell::new(CachePolicy::UseCache) };
-    // track components to exclude (presence absence)
     static PQ_WITHOUT_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = Default::default();
 }
 
@@ -117,7 +115,7 @@ where
         PQ_ADDITIONAL_COMPONENTS.with(|c| presence_names.extend(c.borrow_mut().drain(..)));
         let mut without_names: Vec<&'static str> = Vec::new();
         PQ_WITHOUT_COMPONENTS.with(|w| without_names.extend(w.borrow_mut().drain(..)));
-        let tls_filter_expr: Option<Expression> = PQ_FILTER_EXPR.with(|f| f.borrow_mut().take());
+        let tls_value_expr: Option<ValueExpr> = PQ_VALUE_EXPR.with(|f| f.borrow_mut().take());
         let cache_policy: CachePolicy = PQ_CACHE_POLICY.with(|p| *p.borrow());
         // Reset cache policy to default for the next call
         PQ_CACHE_POLICY.with(|p| *p.borrow_mut() = CachePolicy::UseCache);
@@ -146,7 +144,7 @@ where
         without_names.dedup();
 
         // 3) Combine presence-derived expression (from Or cases) with TLS filter via AND
-        let combined_expr: Option<Expression> = match (type_presence.expr, tls_filter_expr) {
+        let combined_expr: Option<ValueExpr> = match (type_presence.expr, tls_value_expr) {
             (Some(a), Some(b)) => Some(a.and(b)),
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
@@ -185,37 +183,42 @@ where
             }
             bevy::log::debug!("Will query for components (if any): {:?}", presence_names);
 
-            // Build the query
-            let mut query = PersistenceQuery::new(self.db.0.clone());
-            // Presence gating (doc.`T` != null)
-            for comp_name in &presence_names {
-                query = query.with_component(comp_name);
-            }
-            // Absence gating (doc.`T` == null)
-            for without in &without_names {
-                query = query.without_component(without);
-            }
-            // Fetch-only targets (do not add presence filters)
-            for name in &fetch_names {
-                // Skip those already added as presence-gated to avoid dup
-                if !presence_names.contains(name) {
-                    query = query.fetch_only_component(name);
-                }
-            }
-            if let Some(expr) = &combined_expr {
-                query = query.filter(expr.clone());
-            }
-
-            // Execute using the plugin runtime
-            bevy::log::info!("Executing database query for components: {:?}", presence_names);
-            let (aql, bind_vars) = query.build_aql(true);
+            // Build backend-agnostic spec and delegate to the db
+            let spec = QuerySpec {
+                presence_with: presence_names.clone(),
+                presence_without: without_names.clone(),
+                fetch_only: fetch_names.clone(),
+                value_filters: combined_expr.clone(),
+                return_full_docs: true,
+            };
+            let (aql, bind_vars) = self.db.build_query(&spec);
 
             match self.runtime.block_on(self.db.0.query_documents(aql, bind_vars)) {
                 Ok(documents) => {
                     bevy::log::debug!("Retrieved {} documents (async via runtime)", documents.len());
-                    let allow_overwrite = matches!(cache_policy, CachePolicy::ForceRefresh);
-                    // Deserialize all requested components (presence + fetch-only)
-                    self.process_documents(documents, &fetch_names, allow_overwrite);
+                    // Allow overwrite when explicitly requested or when presence gates are used.
+                    let allow_overwrite =
+                        matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_names.is_empty();
+                    // Deserialize components:
+                    // - If presence gates are provided, load only requested components (presence + fetch-only).
+                    // - If no presence gates, load any registered components found in each document.
+                    //   Pass an empty list to signal "load all registered components present".
+                    let comps_to_deser: Vec<&'static str> = if presence_names.is_empty() {
+                        Vec::new()
+                    } else {
+                        fetch_names.clone()
+                    };
+                    self.process_documents(documents, &comps_to_deser, allow_overwrite);
+
+                    // Also fetch resources alongside any query
+                    let db = self.db.0.clone();
+                    self.ops.push(Box::new(move |world: &mut World| {
+                        world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                            let rt = world.resource::<crate::plugins::persistence_plugin::TokioRuntime>().0.clone();
+                            rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                        });
+                    }));
+
                     self.cache.insert(query_hash);
                 }
                 Err(e) => {
@@ -251,27 +254,35 @@ where
 
             self.ops.push(Box::new(move |world: &mut World| {
                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                    // Resolve or spawn the entity for this key and detect existence
-                    let (entity, existed) = if let Some((e, _)) = session
+                    // Resolve or spawn the entity for this key and detect true existence in the world.
+                    // The session map may contain stale entries for entities that were despawned; check world.
+                    let (entity, existed) = if let Some((candidate, _)) = session
                         .entity_keys
                         .iter()
                         .find(|(_, k)| **k == key)
                         .map(|(e, k)| (*e, k.clone()))
                     {
-                        (e, true)
+                        if world.get_entity(candidate).is_ok() {
+                            (candidate, true)
+                        } else {
+                            // Stale mapping: replace with a new entity for this key.
+                            let e = world.spawn(Guid::new(key.clone())).id();
+                            session.entity_keys.insert(e, key.clone());
+                            (e, false)
+                        }
                     } else {
                         let e = world.spawn(Guid::new(key.clone())).id();
                         session.entity_keys.insert(e, key.clone());
                         (e, false)
                     };
 
-                    // If the entity already exists and we're not force-refreshing, do nothing.
+                    // If the entity already exists and we're not force-refreshing (or presence-merge), do nothing.
                     if existed && !allow {
-                        bevy::log::trace!("Skipping update for existing entity {} (no force refresh)", key);
+                        bevy::log::trace!("Skipping update for existing entity {} (no overwrite allowed)", key);
                         return;
                     }
 
-                    // Cache version (for new entities or when forcing refresh)
+                    // Cache version (for new entities or when forcing refresh / presence-merge)
                     session
                         .version_manager
                         .set_version(VersionKey::Entity(key.clone()), version);
@@ -279,7 +290,7 @@ where
                     // Insert components
                     if !comps.is_empty() {
                         for &comp_name in &comps {
-                            // When forcing refresh, we overwrite; otherwise this path is only for brand-new entities
+                            // When forcing refresh or presence-merge, we overwrite; otherwise only for brand-new entities
                             if let Some(val) = doc_clone.get(comp_name) {
                                 if let Some(deser) = session.component_deserializers.get(comp_name) {
                                     if let Err(e) = deser(world, entity, val.clone()) {
@@ -310,17 +321,64 @@ where
         }
     }
 
-    /// Add a component to load by name
-    #[deprecated(since = "0.1.0", note = "Deprecated runtime helper; prefer type-driven Q")]
-    pub fn with_component(self, component_name: &'static str) -> Self {
-        PQ_ADDITIONAL_COMPONENTS.with(|c| c.borrow_mut().push(component_name));
-        self
+    // World-only pass-throughs to the inner Bevy Query. These DO NOT trigger DB loads.
+
+    /// Get the item for a specific entity from the world only.
+    /// Note: This does not load from the DB. Call `iter_with_loading()` earlier if needed.
+    pub fn get(
+        &self,
+        entity: Entity,
+    ) -> Result<(Entity, Q::Item<'_>), bevy::ecs::query::QueryEntityError> {
+        self.query.get(entity)
     }
 
-    /// Add a filter expression
-    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
-    pub fn filter(self, expression: Expression) -> Self {
-        PQ_FILTER_EXPR.with(|f| *f.borrow_mut() = Some(expression));
+    /// Get items for multiple entities by fixed-size array.
+    /// Note: No DB loads are performed.
+    pub fn get_many<const N: usize>(
+        &self,
+        entities: [Entity; N],
+    ) -> Result<[(Entity, Q::Item<'_>); N], bevy::ecs::query::QueryEntityError> {
+        self.query.get_many(entities)
+    }
+
+    /// Get the single matching item from the world only
+    pub fn single(
+        &self,
+    ) -> Result<(Entity, Q::Item<'_>), bevy::ecs::query::QuerySingleError> {
+        self.query.single()
+    }
+
+    /// Iterate over all K-combinations (immutable) from the world only.
+    /// No DB loads are performed.
+    pub fn iter_combinations<const K: usize>(
+        &self,
+    ) -> impl Iterator<Item = [(Entity, Q::Item<'_>); K]>
+    where
+        Q: ReadOnlyQueryData,
+    {
+        self.query.iter_combinations()
+    }
+
+    /// Iterate over all K-combinations (mutable) from the world only.
+    /// No DB loads are performed.
+    pub fn iter_combinations_mut<const K: usize>(
+        &mut self,
+    ) -> impl Iterator<Item = [(Entity, Q::Item<'_>); K]>
+    where
+        Q: ReadOnlyQueryData,
+    {
+        self.query.iter_combinations_mut()
+    }
+
+    /// Add a value filter pushed down to the backend.
+    /// Alias for `where(...)` to avoid raw-identifier call sites.
+    pub fn filter(self, expr: ValueExpr) -> Self {
+        self.r#where(expr)
+    }
+
+    /// Add a value filter pushed down to the backend.
+    pub fn r#where(self, expr: ValueExpr) -> Self {
+        PQ_VALUE_EXPR.with(|f| *f.borrow_mut() = Some(expr));
         self
     }
 
@@ -329,21 +387,14 @@ where
         PQ_CACHE_POLICY.with(|p| *p.borrow_mut() = CachePolicy::ForceRefresh);
         self
     }
-
-    /// Exclude entities that have the given component T (presence absence).
-    #[deprecated(since = "0.1.0", note = "Deprecated runtime helper; prefer type-driven F")]
-    pub fn without<T: bevy::prelude::Component + crate::Persist>(self) -> Self {
-        PQ_WITHOUT_COMPONENTS.with(|w| w.borrow_mut().push(T::name()));
-        self
-    }
 }
 
-// Presence spec extracted from type-level filters
+// PresenceSpec now uses ValueExpr internally
 #[derive(Default)]
-struct PresenceSpec {
+pub struct PresenceSpec {
     withs: Vec<&'static str>,
     withouts: Vec<&'static str>,
-    expr: Option<Expression>,
+    expr: Option<ValueExpr>,
 }
 
 impl PresenceSpec {
@@ -359,18 +410,29 @@ impl PresenceSpec {
         self
     }
 
-    fn to_expr(&self) -> Option<Expression> {
-        // Build an AND of all presence lists, then AND with self.expr if present
-        let mut acc: Option<Expression> = None;
+    fn to_expr(&self) -> Option<ValueExpr> {
+        // Build an AND of presence lists using (doc.`Comp` != null) and (doc.`Comp` == null),
+        // then AND with self.expr if present.
+        let mut acc: Option<ValueExpr> = None;
         for n in &self.withs {
-            let e = Expression::with_component(*n);
+            let field = ValueExpr::field(*n, "");
+            let e = ValueExpr::BinaryOp {
+                op: crate::query::spec::BinaryOp::Ne,
+                lhs: Box::new(field),
+                rhs: Box::new(ValueExpr::Literal(serde_json::Value::Null)),
+            };
             acc = Some(match acc {
                 Some(cur) => cur.and(e),
                 None => e,
             });
         }
         for n in &self.withouts {
-            let e = Expression::without_component(*n);
+            let field = ValueExpr::field(*n, "");
+            let e = ValueExpr::BinaryOp {
+                op: crate::query::spec::BinaryOp::Eq,
+                lhs: Box::new(field),
+                rhs: Box::new(ValueExpr::Literal(serde_json::Value::Null)),
+            };
             acc = Some(match acc {
                 Some(cur) => cur.and(e),
                 None => e,
@@ -391,7 +453,6 @@ impl FilterSupported for () {}
 impl<T: bevy::prelude::Component + crate::Persist> FilterSupported for With<T> {}
 impl<T: bevy::prelude::Component + crate::Persist> FilterSupported for Without<T> {}
 impl<T: FilterSupportedTuple> FilterSupported for Or<T> {}
-// tuples themselves are supported (AND) if each element is supported
 impl<T: FilterSupportedTuple> FilterSupported for T {}
 
 // Helper trait to mark tuples as supported
@@ -454,11 +515,11 @@ macro_rules! impl_to_presence_for_or_tuple {
     ( $( $name:ident ),+ ) => {
         impl<$( $name: ToPresenceSpec ),+> ToPresenceSpec for Or<( $( $name, )+ )> {
             fn to_presence_spec() -> PresenceSpec {
-                let parts: Vec<Option<Expression>> = vec![
+                let parts: Vec<Option<ValueExpr>> = vec![
                     $( <$name as ToPresenceSpec>::to_presence_spec().to_expr(), )+
                 ];
                 // Build OR chain of non-empty expressions
-                let mut or_expr: Option<Expression> = None;
+                let mut or_expr: Option<ValueExpr> = None;
                 for p in parts.into_iter().flatten() {
                     or_expr = Some(match or_expr {
                         Some(cur) => cur.or(p),

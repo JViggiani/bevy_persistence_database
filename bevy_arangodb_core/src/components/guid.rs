@@ -2,7 +2,6 @@
 
 use bevy::prelude::Component;
 use serde::{Deserialize, Serialize, Serializer, Deserializer};
-use crate::query::expression::Expression;
 
 /// A globally-unique identifier for an entity, used to link the Bevy `Entity`
 /// to its corresponding document in the database. This is typically the document key.
@@ -39,8 +38,8 @@ impl Guid {
         &self.0
     }
 
-    /// Creates a DSL expression for the document key field
-    pub fn key_field() -> Expression {
-        Expression::DocumentKey
+    /// Creates a value-expression for the document key field
+    pub fn key_field() -> crate::query::spec::ValueExpr {
+        crate::query::spec::ValueExpr::DocumentKey
     }
 }

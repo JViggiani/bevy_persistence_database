@@ -36,9 +36,8 @@ pub use plugins::{
     CommitStatus, PersistencePluginCore, TriggerCommit, CommitCompleted,
     persistence_plugin::PersistenceSystemSet,
 };
-pub use query::{PersistenceQuery, PersistentQuery, PersistenceQueryCache, CachePolicy};
+pub use query::{PersistentQuery, PersistenceQueryCache, CachePolicy};
 
-pub use query::expression::{Expression, BinaryOperator};
 pub use resources::{PersistenceSession, commit, commit_sync};
 pub use persist::Persist;
 

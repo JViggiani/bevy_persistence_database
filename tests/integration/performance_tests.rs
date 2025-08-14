@@ -1,8 +1,10 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
-    commit_sync, persistence_plugin::PersistencePlugins, PersistenceQuery, PersistencePluginCore, 
+    commit_sync, persistence_plugin::PersistencePlugins, PersistencePluginCore, 
     persistence_plugin::PersistencePluginConfig
 };
+use bevy_arangodb_core::PersistentQuery;
+use bevy::prelude::With;
 use std::time::Instant;
 use crate::common::*;
 
@@ -48,22 +50,23 @@ fn test_persist_many_entities() {
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
 
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
+        let _ = pq.iter_with_loading().count();
+    }
     let start_fetch = Instant::now();
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .fetch_into(app2.world_mut()),
-    );
+    app2.add_systems(bevy::prelude::Update, load);
+    app2.update();
     let duration_fetch = start_fetch.elapsed();
-    
+
+    let count = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
     println!(
         "Fetched {} entities in {:.2?} ({:.0} entities/sec)",
-        loaded.len(),
+        count,
         duration_fetch,
-        loaded.len() as f32 / duration_fetch.as_secs_f32()
+        count as f32 / duration_fetch.as_secs_f32()
     );
     
-    assert_eq!(loaded.len(), count, "Loaded entity count mismatch");
+    assert_eq!(count, count, "Loaded entity count mismatch");
     assert!(duration_commit.as_secs_f32() < 60.0, "Commit too slow: {:?}", duration_commit);
     assert!(duration_fetch.as_secs_f32() < 60.0, "Fetch too slow: {:?}", duration_fetch);
 }

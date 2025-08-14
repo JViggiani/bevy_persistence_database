@@ -8,6 +8,7 @@ use arangors::{
 };
 use crate::db::DatabaseConnection;
 use crate::db::connection::{PersistenceError, TransactionOperation, Collection, BEVY_PERSISTENCE_VERSION_FIELD};
+use crate::query::spec::{QuerySpec, ValueExpr, BinaryOp};
 use futures::future::BoxFuture;
 use futures::FutureExt;
 use serde_json::Value;
@@ -94,6 +95,44 @@ impl ArangoDbConnection {
                     "Failed to ensure database '{}': {}",
                     db_name, e
                 )))
+            }
+        }
+    }
+
+    fn translate_value_expr(
+        expr: &ValueExpr,
+        bind_vars: &mut HashMap<String, Value>,
+        key_field: &str,
+    ) -> String {
+        match expr {
+            ValueExpr::Literal(v) => {
+                let name = format!("bevy_arangodb_bind_{}", bind_vars.len());
+                bind_vars.insert(name.clone(), v.clone());
+                format!("@{}", name)
+            }
+            ValueExpr::Field { component_name, field_name } => {
+                if field_name.is_empty() {
+                    format!("doc.`{}`", component_name)
+                } else {
+                    format!("doc.`{}`.`{}`", component_name, field_name)
+                }
+            }
+            ValueExpr::DocumentKey => format!("doc.{}", key_field),
+            ValueExpr::BinaryOp { op, lhs, rhs } => {
+                let l = Self::translate_value_expr(lhs, bind_vars, key_field);
+                let r = Self::translate_value_expr(rhs, bind_vars, key_field);
+                let op_str = match op {
+                    BinaryOp::Eq => "==",
+                    BinaryOp::Ne => "!=",
+                    BinaryOp::Gt => ">",
+                    BinaryOp::Gte => ">=",
+                    BinaryOp::Lt => "<",
+                    BinaryOp::Lte => "<=",
+                    BinaryOp::And => "AND",
+                    BinaryOp::Or => "OR",
+                    BinaryOp::In => "IN",
+                };
+                format!("({} {} {})", l, op_str, r)
             }
         }
     }
@@ -433,5 +472,44 @@ impl DatabaseConnection for ArangoDbConnection {
                 .await
                 .map_err(|e| PersistenceError::new(e.to_string()))
         })
+    }
+
+    fn build_query(&self, spec: &QuerySpec) -> (String, HashMap<String, Value>) {
+        let mut bind_vars = HashMap::new();
+        let mut aql = format!("FOR doc IN {}", Collection::Entities);
+        let mut filters: Vec<String> = Vec::new();
+
+        if !spec.presence_with.is_empty() {
+            let s = spec.presence_with
+                .iter()
+                .map(|n| format!("doc.`{}` != null", n))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            filters.push(format!("({})", s));
+        }
+        if !spec.presence_without.is_empty() {
+            let s = spec.presence_without
+                .iter()
+                .map(|n| format!("doc.`{}` == null", n))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            filters.push(format!("({})", s));
+        }
+        if let Some(expr) = &spec.value_filters {
+            let s = Self::translate_value_expr(expr, &mut bind_vars, self.document_key_field());
+            filters.push(s);
+        }
+        if filters.is_empty() {
+            aql.push_str("\n  FILTER true");
+        } else {
+            aql.push_str("\n  FILTER ");
+            aql.push_str(&filters.join(" AND "));
+        }
+        if spec.return_full_docs {
+            aql.push_str("\n  RETURN doc");
+        } else {
+            aql.push_str(&format!("\n  RETURN doc.{}", self.document_key_field()));
+        }
+        (aql, bind_vars)
     }
 }

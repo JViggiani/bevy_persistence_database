@@ -6,21 +6,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use serde_json::Value;
 use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
-use crate::Collection;
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
-use crate::query::expression::{Expression, translate_expression};
+use crate::query::spec::{QuerySpec, ValueExpr};
 use crate::versioning::version_manager::VersionKey;
 use bevy::prelude::{Component, World};
 
-/// AQL query builder: select which components and filters to apply.
-#[deprecated(
-    since = "0.1.0",
-    note = "Manual builder is deprecated; prefer the PersistentQuery SystemParam with type-driven filters."
-)]
+/// Query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
     db: Arc<dyn DatabaseConnection>,
     pub component_names: Vec<&'static str>,
-    filter_expr: Option<Expression>,
+    filter_expr: Option<ValueExpr>,
 
     /// Track explicit absence filters for components
     pub(crate) without_component_names: Vec<&'static str>,
@@ -31,7 +26,6 @@ pub struct PersistenceQuery {
 
 impl PersistenceQuery {
     /// Start a new query backed by a shared database connection.
-    #[deprecated(since = "0.1.0", note = "Deprecated builder; prefer PersistentQuery SystemParam")]
     pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
         Self {
             db,
@@ -43,29 +37,25 @@ impl PersistenceQuery {
     }
 
     /// Request loading component `T`.
-    #[deprecated(since = "0.1.0", note = "Deprecated builder; prefer type-driven Q in SystemParam")]
     pub fn with<T: Component + Persist>(mut self) -> Self {
         self.component_names.push(T::name());
         self
     }
 
     /// Request absence of component `T` (doc.`T` == null)
-    #[deprecated(since = "0.1.0", note = "Deprecated builder; prefer type-driven F in SystemParam")]
     pub fn without<T: Component + Persist>(mut self) -> Self {
         self.without_component_names.push(T::name());
         self
     }
 
     /// Internal: request fetching component by name without presence gating.
-    #[deprecated(since = "0.1.0", note = "Deprecated builder; prefer SystemParam and type-driven Q")]
     pub fn fetch_only_component(mut self, component_name: &'static str) -> Self {
         self.fetch_only_component_names.push(component_name);
         self
     }
 
     /// Combine current filter with OR.
-    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
-    pub fn or(mut self, expression: Expression) -> Self {
+    pub fn or(mut self, expression: ValueExpr) -> Self {
         self.filter_expr = Some(match self.filter_expr.take() {
             Some(existing) => existing.or(expression),
             None => expression,
@@ -73,28 +63,24 @@ impl PersistenceQuery {
         self
     }
 
-    /// Sets the filter for the query using an `Expression`.
-    #[deprecated(since = "0.1.0", note = "Deprecated DSL; prefer type-driven filters")]
-    pub fn filter(mut self, expression: Expression) -> Self {
+    /// Sets the filter for the query using a `ValueExpr`.
+    pub fn filter(mut self, expression: ValueExpr) -> Self {
         // Collect any component names referenced in the filter expression
-        fn collect(expr: &Expression, names: &mut Vec<&'static str>) {
+        fn collect(expr: &ValueExpr, names: &mut Vec<&'static str>) {
             match expr {
-                Expression::Field { component_name, .. } => {
+                ValueExpr::Field { component_name, .. } => {
                     if !names.contains(component_name) {
                         names.push(component_name);
                     }
                 }
-                Expression::DocumentKey => {
-                    // DocumentKey doesn't reference a component
-                }
-                Expression::BinaryOp { lhs, rhs, .. } => {
+                ValueExpr::DocumentKey => { /* no component */ }
+                ValueExpr::BinaryOp { lhs, rhs, .. } => {
                     collect(lhs, names);
                     collect(rhs, names);
                 }
-                _ => {}
+                ValueExpr::Literal(_) => {}
             }
         }
-        // Update component_names to include filter‐referenced types
         let mut names = self.component_names.clone();
         collect(&expression, &mut names);
         self.component_names = names;
@@ -103,66 +89,39 @@ impl PersistenceQuery {
         self
     }
 
-    /// Construct the AQL and bind-variables tuple.
-    #[deprecated(since = "0.1.0", note = "Will be replaced by DatabaseConnection::build_query")]
-    pub(crate) fn build_aql(&self, full_docs: bool) -> (String, HashMap<String, Value>) {
-        let mut bind_vars = HashMap::new();
-        let mut aql = format!("FOR doc IN {}", Collection::Entities);
+    /// Construct the query and bind variables by delegating to the backend.
+    pub(crate) fn build_query(&self, full_docs: bool) -> (String, HashMap<String, Value>) {
+        // Build a backend-agnostic spec and delegate to the db
+        let mut fetch_only = self.component_names.clone();
+        fetch_only.extend(self.fetch_only_component_names.iter().copied());
+        fetch_only.sort_unstable();
+        fetch_only.dedup();
 
-        let mut filters = Vec::new();
-        if !self.component_names.is_empty() {
-            let comp_filter = self.component_names
-                .iter()
-                .map(|n| format!("doc.`{}` != null", n))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            filters.push(format!("({})", comp_filter));
-        }
-        // New: absence filters
-        if !self.without_component_names.is_empty() {
-            let without_filter = self.without_component_names
-                .iter()
-                .map(|n| format!("doc.`{}` == null", n))
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            filters.push(format!("({})", without_filter));
-        }
-        if let Some(expr) = &self.filter_expr {
-            filters.push(translate_expression(expr, &mut bind_vars, &*self.db));
-        }
-
-        if filters.is_empty() {
-            aql.push_str("\n  FILTER true");
-        } else {
-            aql.push_str("\n  FILTER ");
-            aql.push_str(&filters.join(" AND "));
-        }
-
-        if full_docs {
-            aql.push_str("\n  RETURN doc");
-        } else {
-            aql.push_str(&format!("\n  RETURN doc.{}", self.db.document_key_field()));
-        }
-        (aql, bind_vars)
+        let spec = QuerySpec {
+            presence_with: self.component_names.clone(),
+            presence_without: self.without_component_names.clone(),
+            fetch_only,
+            value_filters: self.filter_expr.clone(),
+            return_full_docs: full_docs,
+        };
+        self.db.build_query(&spec)
     }
 
-    /// Run the AQL, fetch matching keys, and return them.
-    #[deprecated(since = "0.1.0", note = "Deprecated builder; prefer SystemParam-based loading")]
+    /// Run the query for keys only.
     pub async fn fetch_ids(&self) -> Vec<String> {
-        let (aql, bind_vars) = self.build_aql(false);
+        let (aql, bind_vars) = self.build_query(false);
         self.db.query_keys(aql, bind_vars)
             .await
             .expect("AQL query failed")
     }
 
     /// Load matching entities into the World.
-    #[deprecated(since = "0.1.0", note = "Deprecated builder; prefer SystemParam-based loading")]
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
         // remove the session resource
         let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
         // fetch full documents in one go
-        let (aql, bind_vars) = self.build_aql(true);
+        let (aql, bind_vars) = self.build_query(true);
         let documents = self.db.query_documents(aql, bind_vars)
             .await
             .expect("Batch document fetch failed");
@@ -227,7 +186,6 @@ impl PersistenceQuery {
 }
 
 // Extension trait for PersistenceQuery to add component by name
-#[deprecated(since = "0.1.0", note = "Deprecated builder; prefer SystemParam and type-driven filters")]
 pub trait WithComponentExt {
     fn with_component(self, component_name: &'static str) -> Self;
     fn without_component(self, component_name: &'static str) -> Self;
@@ -235,7 +193,6 @@ pub trait WithComponentExt {
     fn fetch_only_component(self, component_name: &'static str) -> Self;
 }
 
-#[allow(deprecated)]
 impl WithComponentExt for PersistenceQuery {
     fn with_component(mut self, component_name: &'static str) -> Self {
         self.component_names.push(component_name);
@@ -280,7 +237,7 @@ mod tests {
                 .and(B::name().eq("test"))
             );
 
-        let (aql, bind_vars) = q.build_aql(false);
+        let (aql, bind_vars) = q.build_query(false);
 
         // Should require presence of both components by their Persist::name()
         assert!(aql.contains(&format!("doc.`{}` != null", <A as Persist>::name())));
@@ -309,7 +266,7 @@ mod tests {
             .filter(A::value().gt(10))
             .or(B::name().eq("foo"));
 
-        let (aql, bind_vars) = q.build_aql(false);
+        let (aql, bind_vars) = q.build_query(false);
         // Expect both branches joined with OR
         assert!(
             aql.contains("(doc.`A`.`value` > @bevy_arangodb_bind_0) OR (doc.`B`.`name` == @bevy_arangodb_bind_1)"),
@@ -361,7 +318,7 @@ mod tests {
         let mut db = MockDatabaseConnection::new();
         db.expect_document_key_field().return_const("_key");
         let db = Arc::new(db);
-        let (aql, _) = PersistenceQuery::new(db).build_aql(false);
+        let (aql, _) = PersistenceQuery::new(db).build_query(false);
         assert!(aql.contains("FILTER true"));
     }
 
@@ -389,13 +346,13 @@ mod tests {
         let mut db = MockDatabaseConnection::new();
         db.expect_document_key_field().return_const("_key");
         let db = Arc::new(db);
-        let (a_single, _) = PersistenceQuery::new(db.clone()).with::<H>().build_aql(false);
+        let (a_single, _) = PersistenceQuery::new(db.clone()).with::<H>().build_query(false);
         assert!(a_single.contains(&format!("doc.`{}` != null", H::name())));
 
         let (a_multi, _) = PersistenceQuery::new(db)
             .with::<H>()
             .with::<P>()
-            .build_aql(false);
+            .build_query(false);
         assert!(a_multi.contains(&format!("doc.`{}` != null", H::name())));
         assert!(a_multi.contains(&format!("doc.`{}` != null", P::name())));
     }

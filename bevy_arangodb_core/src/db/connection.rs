@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use bevy::prelude::Resource;
+use crate::query::spec::QuerySpec;
 
 /// The field name used for optimistic locking version tracking.
 pub const BEVY_PERSISTENCE_VERSION_FIELD: &str = "bevy_persistence_version";
@@ -135,6 +136,15 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
 
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
+
+    /// Backend-agnostic: build a query string and bind vars from a QuerySpec.
+    /// Default panics to force backend implementation.
+    fn build_query(
+        &self,
+        _spec: &QuerySpec,
+    ) -> (String, std::collections::HashMap<String, Value>) {
+        panic!("DatabaseConnection::build_query not implemented for this backend")
+    }
 }
 impl_downcast!(DatabaseConnection);
 

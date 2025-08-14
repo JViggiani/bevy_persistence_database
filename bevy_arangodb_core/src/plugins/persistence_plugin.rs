@@ -637,20 +637,6 @@ impl Plugin for PersistencePluginCore {
             (PersistenceSystemSet::PreCommit, PersistenceSystemSet::Commit).chain(),
         );
 
-        // Add both PreCommit and Commit-phase systems:
-        app.add_systems(
-            PostUpdate,
-            (
-                (
-                    auto_despawn_tracking_system,
-                    handle_commit_trigger,
-                    commit_event_listener,
-                )
-                    .in_set(PersistenceSystemSet::PreCommit),
-                handle_commit_completed.in_set(PersistenceSystemSet::Commit),
-            ),
-        );
-
         // Apply queued world mutations (entity spawns, component inserts) in this frame.
         // Use an exclusive system to get &mut World.
         fn apply_deferred_world_ops(world: &mut World) {
@@ -662,7 +648,21 @@ impl Plugin for PersistencePluginCore {
             }
         }
 
-        app.add_systems(PostUpdate, apply_deferred_world_ops);
+        // Add both PreCommit and Commit-phase systems, ensuring deferred ops are applied
+        // first in PostUpdate so pass-through systems see Update loads deterministically.
+        app.add_systems(
+            PostUpdate,
+            (
+                (
+                    apply_deferred_world_ops,
+                    auto_despawn_tracking_system,
+                    handle_commit_trigger,
+                    commit_event_listener,
+                )
+                    .in_set(PersistenceSystemSet::PreCommit),
+                handle_commit_completed.in_set(PersistenceSystemSet::Commit),
+            ),
+        );
     }
 }
 

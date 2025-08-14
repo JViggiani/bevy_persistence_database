@@ -1,11 +1,14 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
     commit_sync, Guid, PersistenceError, persistence_plugin::PersistencePlugins,
-    PersistenceQuery, TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
+    TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
 };
 use serde_json::json;
 
 use crate::common::*;
+use bevy_arangodb_core::PersistentQuery;
+use bevy::prelude::With;
+use bevy_arangodb_core::query::persistence_query::PersistenceQuery;
 
 #[test]
 fn test_update_conflict_is_detected() {
@@ -145,16 +148,29 @@ fn test_conflict_strategy_last_write_wins() {
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 
     // 5. Implement "last write wins" strategy:
-    // Reload the entity to get latest state
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .with::<Position>()
-            .filter(Guid::key_field().eq(&key))
-            .fetch_into(app.world_mut()),
-    );
-    assert_eq!(loaded.len(), 1);
-    let reloaded_entity = loaded[0];
+    // Reload the entity by key inside the same app using a system-param PersistentQuery.
+    #[derive(bevy::prelude::Resource)] struct KeyRes(String);
+    fn reload_by_key(
+        pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>,
+        key: bevy::prelude::Res<KeyRes>,
+    ) {
+        let _ = pq
+            .filter(Guid::key_field().eq(&key.0))
+            .iter_with_loading()
+            .count();
+    }
+    app.insert_resource(KeyRes(key.clone()));
+    app.add_systems(bevy::prelude::Update, reload_by_key);
+    app.update();
+
+    // Locate the reloaded entity by Guid in the same world
+    let reloaded_entity = {
+        let mut q = app.world_mut().query::<(bevy::prelude::Entity, &Guid)>();
+        q.iter(&app.world())
+            .find(|(_, g)| g.id() == key)
+            .map(|(e, _)| e)
+            .expect("reloaded entity not found")
+    };
 
     // Verify we got the updated Health from DB
     assert_eq!(

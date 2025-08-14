@@ -1,9 +1,11 @@
 use bevy::prelude::*;
 use bevy_arangodb_core::{
-    commit_sync, PersistenceQuery, CommitStatus, PersistenceError, Guid,
+    commit_sync, CommitStatus, PersistenceError, Guid,
     persistence_plugin::PersistencePlugins, MockDatabaseConnection, PersistencePluginCore,
     persistence_plugin::PersistencePluginConfig, Collection, TransactionOperation,
 };
+use bevy_arangodb_core::PersistentQuery;
+use bevy::prelude::With;
 use crate::common::{setup_sync, make_app, run_async, Health};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,12 +34,11 @@ fn test_successful_batch_commit_of_new_entities() {
     // loading back from DB
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .fetch_into(app2.world_mut()),
-    );
-    assert_eq!(loaded.len(), 10);
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, load);
+    app2.update();
+    let loaded = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
+    assert_eq!(loaded, 10);
 }
 
 #[test]
@@ -65,19 +66,13 @@ fn test_batch_commit_with_updates_and_deletes() {
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    let loaded = run_async(
-        PersistenceQuery::new(db.clone())
-            .with::<Health>()
-            .fetch_into(app2.world_mut()),
-    );
-    // expect 3 left: values 100,101,2
-    assert_eq!(loaded.len(), 3);
-    let vals: Vec<_> = loaded.iter()
-        .map(|e| app2.world().get::<Health>(*e).unwrap().value)
-        .collect();
-    assert!(vals.contains(&100));
-    assert!(vals.contains(&101));
-    assert!(vals.contains(&2));
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.iter_with_loading().count(); }
+    app2.add_systems(bevy::prelude::Update, load);
+    app2.update();
+    // expect 3 left
+    let vals: Vec<_> = app2.world_mut().query::<&Health>().iter(&app2.world()).map(|h| h.value).collect();
+    assert_eq!(vals.len(), 3);
+    assert!(vals.contains(&100) && vals.contains(&101) && vals.contains(&2));
 }
 
 #[test]

@@ -125,12 +125,11 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate field accessor methods for structs
     let mut field_methods = quote! {};
     if let Item::Struct(ref s) = ast {
-        // For each named field, create a static method returning an Expression::Field
         let methods = s.fields.iter().filter_map(|f| f.ident.as_ref()).map(|ident| {
             let field_str = LitStr::new(&ident.to_string(), proc_macro2::Span::call_site());
             quote! {
-                pub fn #ident() -> #crate_path::Expression {
-                    #crate_path::Expression::Field { component_name: <Self as #crate_path::Persist>::name(), field_name: #field_str }
+                pub fn #ident() -> #crate_path::query::spec::ValueExpr {
+                    #crate_path::query::spec::ValueExpr::field(<Self as #crate_path::Persist>::name(), #field_str)
                 }
             }
         });
