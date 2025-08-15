@@ -202,23 +202,50 @@ pub fn db_matrix_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    let arango_test = gen_backend_test(
-        "db_arango",
-        quote!(crate::common::TestBackend::Arango),
-        quote!(#[cfg(feature = "arango")]),
-    );
+    // Optional: rust-analyzer-friendly fallback via feature, no unknown cfg used
+    #[cfg(feature = "ra-fallback")]
+    {
+        let attrs = &passthrough_attrs;
+        let expanded = quote! {
+            #(#attrs)*
+            #[test]
+            #vis fn #orig_name() {
+                // Pick one backend that is enabled; prefer postgres if available
+                #[allow(unused_mut)]
+                let mut backend_opt = None;
+                #[cfg(feature = "postgres")]
+                { backend_opt = Some(crate::common::TestBackend::Postgres); }
+                #[cfg(all(not(feature = "postgres"), feature = "arango"))]
+                { backend_opt = Some(crate::common::TestBackend::Arango); }
+                let backend = backend_opt.expect("No backend feature enabled");
+                let setup = || crate::common::setup_backend(backend);
+                #body
+            }
+        };
+        return TokenStream::from(expanded);
+    }
 
-    let postgres_test = gen_backend_test(
-        "db_postgres",
-        quote!(crate::common::TestBackend::Postgres),
-        quote!(#[cfg(feature = "postgres")]),
-    );
+    // Default: real per-backend tests (no cfg(rust_analyzer) usage)
+    #[cfg(not(feature = "ra-fallback"))]
+    {
+        let arango_test = gen_backend_test(
+            "db_arango",
+            quote!(crate::common::TestBackend::Arango),
+            quote!(#[cfg(feature = "arango")]),
+        );
 
-    let expanded = quote! {
-        #arango_test
-        #postgres_test
-    };
-    TokenStream::from(expanded)
+        let postgres_test = gen_backend_test(
+            "db_postgres",
+            quote!(crate::common::TestBackend::Postgres),
+            quote!(#[cfg(feature = "postgres")]),
+        );
+
+        let expanded = quote! {
+            #arango_test
+            #postgres_test
+        };
+        return TokenStream::from(expanded);
+    }
 }
 
 fn get_crate_path() -> proc_macro2::TokenStream {

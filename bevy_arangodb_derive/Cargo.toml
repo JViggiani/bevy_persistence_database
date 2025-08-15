@@ -6,6 +6,10 @@ edition.workspace = true
 [lib]
 proc-macro = true
 
+[features]
+default = []
+ra-fallback = []
+
 [dependencies]
 syn = { workspace = true, features = ["derive", "parsing"] }
 quote = { workspace = true }

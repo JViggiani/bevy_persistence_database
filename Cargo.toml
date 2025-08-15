@@ -35,6 +35,7 @@ debug = true
 default = ["postgres", "arango"]
 arango = ["bevy_arangodb_core/arango"]
 postgres = ["bevy_arangodb_core/postgres"]
+ra-fallback = ["bevy_arangodb_derive/ra-fallback"]
 
 [dev-dependencies]
 bevy              = { workspace = true }
