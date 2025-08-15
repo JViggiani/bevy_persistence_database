@@ -9,6 +9,7 @@ use syn::{
     token::Comma,
     Item, Meta,
     LitStr,
+    ItemFn,
 };
 
 // New attribute macro: single annotation for derive + registration
@@ -148,6 +149,76 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         #impl_persist
         #field_methods
     })
+}
+
+#[proc_macro_attribute]
+pub fn db_matrix_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+    let vis = &input.vis;
+    let sig = &input.sig;
+    let body = &input.block;
+    let orig_name = &sig.ident;
+
+    // Preserve attributes except #[test]; we'll add #[test] to generated fns
+    let passthrough_attrs: Vec<syn::Attribute> = input
+        .attrs
+        .into_iter()
+        .filter(|a| !a.path().is_ident("test"))
+        .collect();
+
+    // Helper to build a backend-gated test
+    let gen_backend_test = |suffix: &str, backend_expr: proc_macro2::TokenStream, cfg: proc_macro2::TokenStream| {
+        let fn_name = format_ident!("{}_{}", orig_name, suffix);
+        let attrs = &passthrough_attrs;
+
+        // Runtime skip if env excludes this backend
+        let skip_check = quote! {
+            let wants = std::env::var("BEVY_ARANGODB_TEST_BACKENDS").unwrap_or_default();
+            if !wants.is_empty() {
+                let mut enabled = false;
+                for token in wants.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) {
+                    if token == #suffix {
+                        enabled = true;
+                        break;
+                    }
+                }
+                if !enabled {
+                    eprintln!("skipping {} due to BEVY_ARANGODB_TEST_BACKENDS={}", stringify!(#fn_name), wants);
+                    return;
+                }
+            }
+        };
+
+        quote! {
+            #cfg
+            #(#attrs)*
+            #[test]
+            #vis fn #fn_name() {
+                #skip_check
+                let backend = #backend_expr;
+                let setup = || crate::common::setup_backend(backend);
+                #body
+            }
+        }
+    };
+
+    let arango_test = gen_backend_test(
+        "db_arango",
+        quote!(crate::common::TestBackend::Arango),
+        quote!(#[cfg(feature = "arango")]),
+    );
+
+    let postgres_test = gen_backend_test(
+        "db_postgres",
+        quote!(crate::common::TestBackend::Postgres),
+        quote!(#[cfg(feature = "postgres")]),
+    );
+
+    let expanded = quote! {
+        #arango_test
+        #postgres_test
+    };
+    TokenStream::from(expanded)
 }
 
 fn get_crate_path() -> proc_macro2::TokenStream {

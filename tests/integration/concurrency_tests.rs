@@ -9,10 +9,11 @@ use crate::common::*;
 use bevy_arangodb_core::PersistentQuery;
 use bevy::prelude::With;
 use bevy_arangodb_core::query::persistence_query::PersistenceQuery;
+use bevy_arangodb_derive::db_matrix_test;
 
-#[test]
+#[db_matrix_test]
 fn test_update_conflict_is_detected() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -59,9 +60,9 @@ fn test_update_conflict_is_detected() {
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 }
 
-#[test]
+#[db_matrix_test]
 fn test_delete_conflict_is_detected() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -100,9 +101,9 @@ fn test_delete_conflict_is_detected() {
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 }
 
-#[test]
+#[db_matrix_test]
 fn test_conflict_strategy_last_write_wins() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -208,9 +209,9 @@ fn test_conflict_strategy_last_write_wins() {
     assert_eq!(position_x, 50.0);
 }
 
-#[test]
+#[db_matrix_test]
 fn test_conflict_strategy_three_way_merge() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 

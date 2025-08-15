@@ -6,13 +6,14 @@ use bevy_arangodb_core::{
 };
 use bevy_arangodb_core::PersistentQuery;
 use bevy::prelude::With;
-use crate::common::{setup_sync, make_app, run_async, Health};
+use crate::common::{make_app, run_async, Health};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use bevy_arangodb_derive::db_matrix_test;
 
-#[test]
+#[db_matrix_test]
 fn test_successful_batch_commit_of_new_entities() {
-    let (db, _c) = setup_sync();
+    let (db, _c) = setup();
     let mut app = make_app(db.clone(), 2);
 
     // spawn 10 new entities
@@ -41,9 +42,9 @@ fn test_successful_batch_commit_of_new_entities() {
     assert_eq!(loaded, 10);
 }
 
-#[test]
+#[db_matrix_test]
 fn test_batch_commit_with_updates_and_deletes() {
-    let (db, _c) = setup_sync();
+    let (db, _c) = setup();
     let mut app = make_app(db.clone(), 2);
 
     // initial 5 entities
@@ -77,7 +78,7 @@ fn test_batch_commit_with_updates_and_deletes() {
 
 #[test]
 fn test_batch_commit_failure_propagates() {
-    let (db, _c) = setup_sync();
+    let (db, _c) = crate::common::setup_sync();
     let mut app = make_app(db.clone(), 2);
 
     // initial 5

@@ -5,6 +5,7 @@ use bevy_arangodb_core::{
 };
 use crate::common::*;
 use std::sync::Arc;
+use bevy_arangodb_derive::db_matrix_test;
 
 #[test]
 fn test_trigger_commit_clears_event_queue() {
@@ -34,9 +35,9 @@ fn test_trigger_commit_clears_event_queue() {
     assert_eq!(events_after_update.len(), 0);
 }
 
-#[test]
+#[db_matrix_test]
 fn test_event_triggers_commit_and_persists_data() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -74,9 +75,9 @@ fn test_event_triggers_commit_and_persists_data() {
     assert_eq!(fetched_health.value, 100);
 }
 
-#[test]
+#[db_matrix_test]
 fn test_queued_commit_persists_all_changes() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 

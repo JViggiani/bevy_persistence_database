@@ -7,12 +7,13 @@ use bevy_arangodb_core::PersistentQuery;
 use bevy::prelude::With;
 use std::time::Instant;
 use crate::common::*;
+use bevy_arangodb_derive::db_matrix_test;
 
 // Mark this test as ignored by default - run manually to benchmark the system
 #[ignore]
-#[test]
+#[db_matrix_test]
 fn test_persist_many_entities() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     
     // Use a higher entity count to better demonstrate parallel performance
     let count = 50_000;
@@ -39,7 +40,8 @@ fn test_persist_many_entities() {
     res.expect("Bulk commit failed");
     
     println!(
-        "Committed {} entities using {} threads in {:.2?} ({:.0} entities/sec)",
+        "[{:?}] Committed {} entities using {} threads in {:.2?} ({:.0} entities/sec)",
+        backend,
         count, 
         thread_count,
         duration_commit,
@@ -60,7 +62,8 @@ fn test_persist_many_entities() {
 
     let count = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
     println!(
-        "Fetched {} entities in {:.2?} ({:.0} entities/sec)",
+        "[{:?}] Fetched {} entities in {:.2?} ({:.0} entities/sec)",
+        backend,
         count,
         duration_fetch,
         count as f32 / duration_fetch.as_secs_f32()

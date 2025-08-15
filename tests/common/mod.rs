@@ -2,6 +2,7 @@
 pub mod components;
 pub mod resources;
 pub mod setup;
+pub mod db_matrix;
 
 // Re-export all items from the sub-modules to make them easily accessible
 pub use components::*;

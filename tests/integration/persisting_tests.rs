@@ -2,10 +2,12 @@ use bevy::prelude::App;
 use bevy_arangodb_core::{commit_sync, Guid, Persist, persistence_plugin::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, CommitStatus};
 
 use crate::common::*;
+use bevy_arangodb_derive::db_matrix_test;
 
-#[test]
+#[db_matrix_test]
 fn test_create_new_entity() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
+
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -42,9 +44,9 @@ fn test_create_new_entity() {
     );
 }
 
-#[test]
+#[db_matrix_test]
 fn test_create_new_resource() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -72,9 +74,9 @@ fn test_create_new_resource() {
     assert_eq!(fetched_settings.map_name, "level_1");
 }
 
-#[test]
+#[db_matrix_test]
 fn test_update_existing_entity() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -125,9 +127,9 @@ fn test_update_existing_entity() {
     );
 }
 
-#[test]
+#[db_matrix_test]
 fn test_update_existing_resource() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -163,9 +165,9 @@ fn test_update_existing_resource() {
     assert_eq!(fetched_settings_after.map_name, "level_2");
 }
 
-#[test]
+#[db_matrix_test]
 fn test_delete_persisted_entity() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -203,9 +205,9 @@ fn test_delete_persisted_entity() {
     );
 }
 
-#[test]
+#[db_matrix_test]
 fn test_commit_with_no_changes() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -223,9 +225,9 @@ fn test_commit_with_no_changes() {
     assert_eq!(*status, CommitStatus::Idle);
 }
 
-#[test]
+#[db_matrix_test]
 fn test_add_new_component_to_existing_entity() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -283,10 +285,10 @@ struct NonPersisted {
     _ignored: bool,
 }
 
-#[test]
+#[db_matrix_test]
 fn test_commit_entity_with_non_persisted_component() {
     // GIVEN a new Bevy app with the PersistencePluginCore
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -339,9 +341,9 @@ fn test_commit_entity_with_non_persisted_component() {
     assert_eq!(fetched_health.value, 50);
 }
 
-#[test]
+#[db_matrix_test]
 fn test_persist_component_with_empty_vec() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -375,9 +377,9 @@ fn test_persist_component_with_empty_vec() {
     );
 }
 
-#[test]
+#[db_matrix_test]
 fn test_persist_component_with_option_none() {
-    let (db, _container) = setup_sync();
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 

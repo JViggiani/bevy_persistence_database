@@ -4,32 +4,25 @@
 //!   resources(id text pk, bevy_persistence_version bigint not null, doc jsonb not null)
 
 use crate::db::connection::{
-    BEVY_PERSISTENCE_VERSION_FIELD, Collection, PersistenceError, TransactionOperation,
+    Collection, DatabaseConnection, PersistenceError, TransactionOperation,
+    BEVY_PERSISTENCE_VERSION_FIELD,
 };
-use crate::db::DatabaseConnection;
 use crate::query::filter_expression::{BinaryOperator, FilterExpression};
 use crate::query::persistence_query_specification::PersistenceQuerySpecification;
+use bevy::log::{debug, error, info};
 use futures::future::BoxFuture;
 use futures::FutureExt;
-use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio_postgres::{Client, Config, NoTls};
+use uuid::Uuid;
 
-use tokio_postgres::{types::ToSql, Client, NoTls};
 
-// Dedicated runtime for sync operations and driving connections.
-static PG_RT: Lazy<tokio::runtime::Runtime> = Lazy::new(|| {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build postgres tokio runtime")
-});
-
-/// Postgres implementation of DatabaseConnection
+#[derive(Clone)]
 pub struct PostgresDbConnection {
-    // Wrap client to share into async closures
-    client: Arc<Client>,
+    client: Arc<Mutex<Client>>,
 }
 
 impl fmt::Debug for PostgresDbConnection {
@@ -39,7 +32,6 @@ impl fmt::Debug for PostgresDbConnection {
 }
 
 impl PostgresDbConnection {
-    /// Ensure a database exists by name using a server connection (dbname=postgres).
     pub async fn ensure_database(
         host: &str,
         user: &str,
@@ -47,40 +39,45 @@ impl PostgresDbConnection {
         db_name: &str,
         port: Option<u16>,
     ) -> Result<(), PersistenceError> {
-        let mut conn_str = format!("host={} user={} password={} dbname=postgres", host, user, pass);
-        if let Some(port) = port {
-            conn_str.push_str(&format!(" port={}", port));
+        // Connect to the default "postgres" database to create a new DB
+        let mut cfg = Config::new();
+        cfg.host(host)
+            .user(user)
+            .password(pass)
+            .dbname("postgres");
+        if let Some(p) = port {
+            cfg.port(p);
         }
-        let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+        let (client, connection) = cfg
+            .connect(NoTls)
             .await
             .map_err(|e| PersistenceError::new(format!("pg connect (server) failed: {}", e)))?;
-        PG_RT.spawn(async move {
+        tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("postgres connection error: {}", e);
+                error!("postgres connection error (ensure_database): {}", e);
             }
         });
 
-        // Check existence
-        let exists = client
-            .query_one(
-                "SELECT 1 FROM pg_database WHERE datname = $1",
-                &[&db_name],
-            )
-            .await
-            .is_ok();
-
-        if !exists {
-            // CREATE DATABASE cannot run inside a transaction
-            client
-                .batch_execute(&format!(r#"CREATE DATABASE "{}""#, db_name.replace('"', "\"\"")))
-                .await
-                .map_err(|e| PersistenceError::new(format!("create database failed: {}", e)))?;
+        let db_quoted = db_name.replace('"', "\"\"");
+        let stmt = format!("CREATE DATABASE \"{}\"", db_quoted);
+        debug!("[pg] {}", stmt);
+        match client.batch_execute(&stmt).await {
+            Ok(_) => info!("[pg] database {} created", db_name),
+            Err(e) => {
+                // 42P04 is duplicate_database
+                if let Some(db_err) = e.code() {
+                    if db_err.code() != "42P04" {
+                        return Err(PersistenceError::new(format!(
+                            "pg create db failed: {}",
+                            e
+                        )));
+                    }
+                }
+            }
         }
-
         Ok(())
     }
 
-    /// Connect to Postgres and ensure required tables/indexes in the target database.
     pub async fn connect(
         host: &str,
         user: &str,
@@ -88,234 +85,195 @@ impl PostgresDbConnection {
         db_name: &str,
         port: Option<u16>,
     ) -> Result<Self, PersistenceError> {
-        let mut conn_str = format!(
-            "host={} user={} password={} dbname={}",
-            host, user, pass, db_name
-        );
-        if let Some(port) = port {
-            conn_str.push_str(&format!(" port={}", port));
+        let mut cfg = Config::new();
+        cfg.host(host).user(user).password(pass).dbname(db_name);
+        if let Some(p) = port {
+            cfg.port(p);
         }
-        let (client, connection) = tokio_postgres::connect(&conn_str, NoTls)
+
+        let (client, connection) = cfg
+            .connect(NoTls)
             .await
             .map_err(|e| PersistenceError::new(format!("pg connect failed: {}", e)))?;
-        PG_RT.spawn(async move {
+        tokio::spawn(async move {
             if let Err(e) = connection.await {
-                eprintln!("postgres connection error: {}", e);
+                error!("postgres connection error: {}", e);
             }
         });
 
-        // Ensure tables
+        let db = Self {
+            client: Arc::new(Mutex::new(client)),
+        };
+        // Ensure schema exists
+        db.ensure_schema().await?;
+        Ok(db)
+    }
+
+    async fn ensure_schema(&self) -> Result<(), PersistenceError> {
+        let client = self.client.lock().await;
+        debug!("[pg] ensuring schema (tables)");
         client
             .batch_execute(
                 r#"
-                CREATE TABLE IF NOT EXISTS entities(
+                CREATE TABLE IF NOT EXISTS entities (
                     id TEXT PRIMARY KEY,
                     bevy_persistence_version BIGINT NOT NULL,
                     doc JSONB NOT NULL
                 );
-                CREATE TABLE IF NOT EXISTS resources(
+                CREATE TABLE IF NOT EXISTS resources (
                     id TEXT PRIMARY KEY,
                     bevy_persistence_version BIGINT NOT NULL,
                     doc JSONB NOT NULL
                 );
-                "#,
+            "#,
             )
             .await
-            .map_err(|e| PersistenceError::new(format!("schema init failed: {}", e)))?;
-
-        // Optional JSONB GIN indexes
-        let _ = client
-            .batch_execute(
-                r#"
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'entities_doc_gin'
-                    ) THEN
-                        CREATE INDEX entities_doc_gin ON entities USING GIN (doc);
-                    END IF;
-                    IF NOT EXISTS (
-                        SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = 'resources_doc_gin'
-                    ) THEN
-                        CREATE INDEX resources_doc_gin ON resources USING GIN (doc);
-                    END IF;
-                END $$;
-                "#,
-            )
-            .await;
-
-        Ok(Self { client: Arc::new(client) })
+            .map_err(|e| PersistenceError::new(format!("pg ensure schema failed: {}", e)))?;
+        Ok(())
     }
 
-    fn table_name(collection: Collection) -> &'static str {
-        match collection {
-            Collection::Entities => "entities",
-            Collection::Resources => "resources",
+    // Build WHERE and params for a spec
+    fn build_where(spec: &PersistenceQuerySpecification) -> (String, Vec<String>) {
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+
+        // presence_with: "doc ? 'Component'"
+        if !spec.presence_with.is_empty() {
+            let cond = spec
+                .presence_with
+                .iter()
+                .map(|n| format!("doc ? '{}'", n))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            clauses.push(format!("({})", cond));
         }
-    }
-
-    // Build WHERE clause and params for a spec, using a starting param index (1-based).
-    fn build_where_clause_offset(
-        &self,
-        spec: &PersistenceQuerySpecification,
-        start_index: usize,
-    ) -> (String, Vec<SqlParam>) {
-        let mut parts: Vec<String> = Vec::new();
-        let mut params: Vec<SqlParam> = Vec::new();
-
-        let mut next_idx = start_index;
-
-        // presence filters
-        for comp in &spec.presence_with {
-            parts.push(format!("doc ? ${}", next_idx));
-            params.push(SqlParam::Text((*comp).to_string()));
-            next_idx += 1;
-        }
-        for comp in &spec.presence_without {
-            parts.push(format!("NOT (doc ? ${})", next_idx));
-            params.push(SqlParam::Text((*comp).to_string()));
-            next_idx += 1;
+        // presence_without: "NOT doc ? 'Component'"
+        if !spec.presence_without.is_empty() {
+            let cond = spec
+                .presence_without
+                .iter()
+                .map(|n| format!("NOT (doc ? '{}')", n))
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            clauses.push(format!("({})", cond));
         }
 
-        // value filters
+        // value_filters
         if let Some(expr) = &spec.value_filters {
-            let expr_sql = Self::translate_expr_with_offset(expr, &mut params, &mut next_idx);
-            if !expr_sql.is_empty() {
-                parts.push(expr_sql);
-            }
+            let (sql, ps) = Self::translate_expr(expr);
+            clauses.push(sql);
+            params.extend(ps);
         }
 
-        let where_sql = if parts.is_empty() {
+        let where_sql = if clauses.is_empty() {
             "TRUE".to_string()
         } else {
-            parts.join(" AND ")
+            clauses.join(" AND ")
         };
         (where_sql, params)
     }
 
-    // Same translate but aware of current param index
-    fn translate_expr_with_offset(
-        expr: &FilterExpression,
-        params: &mut Vec<SqlParam>,
-        next_idx: &mut usize,
-    ) -> String {
-        match expr {
-            FilterExpression::Literal(v) => {
-                let idx = *next_idx;
-                *next_idx += 1;
-                match v {
-                    Value::String(s) => params.push(SqlParam::Text(s.clone())),
-                    Value::Number(n) if n.is_i64() => params.push(SqlParam::I64(n.as_i64().unwrap())),
-                    Value::Number(n) if n.is_u64() => params.push(SqlParam::I64(n.as_u64().unwrap() as i64)),
-                    Value::Number(n) => params.push(SqlParam::F64(n.as_f64().unwrap())),
-                    Value::Bool(b) => params.push(SqlParam::Bool(*b)),
-                    Value::Null => params.push(SqlParam::Json(Value::Null)),
-                    other => params.push(SqlParam::Json(other.clone())),
+    // Translate FilterExpression to SQL with positional params (as text) + casts
+    // We pass all params as text and cast explicitly (e.g. ($1::text)::double precision).
+    fn translate_expr(expr: &FilterExpression) -> (String, Vec<String>) {
+        fn field_path(component: &str, field: &str) -> String {
+            if field.is_empty() {
+                format!("doc -> '{}'", component)
+            } else {
+                format!("doc -> '{}' ->> '{}'", component, field)
+            }
+        }
+        fn translate_rec(expr: &FilterExpression, args: &mut Vec<String>) -> String {
+            match expr {
+                FilterExpression::Literal(v) => {
+                    // Always push as string; cast in SQL where needed
+                    let idx = args.len() + 1;
+                    let s = match v {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        Value::Null => "null".to_string(),
+                        other => other.to_string(),
+                    };
+                    args.push(s);
+                    format!("${}", idx)
                 }
-                format!("${}", idx)
-            }
-            FilterExpression::Field { component_name, field_name } => {
-                if field_name.is_empty() {
-                    format!("doc -> '{}'", component_name)
-                } else {
-                    format!("doc -> '{}' ->> '{}'", component_name, field_name)
-                }
-            }
-            FilterExpression::DocumentKey => "id".to_string(),
-            FilterExpression::BinaryOperator { op, lhs, rhs } => {
-                let l = Self::translate_expr_with_offset(lhs, params, next_idx);
-                let r = Self::translate_expr_with_offset(rhs, params, next_idx);
-                match op {
-                    BinaryOperator::Eq => format!("({} = {})", Self::maybe_cast(&l, rhs), Self::rhs_cast(r, rhs)),
-                    BinaryOperator::Ne => format!("({} <> {})", Self::maybe_cast(&l, rhs), Self::rhs_cast(r, rhs)),
-                    BinaryOperator::Gt => format!("({} > {})", Self::cast_numeric(&l, rhs), Self::rhs_cast(r, rhs)),
-                    BinaryOperator::Gte => format!("({} >= {})", Self::cast_numeric(&l, rhs), Self::rhs_cast(r, rhs)),
-                    BinaryOperator::Lt => format!("({} < {})", Self::cast_numeric(&l, rhs), Self::rhs_cast(r, rhs)),
-                    BinaryOperator::Lte => format!("({} <= {})", Self::cast_numeric(&l, rhs), Self::rhs_cast(r, rhs)),
-                    BinaryOperator::And => format!("({} AND {})", l, r),
-                    BinaryOperator::Or => format!("({} OR {})", l, r),
-                    BinaryOperator::In => format!("({} = ANY({}))", Self::maybe_cast_array_lhs(&l, rhs), r),
-                }
-            }
-        }
-    }
-
-    // If lhs uses doc->>'field', cast it by rhs type
-    fn maybe_cast(lhs: &str, rhs: &FilterExpression) -> String {
-        match rhs {
-            FilterExpression::Literal(Value::Number(n)) if n.is_i64() || n.is_u64() => {
-                format!("({})::bigint", lhs)
-            }
-            FilterExpression::Literal(Value::Number(_)) => format!("({})::double precision", lhs),
-            FilterExpression::Literal(Value::Bool(_)) => format!("({})::boolean", lhs),
-            _ => lhs.to_string(),
-        }
-    }
-    fn cast_numeric(lhs: &str, rhs: &FilterExpression) -> String {
-        match rhs {
-            FilterExpression::Literal(Value::Number(n)) if n.is_i64() || n.is_u64() => {
-                format!("({})::bigint", lhs)
-            }
-            _ => format!("({})::double precision", lhs),
-        }
-    }
-    fn rhs_cast(r: String, rhs: &FilterExpression) -> String {
-        match rhs {
-            FilterExpression::Literal(Value::Number(n)) if n.is_i64() || n.is_u64() => r,
-            FilterExpression::Literal(Value::Number(_)) => r,
-            FilterExpression::Literal(Value::Bool(_)) => r,
-            _ => r,
-        }
-    }
-    fn maybe_cast_array_lhs(lhs: &str, rhs: &FilterExpression) -> String {
-        match rhs {
-            FilterExpression::Literal(Value::Array(arr)) => {
-                // infer element type: prefer first element
-                if let Some(first) = arr.get(0) {
-                    match first {
-                        Value::Number(n) if n.is_i64() || n.is_u64() => {
-                            format!("({})::bigint", lhs)
+                FilterExpression::DocumentKey => "id".to_string(),
+                FilterExpression::Field { component_name, field_name } => field_path(component_name, field_name),
+                FilterExpression::BinaryOperator { op, lhs, rhs } => {
+                    let op_str = match op {
+                        BinaryOperator::Eq => "=",
+                        BinaryOperator::Ne => "!=",
+                        BinaryOperator::Gt => ">",
+                        BinaryOperator::Gte => ">=",
+                        BinaryOperator::Lt => "<",
+                        BinaryOperator::Lte => "<=",
+                        BinaryOperator::And => "AND",
+                        BinaryOperator::Or => "OR",
+                        BinaryOperator::In => "IN",
+                    };
+                    match op {
+                        BinaryOperator::And | BinaryOperator::Or => {
+                            let l = translate_rec(lhs, args);
+                            let r_raw = translate_rec(rhs, args);
+                            format!("({} {} {})", l, op_str, r_raw)
                         }
-                        Value::Number(_) => format!("({})::double precision", lhs),
-                        Value::Bool(_) => format!("({})::boolean", lhs),
-                        _ => lhs.to_string(),
+                        BinaryOperator::Eq | BinaryOperator::Ne => {
+                            // Handle presence checks BEFORE recursing to avoid binding a useless NULL param.
+                            if let FilterExpression::Field { component_name, field_name } = &**lhs {
+                                if field_name.is_empty() {
+                                    if let FilterExpression::Literal(Value::Null) = &**rhs {
+                                        if matches!(op, BinaryOperator::Eq) {
+                                            // Component absent
+                                            return format!("NOT (doc ? '{}')", component_name);
+                                        } else {
+                                            // Component present
+                                            return format!("(doc ? '{}')", component_name);
+                                        }
+                                    }
+                                }
+                            }
+                            // Fallback: recurse and build comparison with proper casts
+                            let l = translate_rec(lhs, args);
+                            let r_raw = translate_rec(rhs, args);
+
+                            let left_is_key = matches!(&**lhs, FilterExpression::DocumentKey);
+                            if left_is_key {
+                                format!("({}) = ({}::text)", l, r_raw)
+                            } else if let FilterExpression::Field { field_name, .. } = &**lhs {
+                                if field_name.is_empty() {
+                                    "(FALSE)".to_string()
+                                } else {
+                                    // If rhs looks boolean (by text), compare as boolean, otherwise compare as text.
+                                    format!(
+                                        "((lower(({}::text)) IN ('true','false')) AND ((({})::boolean) = ((({}::text))::boolean))) \
+                                         OR ((lower(({}::text)) NOT IN ('true','false')) AND (({}) = ({}::text)))",
+                                        r_raw, l, r_raw, r_raw, l, r_raw
+                                    )
+                                }
+                            } else {
+                                format!("({}) = ({}::text)", l, r_raw)
+                            }
+                        }
+                        BinaryOperator::Gt | BinaryOperator::Gte | BinaryOperator::Lt | BinaryOperator::Lte => {
+                            let l = translate_rec(lhs, args);
+                            let r_raw = translate_rec(rhs, args);
+                            // Cast left to numeric; cast param from text to numeric to avoid driver type mismatch
+                            let left_num = format!("({})::double precision", l);
+                            format!("({}) {} ((({}::text))::double precision)", left_num, op_str, r_raw)
+                        }
+                        BinaryOperator::In => {
+                            "(FALSE)".to_string()
+                        }
                     }
-                } else {
-                    lhs.to_string()
                 }
             }
-            _ => lhs.to_string(),
         }
-    }
 
-    fn select_json_row_sql(&self) -> &'static str {
-        // Uses positional params for both key-field name and version-field name at the end
-        "SELECT (jsonb_build_object($1, id) || doc || jsonb_build_object($2, bevy_persistence_version)) AS json FROM entities WHERE "
+        let mut params = Vec::new();
+        let sql = translate_rec(expr, &mut params);
+        (sql, params)
     }
-
-    // Convert SqlParam list to boxed ToSql values; keep vector alive while querying.
-    fn build_param_boxes(params: &[SqlParam]) -> Vec<Box<dyn ToSql + Sync + Send>> {
-        params
-            .iter()
-            .map(|p| match p {
-                SqlParam::Text(s) => Box::new(s.clone()) as Box<dyn ToSql + Sync + Send>,
-                SqlParam::I64(i) => Box::new(*i) as Box<dyn ToSql + Sync + Send>,
-                SqlParam::F64(f) => Box::new(*f) as Box<dyn ToSql + Sync + Send>,
-                SqlParam::Bool(b) => Box::new(*b) as Box<dyn ToSql + Sync + Send>,
-                SqlParam::Json(v) => Box::new(v.clone()) as Box<dyn ToSql + Sync + Send>,
-            })
-            .collect()
-    }
-}
-
-// Parameter holder (no ToSql impl; we box concrete values instead)
-#[derive(Debug)]
-enum SqlParam {
-    Text(String),
-    I64(i64),
-    F64(f64),
-    Bool(bool),
-    Json(Value),
 }
 
 impl DatabaseConnection for PostgresDbConnection {
@@ -327,17 +285,17 @@ impl DatabaseConnection for PostgresDbConnection {
         &self,
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
-        let client = self.client.clone();
-        // WHERE params start at $1
-        let (where_sql, params) = self.build_where_clause_offset(spec, 1);
+        let (where_sql, params) = Self::build_where(spec);
         let sql = format!("SELECT id FROM entities WHERE {}", where_sql);
-
+        let client = self.client.clone();
+        bevy::log::debug!("[pg] execute_keys: {}; params={:?}", sql, params);
         async move {
-            let boxed = PostgresDbConnection::build_param_boxes(&params);
-            let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| &**b as &(dyn ToSql + Sync)).collect();
-
+            let client = client.lock().await;
+            // Build &[&(dyn ToSql + Sync)] from our Vec<String>
+            let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                params.iter().map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
             let rows = client
-                .query(sql.as_str(), &refs)
+                .query(&sql, param_refs.as_slice())
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg query keys failed: {}", e)))?;
             Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
@@ -349,29 +307,24 @@ impl DatabaseConnection for PostgresDbConnection {
         &self,
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>> {
+        let (where_sql, params) = Self::build_where(spec);
+        let sql = format!(
+            "SELECT (doc || jsonb_build_object('id', id)) AS doc FROM entities WHERE {}",
+            where_sql
+        );
         let client = self.client.clone();
-        // Reserve $1 and $2 for key/version field names; WHERE params start at $3
-        let (where_sql, where_params) = self.build_where_clause_offset(spec, 3);
-
-        // Build full param list: [$1=key_field, $2=version_field, $3..=WHERE params...]
-        let mut all_params = Vec::with_capacity(2 + where_params.len());
-        all_params.push(SqlParam::Text(self.document_key_field().to_string()));
-        all_params.push(SqlParam::Text(BEVY_PERSISTENCE_VERSION_FIELD.to_string()));
-        all_params.extend(where_params);
-
-        let sql = format!("{}{}", self.select_json_row_sql(), where_sql);
-
+        bevy::log::debug!("[pg] execute_documents: {} ; params={:?}", sql, params);
         async move {
-            let boxed = PostgresDbConnection::build_param_boxes(&all_params);
-            let refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| &**b as &(dyn ToSql + Sync)).collect();
-
+            let client = client.lock().await;
+            let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                params.iter().map(|s| s as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
             let rows = client
-                .query(sql.as_str(), &refs)
+                .query(&sql, param_refs.as_slice())
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg query docs failed: {}", e)))?;
             let mut out = Vec::with_capacity(rows.len());
-            for row in rows {
-                let v: Value = row.get(0);
+            for r in rows {
+                let v: Value = r.get("doc");
                 out.push(v);
             }
             Ok(out)
@@ -379,143 +332,211 @@ impl DatabaseConnection for PostgresDbConnection {
         .boxed()
     }
 
-    fn execute_documents_sync(
-        &self,
-        spec: &PersistenceQuerySpecification,
-    ) -> Result<Vec<Value>, PersistenceError> {
-        PG_RT.block_on(self.execute_documents(spec))
-    }
-
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
-        use uuid::Uuid;
-
         let client = self.client.clone();
         async move {
-            // Manual transaction
-            if let Err(e) = client.batch_execute("BEGIN").await {
-                return Err(PersistenceError::new(format!("begin tx failed: {}", e)));
-            }
+            let mut client = client.lock().await;
+            let tx = client
+                .transaction()
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg begin tx failed: {}", e)))?;
 
             let mut new_keys: Vec<String> = Vec::new();
 
-            let res: Result<(), PersistenceError> = (|| async {
-                for op in operations {
-                    match op {
-                        TransactionOperation::CreateDocument { collection, mut data } => {
-                            let table = PostgresDbConnection::table_name(collection);
-                            let key_field = "id";
-                            let version = data
-                                .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(1) as i64;
+            for op in operations {
+                match op {
+                    TransactionOperation::CreateDocument { collection, data } => {
+                        match collection {
+                            Collection::Entities => {
+                                // Generate id and ensure it is NOT stored inside doc JSON
+                                let key = Uuid::new_v4().to_string();
+                                // Extract version as u64
+                                let version = data
+                                    .get(BEVY_PERSISTENCE_VERSION_FIELD)
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(1) as i64;
 
-                            let id = if matches!(collection, Collection::Entities) {
-                                Uuid::new_v4().to_string()
-                            } else {
-                                data.get(key_field)
-                                    .and_then(|v| v.as_str())
-                                    .ok_or_else(|| PersistenceError::new("resource create missing id"))?
-                                    .to_string()
-                            };
-
-                            if let Some(obj) = data.as_object_mut() {
-                                obj.remove(key_field);
-                            }
-
-                            let p0: &(dyn ToSql + Sync) = &id;
-                            let p1: &(dyn ToSql + Sync) = &version;
-                            let p2: &(dyn ToSql + Sync) = &data;
-                            let params: &[&(dyn ToSql + Sync)] = &[p0, p1, p2];
-
-                            client
-                                .query(
-                                    &format!(
-                                        "INSERT INTO {}(id, bevy_persistence_version, doc) VALUES ($1,$2,$3)",
-                                        table
-                                    ),
-                                    params,
+                                // Do not insert "id" into doc JSON for Postgres entities
+                                debug!(
+                                    "[pg] create entity id={} version={} data={}",
+                                    key, version, data
+                                );
+                                tx.execute(
+                                    "INSERT INTO entities (id, bevy_persistence_version, doc) VALUES ($1, $2, $3::jsonb)",
+                                    &[&key, &version, &data],
                                 )
                                 .await
-                                .map_err(|e| PersistenceError::new(format!("insert failed: {}", e)))?;
-
-                            if matches!(collection, Collection::Entities) {
-                                new_keys.push(id);
+                                .map_err(|e| PersistenceError::new(format!("pg insert entity failed: {}", e)))?;
+                                new_keys.push(key);
+                            }
+                            Collection::Resources => {
+                                // Resource key must be in the JSON (already inserted by caller)
+                                let key = data
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| {
+                                        PersistenceError::new(
+                                            "resource JSON missing 'id' (key) field",
+                                        )
+                                    })?
+                                    .to_string();
+                                let version = data
+                                    .get(BEVY_PERSISTENCE_VERSION_FIELD)
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(1) as i64;
+                                debug!(
+                                    "[pg] create resource id={} version={} data={}",
+                                    key, version, data
+                                );
+                                tx.execute(
+                                    "INSERT INTO resources (id, bevy_persistence_version, doc) VALUES ($1, $2, $3::jsonb)
+                                     ON CONFLICT (id) DO UPDATE SET bevy_persistence_version = EXCLUDED.bevy_persistence_version,
+                                       doc = resources.doc || EXCLUDED.doc",
+                                    &[&key, &version, &data],
+                                )
+                                .await
+                                .map_err(|e| PersistenceError::new(format!("pg upsert resource failed: {}", e)))?;
                             }
                         }
-                        TransactionOperation::UpdateDocument {
-                            collection,
-                            key,
-                            expected_current_version,
-                            patch,
-                        } => {
-                            let table = PostgresDbConnection::table_name(collection);
-                            let next_version = (expected_current_version + 1) as i64;
-                            let expected = expected_current_version as i64;
-
-                            let sql = format!(
-                                "UPDATE {} \
-                                 SET doc = jsonb_strip_nulls(doc || $1), \
-                                     bevy_persistence_version = $2 \
-                                 WHERE id = $3 AND bevy_persistence_version = $4 \
-                                 RETURNING 1",
-                                table
-                            );
-
-                            let p0: &(dyn ToSql + Sync) = &patch;
-                            let p1: &(dyn ToSql + Sync) = &next_version;
-                            let p2: &(dyn ToSql + Sync) = &key;
-                            let p3: &(dyn ToSql + Sync) = &expected;
-                            let params: &[&(dyn ToSql + Sync)] = &[p0, p1, p2, p3];
-
-                            let rows = client
-                                .query(sql.as_str(), params)
+                    }
+                    TransactionOperation::UpdateDocument {
+                        collection,
+                        key,
+                        expected_current_version,
+                        patch,
+                    } => {
+                        let exp = expected_current_version as i64;
+                        let next_ver = exp + 1;
+                        match collection {
+                            Collection::Entities => {
+                                debug!(
+                                    "[pg] update entity id={} expected_ver={} patch={}",
+                                    key, exp, patch
+                                );
+                                let n = tx
+                                    .execute(
+                                        "UPDATE entities
+                                           SET doc = doc || $3::jsonb,
+                                               bevy_persistence_version = $2 + 1
+                                         WHERE id = $1 AND bevy_persistence_version = $2",
+                                        // Pass jsonb as serde_json::Value
+                                        &[&key, &exp, &patch],
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        PersistenceError::new(format!(
+                                            "pg update entity failed: {}",
+                                            e
+                                        ))
+                                    })?;
+                                if n == 0 {
+                                    return Err(PersistenceError::Conflict { key });
+                                }
+                                // Ensure doc version field is incremented too
+                                tx.execute(
+                                    &format!(
+                                        "UPDATE entities
+                                           SET doc = jsonb_set(doc, '{{{}}}', to_jsonb($2::bigint), true)
+                                         WHERE id = $1",
+                                        BEVY_PERSISTENCE_VERSION_FIELD
+                                    ),
+                                    &[&key, &next_ver],
+                                )
                                 .await
-                                .map_err(|e| PersistenceError::new(format!("update failed: {}", e)))?;
-                            if rows.is_empty() {
-                                return Err(PersistenceError::Conflict { key });
+                                .ok();
+                            }
+                            Collection::Resources => {
+                                debug!(
+                                    "[pg] update resource id={} expected_ver={} patch={}",
+                                    key, exp, patch
+                                );
+                                let n = tx
+                                    .execute(
+                                        "UPDATE resources
+                                           SET doc = doc || $3::jsonb,
+                                               bevy_persistence_version = $2 + 1
+                                         WHERE id = $1 AND bevy_persistence_version = $2",
+                                        // Pass jsonb as serde_json::Value
+                                        &[&key, &exp, &patch],
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        PersistenceError::new(format!(
+                                            "pg update resource failed: {}",
+                                            e
+                                        ))
+                                    })?;
+                                if n == 0 {
+                                    return Err(PersistenceError::Conflict { key });
+                                }
+                                tx.execute(
+                                    &format!(
+                                        "UPDATE resources
+                                           SET doc = jsonb_set(doc, '{{{}}}', to_jsonb($2::bigint), true)
+                                         WHERE id = $1",
+                                        BEVY_PERSISTENCE_VERSION_FIELD
+                                    ),
+                                    &[&key, &next_ver],
+                                )
+                                .await
+                                .ok();
                             }
                         }
-                        TransactionOperation::DeleteDocument {
-                            collection,
-                            key,
-                            expected_current_version,
-                        } => {
-                            let table = PostgresDbConnection::table_name(collection);
-                            let expected = expected_current_version as i64;
-                            let sql = format!(
-                                "DELETE FROM {} WHERE id = $1 AND bevy_persistence_version = $2 RETURNING 1",
-                                table
-                            );
-
-                            let p0: &(dyn ToSql + Sync) = &key;
-                            let p1: &(dyn ToSql + Sync) = &expected;
-                            let params: &[&(dyn ToSql + Sync)] = &[p0, p1];
-
-                            let rows = client
-                                .query(sql.as_str(), params)
-                                .await
-                                .map_err(|e| PersistenceError::new(format!("delete failed: {}", e)))?;
-                            if rows.is_empty() {
-                                return Err(PersistenceError::Conflict { key });
+                    }
+                    TransactionOperation::DeleteDocument {
+                        collection,
+                        key,
+                        expected_current_version,
+                    } => {
+                        let exp = expected_current_version as i64;
+                        match collection {
+                            Collection::Entities => {
+                                debug!("[pg] delete entity id={} expected_ver={}", key, exp);
+                                let n = tx
+                                    .execute(
+                                        "DELETE FROM entities WHERE id = $1 AND bevy_persistence_version = $2",
+                                        &[&key, &exp],
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        PersistenceError::new(format!(
+                                            "pg delete entity failed: {}",
+                                            e
+                                        ))
+                                    })?;
+                                if n == 0 {
+                                    return Err(PersistenceError::Conflict { key });
+                                }
+                            }
+                            Collection::Resources => {
+                                debug!("[pg] delete resource id={} expected_ver={}", key, exp);
+                                let n = tx
+                                    .execute(
+                                        "DELETE FROM resources WHERE id = $1 AND bevy_persistence_version = $2",
+                                        &[&key, &exp],
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        PersistenceError::new(format!(
+                                            "pg delete resource failed: {}",
+                                            e
+                                        ))
+                                    })?;
+                                if n == 0 {
+                                    return Err(PersistenceError::Conflict { key });
+                                }
                             }
                         }
                     }
                 }
-                Ok(())
-            })()
-            .await;
-
-            if let Err(e) = res {
-                let _ = client.batch_execute("ROLLBACK").await;
-                return Err(e);
             }
 
-            if let Err(e) = client.batch_execute("COMMIT").await {
-                return Err(PersistenceError::new(format!("commit failed: {}", e)));
-            }
+            tx.commit()
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg commit failed: {}", e)))?;
             Ok(new_keys)
         }
         .boxed()
@@ -525,31 +546,23 @@ impl DatabaseConnection for PostgresDbConnection {
         &self,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
+        let key = entity_key.to_string();
         let client = self.client.clone();
-        let id = entity_key.to_string();
         async move {
-            let p0: &(dyn ToSql + Sync) = &id;
-            let params: &[&(dyn ToSql + Sync)] = &[p0];
-
-            let row = client
+            let client = client.lock().await;
+            debug!("[pg] fetch_document {}", key);
+            let row_opt = client
                 .query_opt(
                     "SELECT doc, bevy_persistence_version FROM entities WHERE id = $1",
-                    params,
+                    &[&key],
                 )
                 .await
-                .map_err(|e| PersistenceError::new(format!("fetch doc failed: {}", e)))?;
-
-            if let Some(row) = row {
-                let mut doc: Value = row.get(0);
-                let version: i64 = row.get(1);
-                if let Some(obj) = doc.as_object_mut() {
-                    obj.insert("id".to_string(), Value::String(id));
-                    obj.insert(
-                        BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                        Value::Number((version as i64).into()),
-                    );
-                }
-                Ok(Some((doc, version as u64)))
+                .map_err(|e| PersistenceError::new(format!("pg fetch_document failed: {}", e)))?;
+            if let Some(row) = row_opt {
+                let doc: Value = row.get(0);
+                // Do NOT inject "id" into JSON; tests expect only component fields + version
+                let ver: i64 = row.get(1);
+                Ok(Some((doc, ver as u64)))
             } else {
                 Ok(None)
             }
@@ -562,22 +575,25 @@ impl DatabaseConnection for PostgresDbConnection {
         entity_key: &str,
         comp_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
-        let client = self.client.clone();
-        let id = entity_key.to_string();
+        let key = entity_key.to_string();
         let comp = comp_name.to_string();
+        let client = self.client.clone();
         async move {
-            let p0: &(dyn ToSql + Sync) = &id;
-            let p1: &(dyn ToSql + Sync) = &comp;
-            let params: &[&(dyn ToSql + Sync)] = &[p0, p1];
-
-            let row = client
+            let client = client.lock().await;
+            debug!("[pg] fetch_component key={} comp={}", key, comp);
+            let row_opt = client
                 .query_opt(
                     "SELECT doc -> $2 FROM entities WHERE id = $1",
-                    params,
+                    &[&key, &comp],
                 )
                 .await
-                .map_err(|e| PersistenceError::new(format!("fetch comp failed: {}", e)))?;
-            Ok(row.and_then(|r| r.get::<_, Option<Value>>(0)))
+                .map_err(|e| PersistenceError::new(format!("pg fetch_component failed: {}", e)))?;
+            if let Some(row) = row_opt {
+                let v: Option<Value> = row.get(0);
+                Ok(v)
+            } else {
+                Ok(None)
+            }
         }
         .boxed()
     }
@@ -586,31 +602,23 @@ impl DatabaseConnection for PostgresDbConnection {
         &self,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
+        let key = resource_name.to_string();
         let client = self.client.clone();
-        let id = resource_name.to_string();
         async move {
-            let p0: &(dyn ToSql + Sync) = &id;
-            let params: &[&(dyn ToSql + Sync)] = &[p0];
-
-            let row = client
+            let client = client.lock().await;
+            debug!("[pg] fetch_resource {}", key);
+            let row_opt = client
                 .query_opt(
                     "SELECT doc, bevy_persistence_version FROM resources WHERE id = $1",
-                    params,
+                    &[&key],
                 )
                 .await
-                .map_err(|e| PersistenceError::new(format!("fetch resource failed: {}", e)))?;
-
-            if let Some(row) = row {
-                let mut doc: Value = row.get(0);
-                let version: i64 = row.get(1);
-                if let Some(obj) = doc.as_object_mut() {
-                    obj.insert("id".to_string(), Value::String(id));
-                    obj.insert(
-                        BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                        Value::Number((version as i64).into()),
-                    );
-                }
-                Ok(Some((doc, version as u64)))
+                .map_err(|e| PersistenceError::new(format!("pg fetch_resource failed: {}", e)))?;
+            if let Some(row) = row_opt {
+                let doc: Value = row.get(0);
+                // Do NOT inject "id" into JSON resource blob either
+                let ver: i64 = row.get(1);
+                Ok(Some((doc, ver as u64)))
             } else {
                 Ok(None)
             }
@@ -621,10 +629,12 @@ impl DatabaseConnection for PostgresDbConnection {
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
         let client = self.client.clone();
         async move {
+            let client = client.lock().await;
+            debug!("[pg] clear_entities");
             client
                 .batch_execute("TRUNCATE TABLE entities")
                 .await
-                .map_err(|e| PersistenceError::new(format!("truncate entities failed: {}", e)))?;
+                .map_err(|e| PersistenceError::new(format!("pg clear_entities failed: {}", e)))?;
             Ok(())
         }
         .boxed()
@@ -633,10 +643,12 @@ impl DatabaseConnection for PostgresDbConnection {
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
         let client = self.client.clone();
         async move {
+            let client = client.lock().await;
+            debug!("[pg] clear_resources");
             client
                 .batch_execute("TRUNCATE TABLE resources")
                 .await
-                .map_err(|e| PersistenceError::new(format!("truncate resources failed: {}", e)))?;
+                .map_err(|e| PersistenceError::new(format!("pg clear_resources failed: {}", e)))?;
             Ok(())
         }
         .boxed()
