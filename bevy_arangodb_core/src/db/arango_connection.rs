@@ -417,26 +417,22 @@ impl DatabaseConnection for ArangoDbConnection {
                 .begin_transaction(settings)
                 .await
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
-            let mut new_keys = Vec::new();
+
+            // Group operations by kind/collection
+            let mut ent_creates: Vec<Value> = Vec::new();
+            let mut ent_updates: Vec<Value> = Vec::new(); // objects { key, expected, patch }
+            let mut ent_deletes: Vec<Value> = Vec::new(); // objects { key, expected }
+
+            let mut res_creates: Vec<Value> = Vec::new();
+            let mut res_updates: Vec<Value> = Vec::new(); // objects { key, expected, patch }
+            let mut res_deletes: Vec<Value> = Vec::new(); // objects { key, expected }
 
             for op in operations {
                 match op {
                     TransactionOperation::CreateDocument { collection, data } => {
-                        let col = trx
-                            .collection(&collection.to_string())
-                            .await
-                            .map_err(|e| PersistenceError::new(e.to_string()))?;
-                        let meta = col
-                            .create_document(data, Default::default())
-                            .await
-                            .map_err(|e| PersistenceError::new(e.to_string()))?;
-                        let key = meta
-                            .header()
-                            .ok_or_else(|| PersistenceError::new("Missing header"))?
-                            ._key
-                            .clone();
-                        if matches!(collection, Collection::Entities) {
-                            new_keys.push(key);
+                        match collection {
+                            Collection::Entities => ent_creates.push(data),
+                            Collection::Resources => res_creates.push(data),
                         }
                     }
                     TransactionOperation::UpdateDocument {
@@ -445,36 +441,14 @@ impl DatabaseConnection for ArangoDbConnection {
                         expected_current_version,
                         patch,
                     } => {
-                        let aql = format!(
-                            "LET doc = DOCUMENT('{}', @key) \
-                             FILTER doc != null AND doc.{} == @expected_current_version \
-                             UPDATE doc WITH @patch IN {} \
-                             RETURN OLD",
-                            collection, BEVY_PERSISTENCE_VERSION_FIELD, collection
-                        );
-
-                        let bind_vars: HashMap<String, Value> = [
-                            ("key".to_string(), Value::String(key.clone())),
-                            ("expected_current_version".to_string(), Value::Number(expected_current_version.into())),
-                            ("patch".to_string(), patch),
-                        ].into_iter().collect();
-
-                        let query = AqlQuery::builder()
-                            .query(&aql)
-                            .bind_vars(
-                                bind_vars.iter()
-                                    .map(|(k,v)| (k.as_str(), v.clone()))
-                                    .collect()
-                            )
-                            .build();
-
-                        let result: Vec<Value> = trx
-                            .aql_query(query)
-                            .await
-                            .map_err(|e| PersistenceError::new(e.to_string()))?;
-
-                        if result.is_empty() {
-                            return Err(PersistenceError::Conflict { key });
+                        let obj = serde_json::json!({
+                            "key": key,
+                            "expected": expected_current_version,
+                            "patch": patch
+                        });
+                        match collection {
+                            Collection::Entities => ent_updates.push(obj),
+                            Collection::Resources => res_updates.push(obj),
                         }
                     }
                     TransactionOperation::DeleteDocument {
@@ -482,36 +456,192 @@ impl DatabaseConnection for ArangoDbConnection {
                         key,
                         expected_current_version,
                     } => {
-                        let aql = format!(
-                            "LET doc = DOCUMENT('{}', @key) \
-                             FILTER doc != null AND doc.{} == @expected_current_version \
-                             REMOVE doc IN {} \
-                             RETURN OLD",
-                            collection, BEVY_PERSISTENCE_VERSION_FIELD, collection
-                        );
-
-                        let bind_vars: HashMap<String, Value> = [
-                            ("key".to_string(), Value::String(key.clone())),
-                            ("expected_current_version".to_string(), Value::Number(expected_current_version.into())),
-                        ].into_iter().collect();
-
-                        let query = AqlQuery::builder()
-                            .query(&aql)
-                            .bind_vars(
-                                bind_vars.iter()
-                                    .map(|(k,v)| (k.as_str(), v.clone()))
-                                    .collect()
-                            )
-                            .build();
-
-                        let result: Vec<Value> = trx
-                            .aql_query(query)
-                            .await
-                            .map_err(|e| PersistenceError::new(e.to_string()))?;
-
-                        if result.is_empty() {
-                            return Err(PersistenceError::Conflict { key });
+                        let obj = serde_json::json!({
+                            "key": key,
+                            "expected": expected_current_version,
+                        });
+                        match collection {
+                            Collection::Entities => ent_deletes.push(obj),
+                            Collection::Resources => res_deletes.push(obj),
                         }
+                    }
+                }
+            }
+
+            let mut new_keys: Vec<String> = Vec::new();
+
+            // 1) Entity creates (RETURN NEW._key)
+            if !ent_creates.is_empty() {
+                let aql = "FOR d IN @docs INSERT d INTO entities RETURN NEW._key";
+                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                bind_vars.insert("docs".into(), Value::Array(ent_creates));
+                let query = AqlQuery::builder()
+                    .query(aql)
+                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .build();
+                let keys: Vec<String> = trx
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                new_keys.extend(keys);
+            }
+
+            // 2) Entity updates (detect conflicts)
+            if !ent_updates.is_empty() {
+                let requested: Vec<String> = ent_updates
+                    .iter()
+                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+                    .collect();
+                let aql = format!(
+                    "FOR p IN @patches
+                       LET doc = DOCUMENT('entities', p.key)
+                       FILTER doc != null AND doc.{ver} == p.expected
+                       UPDATE doc WITH p.patch IN entities OPTIONS {{ mergeObjects: true }}
+                       RETURN p.key",
+                    ver = BEVY_PERSISTENCE_VERSION_FIELD
+                );
+                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                bind_vars.insert("patches".into(), Value::Array(ent_updates));
+                let query = AqlQuery::builder()
+                    .query(&aql)
+                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .build();
+                let updated: Vec<String> = trx
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                if updated.len() != requested.len() {
+                    // Find first missing key and return Conflict
+                    if let Some(conflict_key) = requested
+                        .into_iter()
+                        .find(|k| !updated.iter().any(|u| u == k))
+                    {
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        return Err(PersistenceError::new("Update conflict (entities)"));
+                    }
+                }
+            }
+
+            // 3) Entity deletes (detect conflicts)
+            if !ent_deletes.is_empty() {
+                let requested: Vec<String> = ent_deletes
+                    .iter()
+                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+                    .collect();
+                let aql = format!(
+                    "FOR p IN @deletes
+                       LET doc = DOCUMENT('entities', p.key)
+                       FILTER doc != null AND doc.{ver} == p.expected
+                       REMOVE doc IN entities
+                       RETURN p.key",
+                    ver = BEVY_PERSISTENCE_VERSION_FIELD
+                );
+                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                bind_vars.insert("deletes".into(), Value::Array(ent_deletes));
+                let query = AqlQuery::builder()
+                    .query(&aql)
+                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .build();
+                let removed: Vec<String> = trx
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                if removed.len() != requested.len() {
+                    if let Some(conflict_key) = requested
+                        .into_iter()
+                        .find(|k| !removed.iter().any(|u| u == k))
+                    {
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        return Err(PersistenceError::new("Delete conflict (entities)"));
+                    }
+                }
+            }
+
+            // 4) Resource creates (no keys returned)
+            if !res_creates.is_empty() {
+                let aql = "FOR d IN @docs INSERT d INTO resources";
+                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                bind_vars.insert("docs".into(), Value::Array(res_creates));
+                let query = AqlQuery::builder()
+                    .query(aql)
+                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .build();
+                let _: Vec<Value> = trx
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+            }
+
+            // 5) Resource updates (detect conflicts)
+            if !res_updates.is_empty() {
+                let requested: Vec<String> = res_updates
+                    .iter()
+                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+                    .collect();
+                let aql = format!(
+                    "FOR p IN @patches
+                       LET doc = DOCUMENT('resources', p.key)
+                       FILTER doc != null AND doc.{ver} == p.expected
+                       UPDATE doc WITH p.patch IN resources OPTIONS {{ mergeObjects: true }}
+                       RETURN p.key",
+                    ver = BEVY_PERSISTENCE_VERSION_FIELD
+                );
+                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                bind_vars.insert("patches".into(), Value::Array(res_updates));
+                let query = AqlQuery::builder()
+                    .query(&aql)
+                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .build();
+                let updated: Vec<String> = trx
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                if updated.len() != requested.len() {
+                    if let Some(conflict_key) = requested
+                        .into_iter()
+                        .find(|k| !updated.iter().any(|u| u == k))
+                    {
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        return Err(PersistenceError::new("Update conflict (resources)"));
+                    }
+                }
+            }
+
+            // 6) Resource deletes (rare, but support and detect conflicts)
+            if !res_deletes.is_empty() {
+                let requested: Vec<String> = res_deletes
+                    .iter()
+                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
+                    .collect();
+                let aql = format!(
+                    "FOR p IN @deletes
+                       LET doc = DOCUMENT('resources', p.key)
+                       FILTER doc != null AND doc.{ver} == p.expected
+                       REMOVE doc IN resources
+                       RETURN p.key",
+                    ver = BEVY_PERSISTENCE_VERSION_FIELD
+                );
+                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+                bind_vars.insert("deletes".into(), Value::Array(res_deletes));
+                let query = AqlQuery::builder()
+                    .query(&aql)
+                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .build();
+                let removed: Vec<String> = trx
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                if removed.len() != requested.len() {
+                    if let Some(conflict_key) = requested
+                        .into_iter()
+                        .find(|k| !removed.iter().any(|u| u == k))
+                    {
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        return Err(PersistenceError::new("Delete conflict (resources)"));
                     }
                 }
             }

@@ -427,7 +427,7 @@ pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
     });
 
     // The timeout is applied to the entire commit-and-wait process.
-    timeout(std::time::Duration::from_secs(15), async {
+    timeout(std::time::Duration::from_secs(60), async {
         // Loop, calling app.update() and checking the receiver.
         // Yield to the executor each time to avoid blocking.
         loop {
@@ -453,7 +453,7 @@ pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
         }
     })
     .await
-    .map_err(|_| PersistenceError::new("Commit timed out after 15 seconds"))?
+    .map_err(|_| PersistenceError::new("Commit timed out after 60 seconds"))?
 }
 
 // Add a synchronous convenience that uses the plugin’s runtime

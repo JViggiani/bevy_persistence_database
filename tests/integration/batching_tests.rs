@@ -237,3 +237,55 @@ fn test_atomic_multi_batch_commit() {
     let guid_count = world_ref.query::<&Guid>().iter(world_ref).count();
     assert_eq!(guid_count, 0, "No entity should have a Guid after atomic failure");
 }
+
+#[test]
+fn test_batches_respect_config_max_ops() {
+    use std::sync::Arc;
+    use bevy_arangodb_core::{
+        persistence_plugin::PersistencePluginConfig,
+        PersistencePluginCore,
+        MockDatabaseConnection,
+        commit_sync,
+    };
+
+    // Configure a non-trivial batch size and entity count
+    let batch_size = 7usize;
+    let entity_count = 25usize;
+    let expected_batches = (entity_count + batch_size - 1) / batch_size;
+
+    // Mock DB: ensure we get exactly expected_batches transactions and that
+    // each batch contains <= batch_size operations.
+    let mut db = MockDatabaseConnection::new();
+    db.expect_execute_transaction()
+        .times(expected_batches)
+        .returning(move |ops| {
+            assert!(
+                ops.len() <= batch_size,
+                "Batch too large: got {}, limit {}",
+                ops.len(),
+                batch_size
+            );
+            // Simulate success
+            Box::pin(async { Ok(vec![]) })
+        });
+
+    // Build app with batching enabled
+    let config = PersistencePluginConfig {
+        batching_enabled: true,
+        commit_batch_size: batch_size,
+        thread_count: 4,
+    };
+    let plugin = PersistencePluginCore::new(Arc::new(db)).with_config(config);
+    let mut app = App::new();
+    app.add_plugins(plugin);
+
+    // Spawn enough entities to require multiple batches
+    for i in 0..entity_count {
+        app.world_mut().spawn(Health { value: i as i32 });
+    }
+    app.update();
+
+    // Commit: mock assertions will validate batch sizing and call count
+    let res = commit_sync(&mut app);
+    assert!(res.is_ok(), "Commit should succeed with mocked DB");
+}

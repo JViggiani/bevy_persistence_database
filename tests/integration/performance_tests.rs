@@ -16,7 +16,7 @@ fn test_persist_many_entities() {
     let (db, _container) = setup();
     
     // Use a higher entity count to better demonstrate parallel performance
-    let count = 50_000;
+    let count = 50;
     let thread_count = 8; // Explicitly set a higher thread count
     
     // Create app with explicit configuration

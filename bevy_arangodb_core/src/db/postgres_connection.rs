@@ -17,8 +17,6 @@ use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, Config, NoTls};
-use uuid::Uuid;
-
 
 #[derive(Clone)]
 pub struct PostgresDbConnection {
@@ -335,155 +333,45 @@ impl DatabaseConnection for PostgresDbConnection {
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
-    ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
-        let client = self.client.clone();
+    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
+        let client_arc = self.client.clone();
         async move {
-            let mut client = client.lock().await;
+            // Acquire client and begin a transaction
+            let mut client = client_arc.lock().await;
             let tx = client
                 .transaction()
                 .await
-                .map_err(|e| PersistenceError::new(format!("pg begin tx failed: {}", e)))?;
+                .map_err(|e| PersistenceError::new(format!("pg START TRANSACTION failed: {}", e)))?;
 
-            let mut new_keys: Vec<String> = Vec::new();
+            // Group ops
+            let mut ent_creates: Vec<serde_json::Value> = Vec::new();
+            let mut ent_updates: Vec<serde_json::Value> = Vec::new(); // { id, expected, patch }
+            let mut ent_deletes: Vec<serde_json::Value> = Vec::new(); // { id, expected }
+
+            let mut res_creates: Vec<serde_json::Value> = Vec::new();
+            let mut res_updates: Vec<serde_json::Value> = Vec::new();
+            let mut res_deletes: Vec<serde_json::Value> = Vec::new();
 
             for op in operations {
                 match op {
-                    TransactionOperation::CreateDocument { collection, data } => {
-                        match collection {
-                            Collection::Entities => {
-                                // Generate id and ensure it is NOT stored inside doc JSON
-                                let key = Uuid::new_v4().to_string();
-                                // Extract version as u64
-                                let version = data
-                                    .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(1) as i64;
-
-                                // Do not insert "id" into doc JSON for Postgres entities
-                                debug!(
-                                    "[pg] create entity id={} version={} data={}",
-                                    key, version, data
-                                );
-                                tx.execute(
-                                    "INSERT INTO entities (id, bevy_persistence_version, doc) VALUES ($1, $2, $3::jsonb)",
-                                    &[&key, &version, &data],
-                                )
-                                .await
-                                .map_err(|e| PersistenceError::new(format!("pg insert entity failed: {}", e)))?;
-                                new_keys.push(key);
-                            }
-                            Collection::Resources => {
-                                // Resource key must be in the JSON (already inserted by caller)
-                                let key = data
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .ok_or_else(|| {
-                                        PersistenceError::new(
-                                            "resource JSON missing 'id' (key) field",
-                                        )
-                                    })?
-                                    .to_string();
-                                let version = data
-                                    .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                                    .and_then(|v| v.as_u64())
-                                    .unwrap_or(1) as i64;
-                                debug!(
-                                    "[pg] create resource id={} version={} data={}",
-                                    key, version, data
-                                );
-                                tx.execute(
-                                    "INSERT INTO resources (id, bevy_persistence_version, doc) VALUES ($1, $2, $3::jsonb)
-                                     ON CONFLICT (id) DO UPDATE SET bevy_persistence_version = EXCLUDED.bevy_persistence_version,
-                                       doc = resources.doc || EXCLUDED.doc",
-                                    &[&key, &version, &data],
-                                )
-                                .await
-                                .map_err(|e| PersistenceError::new(format!("pg upsert resource failed: {}", e)))?;
-                            }
-                        }
-                    }
+                    TransactionOperation::CreateDocument { collection, data } => match collection {
+                        Collection::Entities => ent_creates.push(data),
+                        Collection::Resources => res_creates.push(data),
+                    },
                     TransactionOperation::UpdateDocument {
                         collection,
                         key,
                         expected_current_version,
                         patch,
                     } => {
-                        let exp = expected_current_version as i64;
-                        let next_ver = exp + 1;
+                        let rec = serde_json::json!({
+                            "id": key,
+                            "expected": expected_current_version,
+                            "patch": patch
+                        });
                         match collection {
-                            Collection::Entities => {
-                                debug!(
-                                    "[pg] update entity id={} expected_ver={} patch={}",
-                                    key, exp, patch
-                                );
-                                let n = tx
-                                    .execute(
-                                        "UPDATE entities
-                                           SET doc = doc || $3::jsonb,
-                                               bevy_persistence_version = $2 + 1
-                                         WHERE id = $1 AND bevy_persistence_version = $2",
-                                        // Pass jsonb as serde_json::Value
-                                        &[&key, &exp, &patch],
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        PersistenceError::new(format!(
-                                            "pg update entity failed: {}",
-                                            e
-                                        ))
-                                    })?;
-                                if n == 0 {
-                                    return Err(PersistenceError::Conflict { key });
-                                }
-                                // Ensure doc version field is incremented too
-                                tx.execute(
-                                    &format!(
-                                        "UPDATE entities
-                                           SET doc = jsonb_set(doc, '{{{}}}', to_jsonb($2::bigint), true)
-                                         WHERE id = $1",
-                                        BEVY_PERSISTENCE_VERSION_FIELD
-                                    ),
-                                    &[&key, &next_ver],
-                                )
-                                .await
-                                .ok();
-                            }
-                            Collection::Resources => {
-                                debug!(
-                                    "[pg] update resource id={} expected_ver={} patch={}",
-                                    key, exp, patch
-                                );
-                                let n = tx
-                                    .execute(
-                                        "UPDATE resources
-                                           SET doc = doc || $3::jsonb,
-                                               bevy_persistence_version = $2 + 1
-                                         WHERE id = $1 AND bevy_persistence_version = $2",
-                                        // Pass jsonb as serde_json::Value
-                                        &[&key, &exp, &patch],
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        PersistenceError::new(format!(
-                                            "pg update resource failed: {}",
-                                            e
-                                        ))
-                                    })?;
-                                if n == 0 {
-                                    return Err(PersistenceError::Conflict { key });
-                                }
-                                tx.execute(
-                                    &format!(
-                                        "UPDATE resources
-                                           SET doc = jsonb_set(doc, '{{{}}}', to_jsonb($2::bigint), true)
-                                         WHERE id = $1",
-                                        BEVY_PERSISTENCE_VERSION_FIELD
-                                    ),
-                                    &[&key, &next_ver],
-                                )
-                                .await
-                                .ok();
-                            }
+                            Collection::Entities => ent_updates.push(rec),
+                            Collection::Resources => res_updates.push(rec),
                         }
                     }
                     TransactionOperation::DeleteDocument {
@@ -491,53 +379,254 @@ impl DatabaseConnection for PostgresDbConnection {
                         key,
                         expected_current_version,
                     } => {
-                        let exp = expected_current_version as i64;
+                        let rec = serde_json::json!({ "id": key, "expected": expected_current_version });
                         match collection {
-                            Collection::Entities => {
-                                debug!("[pg] delete entity id={} expected_ver={}", key, exp);
-                                let n = tx
-                                    .execute(
-                                        "DELETE FROM entities WHERE id = $1 AND bevy_persistence_version = $2",
-                                        &[&key, &exp],
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        PersistenceError::new(format!(
-                                            "pg delete entity failed: {}",
-                                            e
-                                        ))
-                                    })?;
-                                if n == 0 {
-                                    return Err(PersistenceError::Conflict { key });
-                                }
-                            }
-                            Collection::Resources => {
-                                debug!("[pg] delete resource id={} expected_ver={}", key, exp);
-                                let n = tx
-                                    .execute(
-                                        "DELETE FROM resources WHERE id = $1 AND bevy_persistence_version = $2",
-                                        &[&key, &exp],
-                                    )
-                                    .await
-                                    .map_err(|e| {
-                                        PersistenceError::new(format!(
-                                            "pg delete resource failed: {}",
-                                            e
-                                        ))
-                                    })?;
-                                if n == 0 {
-                                    return Err(PersistenceError::Conflict { key });
-                                }
-                            }
+                            Collection::Entities => ent_deletes.push(rec),
+                            Collection::Resources => res_deletes.push(rec),
                         }
                     }
                 }
             }
 
+            let mut new_entity_ids: Vec<String> = Vec::new();
+
+            // 1) Entity creates: generate IDs client-side, single INSERT FROM jsonb array
+            if !ent_creates.is_empty() {
+                use uuid::Uuid;
+                let ids: Vec<String> = ent_creates
+                    .iter()
+                    .map(|_| Uuid::new_v4().to_string())
+                    .collect();
+
+                let ver_field = BEVY_PERSISTENCE_VERSION_FIELD;
+                let input_docs: Vec<serde_json::Value> = ent_creates
+                    .into_iter()
+                    .zip(ids.iter())
+                    .map(|(doc, id)| {
+                        let ver = doc.get(ver_field).and_then(|v| v.as_i64()).unwrap_or(1);
+                        serde_json::json!({ "id": id, "ver": ver, "doc": doc })
+                    })
+                    .collect();
+                let input_json = serde_json::Value::Array(input_docs);
+
+                let sql = r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text      AS id,
+                               (x->>'ver')::bigint    AS ver,
+                               (x->'doc')::jsonb      AS doc
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    )
+                    INSERT INTO entities (id, bevy_persistence_version, doc)
+                    SELECT id, ver, doc FROM input
+                "#;
+
+                tx.execute(sql, &[&input_json])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg batch insert (entities) failed: {}", e)))?;
+
+                new_entity_ids = ids;
+            }
+
+            // 2) Entity updates: optimistic check, merge JSONB, return ids updated
+            if !ent_updates.is_empty() {
+                let requested: Vec<String> = ent_updates
+                    .iter()
+                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect();
+
+                let upd_sql = r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text        AS id,
+                               (x->>'expected')::bigint AS expected,
+                               (x->'patch')::jsonb      AS patch
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    ),
+                    updated AS (
+                        UPDATE entities e
+                        SET doc = e.doc || i.patch,
+                            bevy_persistence_version = i.expected + 1
+                        FROM input i
+                        WHERE e.id = i.id AND e.bevy_persistence_version = i.expected
+                        RETURNING e.id
+                    )
+                    SELECT id FROM updated
+                "#;
+
+                let rows = tx
+                    .query(upd_sql, &[&serde_json::Value::Array(ent_updates.clone())])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg batch update (entities) failed: {}", e)))?;
+                let updated: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+
+                if updated.len() != requested.len() {
+                    if let Some(conflict_key) = requested.into_iter().find(|k| !updated.iter().any(|u| u == k)) {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::new("Update conflict (entities)"));
+                    }
+                }
+            }
+
+            // 3) Entity deletes: optimistic check
+            if !ent_deletes.is_empty() {
+                let requested: Vec<String> = ent_deletes
+                    .iter()
+                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect();
+
+                let del_sql = r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text        AS id,
+                               (x->>'expected')::bigint AS expected
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    ),
+                    deleted AS (
+                        DELETE FROM entities e
+                        USING input i
+                        WHERE e.id = i.id AND e.bevy_persistence_version = i.expected
+                        RETURNING e.id
+                    )
+                    SELECT id FROM deleted
+                "#;
+
+                let rows = tx
+                    .query(del_sql, &[&serde_json::Value::Array(ent_deletes.clone())])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg batch delete (entities) failed: {}", e)))?;
+                let deleted: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+
+                if deleted.len() != requested.len() {
+                    if let Some(conflict_key) = requested.into_iter().find(|k| !deleted.iter().any(|u| u == k)) {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::new("Delete conflict (entities)"));
+                    }
+                }
+            }
+
+            // 4) Resource creates
+            if !res_creates.is_empty() {
+                let ver_field = BEVY_PERSISTENCE_VERSION_FIELD;
+                let input_docs: Vec<serde_json::Value> = res_creates
+                    .into_iter()
+                    .map(|doc| {
+                        let id = doc
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| PersistenceError::new("Resource create missing id"))?
+                            .to_string();
+                        let ver = doc.get(ver_field).and_then(|v| v.as_i64()).unwrap_or(1);
+                        Ok(serde_json::json!({ "id": id, "ver": ver, "doc": doc }))
+                    })
+                    .collect::<Result<_, PersistenceError>>()?;
+                let input_json = serde_json::Value::Array(input_docs);
+
+                let sql = r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text      AS id,
+                               (x->>'ver')::bigint    AS ver,
+                               (x->'doc')::jsonb      AS doc
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    )
+                    INSERT INTO resources (id, bevy_persistence_version, doc)
+                    SELECT id, ver, doc FROM input
+                "#;
+
+                tx.execute(sql, &[&input_json])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg batch insert (resources) failed: {}", e)))?;
+            }
+
+            // 5) Resource updates
+            if !res_updates.is_empty() {
+                let requested: Vec<String> = res_updates
+                    .iter()
+                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect();
+
+                let upd_sql = r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text        AS id,
+                               (x->>'expected')::bigint AS expected,
+                               (x->'patch')::jsonb      AS patch
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    ),
+                    updated AS (
+                        UPDATE resources r
+                        SET doc = r.doc || i.patch,
+                            bevy_persistence_version = i.expected + 1
+                        FROM input i
+                        WHERE r.id = i.id AND r.bevy_persistence_version = i.expected
+                        RETURNING r.id
+                    )
+                    SELECT id FROM updated
+                "#;
+
+                let rows = tx
+                    .query(upd_sql, &[&serde_json::Value::Array(res_updates.clone())])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg batch update (resources) failed: {}", e)))?;
+                let updated: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+
+                if updated.len() != requested.len() {
+                    if let Some(conflict_key) = requested.into_iter().find(|k| !updated.iter().any(|u| u == k)) {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::new("Update conflict (resources)"));
+                    }
+                }
+            }
+
+            // 6) Resource deletes
+            if !res_deletes.is_empty() {
+                let requested: Vec<String> = res_deletes
+                    .iter()
+                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                    .collect();
+
+                let del_sql = r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text        AS id,
+                               (x->>'expected')::bigint AS expected
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    ),
+                    deleted AS (
+                        DELETE FROM resources r
+                        USING input i
+                        WHERE r.id = i.id AND r.bevy_persistence_version = i.expected
+                        RETURNING r.id
+                    )
+                    SELECT id FROM deleted
+                "#;
+
+                let rows = tx
+                    .query(del_sql, &[&serde_json::Value::Array(res_deletes.clone())])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg batch delete (resources) failed: {}", e)))?;
+                let deleted: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+
+                if deleted.len() != requested.len() {
+                    if let Some(conflict_key) = requested.into_iter().find(|k| !deleted.iter().any(|u| u == k)) {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::Conflict { key: conflict_key });
+                    } else {
+                        tx.rollback().await.ok();
+                        return Err(PersistenceError::new("Delete conflict (resources)"));
+                    }
+                }
+            }
+
+            // COMMIT and return entity ids (for Guid assignment)
             tx.commit()
                 .await
-                .map_err(|e| PersistenceError::new(format!("pg commit failed: {}", e)))?;
-            Ok(new_keys)
+                .map_err(|e| PersistenceError::new(format!("pg COMMIT failed: {}", e)))?;
+            Ok(new_entity_ids)
         }
         .boxed()
     }
