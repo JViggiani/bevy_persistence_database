@@ -6,3 +6,4 @@ pub mod performance_tests;
 pub mod persisting_tests;
 pub mod plugin_tests;
 pub mod querying_tests;
+pub mod pass_through_tests;

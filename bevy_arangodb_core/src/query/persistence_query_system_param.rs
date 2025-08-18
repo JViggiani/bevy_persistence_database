@@ -108,6 +108,13 @@ where
     F: ToPresenceSpec + FilterSupported,
     Q: QueryDataToComponents,
 {
+    /// Explicit load trigger that performs DB I/O (if needed) and returns self for pass-through use.
+    /// This does not directly mutate the world; world mutations are applied by the plugin in PostUpdate.
+    pub fn ensure_loaded(&mut self) -> &mut Self {
+        let _ = self.iter_with_loading().count();
+        self
+    }
+
     /// Iterate over entities with the given components, loading from the database if necessary.
     /// World mutations are queued and applied later in the frame by the plugin.
     pub fn iter_with_loading(&mut self) -> impl Iterator<Item = (Entity, Q::Item<'_>)> {
@@ -645,3 +652,21 @@ impl_q_to_components_tuple!(A,B,C,D,E);
 impl_q_to_components_tuple!(A,B,C,D,E,F);
 impl_q_to_components_tuple!(A,B,C,D,E,F,G);
 impl_q_to_components_tuple!(A,B,C,D,E,F,G,H);
+
+// World-only pass-through: Deref to the inner Query so `iter/get/single/...` are available.
+impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> std::ops::Deref
+    for PersistentQuery<'w, 's, Q, F>
+{
+    type Target = Query<'w, 's, (Entity, Q), F>;
+    fn deref(&self) -> &Self::Target {
+        &self.query
+    }
+}
+
+impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> std::ops::DerefMut
+    for PersistentQuery<'w, 's, Q, F>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.query
+    }
+}

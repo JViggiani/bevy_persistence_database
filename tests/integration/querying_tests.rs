@@ -1,9 +1,10 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
     commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery, DatabaseConnection,
-    db::connection::DatabaseConnectionResource, TransactionOperation,
+    db::connection::DatabaseConnectionResource,
 };
 use crate::common::*;
+use crate::common::CountingDbConnection;
 use bevy::prelude::{With, Without, IntoScheduleConfigs};
 use bevy_arangodb_derive::db_matrix_test;
 
@@ -455,7 +456,7 @@ fn test_persistent_query_caching() {
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
     
-    // Wrap the real DB so we can count query_documents() calls
+    // Wrap the real DB so we can count execute_documents() calls
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
     let query_count = Arc::new(AtomicUsize::new(0));
     let counting = Arc::new(CountingDbConnection::new(db.clone(), query_count.clone())) as Arc<dyn DatabaseConnection>;
@@ -479,97 +480,6 @@ fn test_persistent_query_caching() {
 }
 
 // Add a small adapter that wraps a real DatabaseConnection and counts execute_documents calls.
-#[derive(Debug)]
-struct CountingDbConnection {
-    inner: std::sync::Arc<dyn DatabaseConnection>,
-    queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl CountingDbConnection {
-    fn new(
-        inner: std::sync::Arc<dyn DatabaseConnection>,
-        queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
-        Self { inner, queries }
-    }
-}
-
-impl bevy_arangodb_core::DatabaseConnection for CountingDbConnection {
-    fn document_key_field(&self) -> &'static str {
-        self.inner.document_key_field()
-    }
-
-    fn execute_transaction(
-        &self,
-        operations: Vec<TransactionOperation>,
-    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, bevy_arangodb_core::PersistenceError>> {
-        self.inner.execute_transaction(operations)
-    }
-
-    fn execute_keys(
-        &self,
-        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
-    ) -> futures::future::BoxFuture<'static, Result<Vec<String>, bevy_arangodb_core::PersistenceError>> {
-        self.inner.execute_keys(spec)
-    }
-
-    fn execute_documents(
-        &self,
-        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
-    ) -> futures::future::BoxFuture<'static, Result<Vec<serde_json::Value>, bevy_arangodb_core::PersistenceError>> {
-        use futures::FutureExt;
-        let inner = self.inner.clone();
-        let counter = self.queries.clone();
-        // Avoid capturing `spec` non-'static by first creating the inner 'static future.
-        let fut = inner.execute_documents(spec);
-        async move {
-            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            fut.await
-        }
-        .boxed()
-    }
-
-    fn execute_documents_sync(
-        &self,
-        spec: &bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification,
-    ) -> Result<Vec<serde_json::Value>, bevy_arangodb_core::PersistenceError> {
-        self.inner.execute_documents_sync(spec)
-    }
-
-    fn fetch_document(
-        &self,
-        entity_key: &str,
-    ) -> futures::future::BoxFuture<'static, Result<Option<(serde_json::Value, u64)>, bevy_arangodb_core::PersistenceError>> {
-        self.inner.fetch_document(entity_key)
-    }
-
-    fn fetch_component(
-        &self,
-        entity_key: &str,
-        comp_name: &str,
-    ) -> futures::future::BoxFuture<'static, Result<Option<serde_json::Value>, bevy_arangodb_core::PersistenceError>> {
-        self.inner.fetch_component(entity_key, comp_name)
-    }
-
-    fn fetch_resource(
-        &self,
-        resource_name: &str,
-    ) -> futures::future::BoxFuture<'static, Result<Option<(serde_json::Value, u64)>, bevy_arangodb_core::PersistenceError>> {
-        self.inner.fetch_resource(resource_name)
-    }
-
-    fn clear_entities(
-        &self,
-    ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
-        self.inner.clear_entities()
-    }
-
-    fn clear_resources(
-        &self,
-    ) -> futures::future::BoxFuture<'static, Result<(), bevy_arangodb_core::PersistenceError>> {
-        self.inner.clear_resources()
-    }
-}
 
 #[db_matrix_test]
 fn test_entity_not_overwritten_on_second_query_without_refresh() {
