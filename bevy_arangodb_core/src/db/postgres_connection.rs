@@ -249,22 +249,6 @@ impl PostgresDbConnection {
                                             format!("(doc ? '{}')", component_name)
                                         };
                                     }
-                                } else if matches!(op, BinaryOperator::Eq) {
-                                    // Equality on a concrete field -> use jsonb containment to enable GIN
-                                    // Build {"Comp":{"field":<literal>}} as a jsonb param
-                                    match &**rhs {
-                                        FilterExpression::Literal(v @ (Value::Bool(_) | Value::Number(_) | Value::String(_))) => {
-                                            let mut obj = serde_json::Map::new();
-                                            let mut inner = serde_json::Map::new();
-                                            inner.insert((*field_name).to_string(), v.clone());
-                                            obj.insert((*component_name).to_string(), Value::Object(inner));
-                                            let param_json = Value::Object(obj).to_string();
-                                            let idx = args.len() + 1;
-                                            args.push(SqlParam::Text(param_json));
-                                            return format!("(doc @> ({}::jsonb))", format!("${}", idx));
-                                        }
-                                        _ => { /* fall through to typed compare */ }
-                                    }
                                 }
                             }
                             // Typed comparisons (fallbacks)
@@ -284,7 +268,7 @@ impl PostgresDbConnection {
                                     // component object equality unsupported -> false
                                     "(FALSE)".to_string()
                                 } else if rhs_is_bool {
-                                    let l = translate_rec(lhs, &mut Vec::new());
+                                    let l = translate_rec(lhs, &mut Vec::new()); // rebuild path only
                                     format!("((({})::boolean) {} ({}::boolean))", l, op_str, r)
                                 } else if rhs_is_num {
                                     let l = translate_rec(lhs, &mut Vec::new());

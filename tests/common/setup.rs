@@ -300,3 +300,30 @@ pub fn make_app(db: Arc<dyn DatabaseConnection>, batch_size: usize) -> App {
     app.add_plugins(plugin);
     app
 }
+
+#[cfg(feature = "postgres")]
+#[ctor::dtor]
+fn teardown_pg_container() {
+    if let Some(state) = PG_GLOBAL.get() {
+        let keep = std::env::var("BEVY_POSTGRESDB_KEEP_CONTAINER")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        if keep {
+            if state.container.lock().unwrap().is_some() {
+                eprintln!(
+                    "[bevy_arangodb tests] BEVY_POSTGRESDB_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}",
+                    state.host, state.port
+                );
+            }
+            return;
+        }
+        if state.container.lock().unwrap().is_some() {
+            let _ = std::process::Command::new("docker")
+                .args(["rm", "-f", "-v", &state.container_id])
+                .status();
+            if let Some(c) = state.container.lock().unwrap().take() {
+                std::mem::forget(c);
+            }
+        }
+    }
+}
