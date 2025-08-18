@@ -135,6 +135,28 @@ where
         presence_names.extend(type_presence.withs.iter().copied());
         without_names.extend(type_presence.withouts.iter().copied());
 
+        // 2a) If presence is expressed via an OR expression, collect component names
+        // referenced in that expression so we fetch/deserialize them too.
+        fn collect_presence_components(expr: &crate::query::filter_expression::FilterExpression, acc: &mut Vec<&'static str>) {
+            use crate::query::filter_expression::FilterExpression as FE;
+            match expr {
+                FE::Field { component_name, field_name } => {
+                    // Presence expressions use empty field_name; include those components.
+                    if field_name.is_empty() && !acc.contains(component_name) {
+                        acc.push(component_name);
+                    }
+                }
+                FE::BinaryOperator { lhs, rhs, .. } => {
+                    collect_presence_components(lhs, acc);
+                    collect_presence_components(rhs, acc);
+                }
+                _ => {}
+            }
+        }
+        if let Some(expr) = &type_presence.expr {
+            collect_presence_components(expr, &mut fetch_names);
+        }
+
         // 2b) Ensure fetch list includes presence-gated components for deserialization
         for &n in &presence_names {
             if !fetch_names.contains(&n) {
@@ -205,7 +227,9 @@ where
                 presence_without: without_names.clone(),
                 fetch_only: fetch_names.clone(),
                 value_filters: combined_expr.clone(),
-                return_full_docs: true,
+                // Only return full documents when there are no presence gates.
+                // If presence gates exist, project only the requested components.
+                return_full_docs: presence_names.is_empty(),
             };
 
             match self.runtime.block_on(self.db.0.execute_documents(&spec)) {
