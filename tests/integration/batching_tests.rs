@@ -35,7 +35,7 @@ fn test_successful_batch_commit_of_new_entities() {
     // loading back from DB
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.iter_with_loading().count(); }
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
     let loaded = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
@@ -67,7 +67,7 @@ fn test_batch_commit_with_updates_and_deletes() {
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.iter_with_loading().count(); }
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
     // expect 3 left

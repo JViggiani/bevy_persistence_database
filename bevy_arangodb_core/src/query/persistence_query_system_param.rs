@@ -78,7 +78,7 @@ impl DeferredWorldOperations {
     }
 }
 
-// Transient per-thread configuration used between builder calls and iter_with_loading.
+// Transient per-thread configuration used between builder calls and ensure_loaded.
 // This avoids Local<T> so multiple PersistentQuery params can coexist in one system.
 thread_local! {
     static PQ_ADDITIONAL_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = Default::default();
@@ -111,19 +111,12 @@ where
     /// Explicit load trigger that performs DB I/O (if needed) and returns self for pass-through use.
     /// This does not directly mutate the world; world mutations are applied by the plugin in PostUpdate.
     pub fn ensure_loaded(&mut self) -> &mut Self {
-        let _ = self.iter_with_loading().count();
-        self
-    }
+        use crate::query::filter_expression::FilterExpression as FE;
 
-    /// Iterate over entities with the given components, loading from the database if necessary.
-    /// World mutations are queued and applied later in the frame by the plugin.
-    pub fn iter_with_loading(&mut self) -> impl Iterator<Item = (Entity, Q::Item<'_>)> {
-        bevy::log::debug!("PersistentQuery::iter_with_loading called");
+        bevy::log::debug!("PersistentQuery::ensure_loaded called");
 
         // Drain transient config from TLS for this call
-        // Fetch-only targets from Q
         let mut fetch_names: Vec<&'static str> = Vec::new();
-        // Presence gates from TLS .with_component() (deprecated)
         let mut presence_names: Vec<&'static str> = Vec::new();
         PQ_ADDITIONAL_COMPONENTS.with(|c| presence_names.extend(c.borrow_mut().drain(..)));
         let mut without_names: Vec<&'static str> = Vec::new();
@@ -142,13 +135,10 @@ where
         presence_names.extend(type_presence.withs.iter().copied());
         without_names.extend(type_presence.withouts.iter().copied());
 
-        // 2a) If presence is expressed via an OR expression, collect component names
-        // referenced in that expression so we fetch/deserialize them too.
-        fn collect_presence_components(expr: &crate::query::filter_expression::FilterExpression, acc: &mut Vec<&'static str>) {
-            use crate::query::filter_expression::FilterExpression as FE;
+        // Collect components referenced by presence expr branches so we fetch them too
+        fn collect_presence_components(expr: &FE, acc: &mut Vec<&'static str>) {
             match expr {
                 FE::Field { component_name, field_name } => {
-                    // Presence expressions use empty field_name; include those components.
                     if field_name.is_empty() && !acc.contains(component_name) {
                         acc.push(component_name);
                     }
@@ -164,14 +154,14 @@ where
             collect_presence_components(expr, &mut fetch_names);
         }
 
-        // 2b) Ensure fetch list includes presence-gated components for deserialization
+        // Ensure fetch includes presence-gated components
         for &n in &presence_names {
             if !fetch_names.contains(&n) {
                 fetch_names.push(n);
             }
         }
 
-        // Deduplicate names after merging
+        // Dedup
         fetch_names.sort_unstable();
         fetch_names.dedup();
         presence_names.sort_unstable();
@@ -187,76 +177,44 @@ where
             (None, None) => None,
         };
 
-        // Compute a hash from Q + presence + fetch + filter to drive the cache
+        // Compute cache hash
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::any::type_name::<Q>().hash(&mut hasher);
-        for &name in &presence_names {
-            name.hash(&mut hasher);
-        }
-        for &name in &without_names {
-            name.hash(&mut hasher);
-        }
-        for &name in &fetch_names {
-            name.hash(&mut hasher);
-        }
-        if let Some(expr) = &combined_expr {
-            format!("{:?}", expr).hash(&mut hasher);
-        }
+        for &name in &presence_names { name.hash(&mut hasher); }
+        for &name in &without_names { name.hash(&mut hasher); }
+        for &name in &fetch_names { name.hash(&mut hasher); }
+        if let Some(expr) = &combined_expr { format!("{:?}", expr).hash(&mut hasher); }
         let query_hash = hasher.finish();
-        bevy::log::trace!("Computed query hash: {}", query_hash);
 
         // Decide if we need to hit the DB based on cache policy
         let should_query_db = match cache_policy {
-            CachePolicy::ForceRefresh => {
-                bevy::log::debug!("Force refresh policy - will query DB");
-                true
-            }
-            CachePolicy::UseCache => {
-                bevy::log::debug!("Checking cache for hash: {}", query_hash);
-                let in_cache = self.cache.contains(query_hash);
-                bevy::log::debug!("Cache check complete, in_cache: {}", in_cache);
-                !in_cache
-            }
+            CachePolicy::ForceRefresh => true,
+            CachePolicy::UseCache => !self.cache.contains(query_hash),
         };
 
         if should_query_db {
             bevy::log::debug!("Querying database");
-
-            if presence_names.is_empty() {
-                bevy::log::info!(
-                    "No explicit component filters; will load documents and insert any registered components present."
-                );
-            }
-            bevy::log::debug!("Will query for components (if any): {:?}", presence_names);
-
             let spec = PersistenceQuerySpecification {
                 presence_with: presence_names.clone(),
                 presence_without: without_names.clone(),
                 fetch_only: fetch_names.clone(),
                 value_filters: combined_expr.clone(),
-                // Only return full documents when there are no presence gates.
-                // If presence gates exist, project only the requested components.
                 return_full_docs: presence_names.is_empty(),
             };
 
             match self.runtime.block_on(self.db.0.execute_documents(&spec)) {
                 Ok(documents) => {
-                    bevy::log::debug!(
-                        "Retrieved {} documents (async via runtime)",
-                        documents.len()
-                    );
                     // Allow overwrite when explicitly requested or when presence gates are used.
-                    let allow_overwrite = matches!(cache_policy, CachePolicy::ForceRefresh)
-                        || !presence_names.is_empty();
-                    // Deserialize components:
-                    // - If presence gates are provided, load only requested components (presence + fetch-only).
-                    // - If no presence gates, load any registered components found in each document.
-                    //   Pass an empty list to signal "load all registered components present".
+                    let allow_overwrite =
+                        matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_names.is_empty();
+
+                    // When presence gates exist, load only requested components; otherwise, load all registered found
                     let comps_to_deser: Vec<&'static str> = if presence_names.is_empty() {
                         Vec::new()
                     } else {
                         fetch_names.clone()
                     };
+
                     self.process_documents(documents, &comps_to_deser, allow_overwrite);
 
                     // Also fetch resources alongside any query
@@ -267,8 +225,7 @@ where
                                 .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
                                 .0
                                 .clone();
-                            rt.block_on(session.fetch_and_insert_resources(&*db, world))
-                                .ok();
+                            rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
                         });
                     }));
 
@@ -282,8 +239,7 @@ where
             bevy::log::debug!("Skipping DB query - using cached results");
         }
 
-        // Return iterator over query results - now includes freshly loaded entities WITH their components
-        self.query.iter()
+        self
     }
 
     // Queue per-document closures that will apply all mutations atomically when drained.
@@ -385,7 +341,7 @@ where
     // World-only pass-throughs to the inner Bevy Query. These DO NOT trigger DB loads.
 
     /// Get the item for a specific entity from the world only.
-    /// Note: This does not load from the DB. Call `iter_with_loading()` earlier if needed.
+    /// Note: This does not load from the DB. Call `ensure_loaded()` earlier if needed.
     pub fn get(
         &self,
         entity: Entity,

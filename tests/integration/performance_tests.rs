@@ -60,7 +60,7 @@ fn test_persist_many_entities() {
     app2.add_plugins(PersistencePlugins(db.clone()));
 
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
-        let _ = pq.iter_with_loading().count();
+        let _ = pq.ensure_loaded();
     }
     let start_fetch = Instant::now();
     app2.add_systems(bevy::prelude::Update, load);

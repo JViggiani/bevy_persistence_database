@@ -26,7 +26,7 @@ fn test_load_specific_entities_into_new_session() {
     fn sys(
         pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>
     ) {
-        let _ = pq.filter(Health::value().gt(100)).iter_with_loading().count();
+        let _ = pq.filter(Health::value().gt(100)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, sys);
     app2.update();
@@ -55,7 +55,7 @@ fn test_load_resources_alongside_entities() {
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    fn sys(mut pq: PersistentQuery<&Guid>) { let _ = pq.iter_with_loading().count(); }
+    fn sys(mut pq: PersistentQuery<&Guid>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, sys);
     app2.update();
 
@@ -88,7 +88,7 @@ fn test_load_into_world_with_existing_entities() {
     fn load_a(
         pq: PersistentQuery<&Health>
     ) {
-        let _ = pq.filter(Health::value().eq(100)).iter_with_loading().count();
+        let _ = pq.filter(Health::value().eq(100)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, load_a);
     app2.update();
@@ -127,7 +127,7 @@ fn test_value_filters_equality_operator() {
     fn s1(
         pq: PersistentQuery<&Health>
     ) {
-        let _ = pq.filter(Health::value().eq(100)).iter_with_loading().count();
+        let _ = pq.filter(Health::value().eq(100)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, s1);
     app2.update();
@@ -139,7 +139,7 @@ fn test_value_filters_equality_operator() {
     fn s2(
         pq: PersistentQuery<&Creature>
     ) {
-        let _ = pq.filter(Creature::is_screaming().eq(true)).iter_with_loading().count();
+        let _ = pq.filter(Creature::is_screaming().eq(true)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, s2);
     app2.update();
@@ -151,7 +151,7 @@ fn test_value_filters_equality_operator() {
     fn s3(
         pq: PersistentQuery<&PlayerName>
     ) {
-        let _ = pq.filter(PlayerName::name().eq("Alice")).iter_with_loading().count();
+        let _ = pq.filter(PlayerName::name().eq("Alice")).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, s3);
     app2.update();
@@ -177,7 +177,7 @@ fn test_value_filters_relational_operators() {
     app2.add_plugins(PersistencePlugins(db.clone()));
     fn gt(
         pq: PersistentQuery<&Health>
-    ) { let _ = pq.filter(Health::value().gt(100)).iter_with_loading().count(); }
+    ) { let _ = pq.filter(Health::value().gt(100)).ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, gt);
     app2.update();
     assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 1);
@@ -186,7 +186,7 @@ fn test_value_filters_relational_operators() {
     app2.world_mut().clear_entities();
     fn gte(
         pq: PersistentQuery<&Health>
-    ) { let _ = pq.filter(Health::value().gte(100)).iter_with_loading().count(); }
+    ) { let _ = pq.filter(Health::value().gte(100)).ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, gte);
     app2.update();
     assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 2);
@@ -195,7 +195,7 @@ fn test_value_filters_relational_operators() {
     app2.world_mut().clear_entities();
     fn lt(
         pq: PersistentQuery<&Health>
-    ) { let _ = pq.filter(Health::value().lt(100)).iter_with_loading().count(); }
+    ) { let _ = pq.filter(Health::value().lt(100)).ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, lt);
     app2.update();
     assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 1);
@@ -204,7 +204,7 @@ fn test_value_filters_relational_operators() {
     app2.world_mut().clear_entities();
     fn lte(
         pq: PersistentQuery<&Health>
-    ) { let _ = pq.filter(Health::value().lte(100)).iter_with_loading().count(); }
+    ) { let _ = pq.filter(Health::value().lte(100)).ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, lte);
     app2.update();
     assert_eq!(app2.world_mut().query::<&Health>().iter(&app2.world()).count(), 2);
@@ -231,13 +231,13 @@ fn test_value_filters_logical_combinations() {
         pq: PersistentQuery<(&Health, &Position)>
     ) {
         let expr = Health::value().gt(100).and(Position::x().lt(100.0));
-        let _ = pq.filter(expr).iter_with_loading().count();
+        let _ = pq.filter(expr).ensure_loaded();
     }
     fn or_sys(
         pq: PersistentQuery<(&Health, &Position)>
     ) {
         let expr = Health::value().gt(100).or(Position::x().lt(100.0));
-        let _ = pq.filter(expr).iter_with_loading().count();
+        let _ = pq.filter(expr).ensure_loaded();
     }
 
     app2.add_systems(bevy::prelude::Update, and_sys);
@@ -278,7 +278,7 @@ fn test_fetch_ids_only() {
     fn load_health_gt_75(
         pq: PersistentQuery<&Health>
     ) {
-        let _ = pq.filter(Health::value().gt(75)).iter_with_loading().count();
+        let _ = pq.filter(Health::value().gt(75)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, load_health_gt_75);
     app2.update();
@@ -296,7 +296,7 @@ fn test_fetch_ids_only() {
     let mut app3 = App::new();
     app3.add_plugins(PersistencePlugins(db.clone()));
     fn load_h_and_p(mut pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
-        let _ = pq.iter_with_loading().count();
+        let _ = pq.ensure_loaded();
     }
     app3.add_systems(bevy::prelude::Update, load_h_and_p);
     app3.update();
@@ -310,7 +310,8 @@ fn test_fetch_ids_only() {
 
 fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
     // This will load entities from the database
-    for (entity, (health, position)) in query.iter_with_loading() {
+    query.ensure_loaded();
+    for (entity, (health, position)) in query.iter() {
         println!("Entity {:?} has health {} and position ({}, {})", 
             entity, health.value, position.x, position.y);
     }
@@ -401,7 +402,8 @@ fn test_persistent_query_with_filter() {
         query = query.filter(Health::value().gt(100));
         
         // This will load entities from the database
-        for (_entity, (health, position)) in query.iter_with_loading() {
+        query.ensure_loaded();
+        for (_entity, (health, position)) in query.iter() {
             println!("Entity has health {} and position ({}, {})", 
                 health.value, position.x, position.y);
             // Assertion to verify filter works
@@ -428,17 +430,17 @@ fn test_persistent_query_with_filter() {
 // System that uses query twice to test caching
 fn test_cached_query_system(mut query1: PersistentQuery<&Health>, mut query2: PersistentQuery<&Health>) {
     // First query execution - should hit database
-    let _ = query1.iter_with_loading().count();
+    let _ = query1.ensure_loaded();
     
     // Second execution of equivalent query - should use cache
-    let _ = query2.iter_with_loading().count();
+    let _ = query2.ensure_loaded();
 }
 
 // System that tests force refresh
 fn test_force_refresh_system(mut query: PersistentQuery<&Health>) {
     // Use force refresh to bypass cache
     query = query.force_refresh();
-    let _ = query.iter_with_loading().count();
+    let _ = query.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -526,7 +528,8 @@ fn system_load_and_capture(
     mut pq: PersistentQuery<&Health>,
     mut state: bevy::prelude::ResMut<TestState>,
 ) {
-    for (e, _) in pq.iter_with_loading() {
+    pq.ensure_loaded();
+    for (e, _) in pq.iter() {
         if state.entity.is_none() {
             state.entity = Some(e);
             break;
@@ -560,8 +563,7 @@ fn system_second_load(
         if let Ok(g) = q_guid.get(e) {
             let _ = pq
                 .filter(Guid::key_field().eq(g.id()))
-                .iter_with_loading()
-                .count();
+                .ensure_loaded();
         }
     }
 }
@@ -579,7 +581,7 @@ fn test_force_refresh_overwrites() {
     // Load into app2 via system, then mutate locally
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
-    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.iter_with_loading().count(); }
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
 
@@ -610,12 +612,11 @@ fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res
     let _ = query
         .filter(Guid::key_field().eq(key.0.as_str()))
         .force_refresh()
-        .iter_with_loading()
-        .count();
+        .ensure_loaded();
 }
 
 fn system_without_creature(mut pq: PersistentQuery<&Guid, Without<Creature>>) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -651,7 +652,7 @@ fn test_presence_without_filter() {
 
 fn system_type_driven_presence(mut pq: PersistentQuery<&Guid, (bevy::prelude::With<Health>, bevy::prelude::Without<Creature>)>) {
     // Load entities that have Health but do NOT have Creature
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -688,7 +689,7 @@ fn system_type_driven_or_presence(
     >,
 ) {
     // Load entities that have Health OR Creature
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -718,7 +719,7 @@ fn test_type_driven_or_presence_filters() {
 
 fn system_optional_component_fetch(mut pq: PersistentQuery<(&Health, Option<&Position>)>) {
     // Request Health and optionally Position via Q; no explicit presence filter needed.
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -759,7 +760,7 @@ fn system_nested_tuple_presence(
         ),
     >,
 ) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -806,7 +807,7 @@ fn system_and_or_mix_with_without(
         ),
     >,
 ) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -840,7 +841,7 @@ fn test_and_or_mix_with_without_filters() {
 fn system_optional_q_with_without(
     mut pq: PersistentQuery<(Option<&Creature>, &Health), bevy::prelude::Without<Creature>>,
 ) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -870,7 +871,7 @@ fn test_optional_q_with_without_exclusion() {
 
 // System: No presence filters; optional fetch-only for two components
 fn system_no_presence_optional_fetch(mut pq: PersistentQuery<(Option<&Health>, Option<&Position>)>) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -902,7 +903,7 @@ fn test_no_presence_loads_all_docs_requested_by_optional_q() {
 
 // System: Duplicate component in Q should be deduped in fetch list
 fn system_duplicate_q_components(mut pq: PersistentQuery<(&Health, Option<&Health>)>) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -936,7 +937,7 @@ fn system_or_three_arms(
         bevy::prelude::Or<(bevy::prelude::With<Health>, bevy::prelude::With<Creature>, bevy::prelude::With<PlayerName>)>,
     >,
 ) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 #[db_matrix_test]
@@ -1028,7 +1029,7 @@ fn test_postupdate_load_applies_next_frame() {
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins(db.clone()));
     fn postupdate_load(mut pq: PersistentQuery<(&Health, &Position)>) {
-        let _ = pq.iter_with_loading().count();
+        let _ = pq.ensure_loaded();
     }
     // Ensure the loader runs before PreCommit so ops are applied in the same frame.
     app2.add_systems(
@@ -1057,7 +1058,7 @@ struct PassThroughState {
 
 // Enqueue a DB load during Update
 fn system_load_hp(mut pq: PersistentQuery<(&Health, &Position)>) {
-    let _ = pq.iter_with_loading().count();
+    let _ = pq.ensure_loaded();
 }
 
 // Validate get/get_many/iter_combinations after a load
@@ -1067,7 +1068,8 @@ fn system_pass_through_core(
 ) {
     // Load from DB first
     let mut ids = Vec::new();
-    for (e, (_h, _p)) in pq.iter_with_loading() {
+    pq.ensure_loaded();
+    for (e, (_h, _p)) in pq.iter() {
         ids.push(e);
         state.loaded_count += 1;
     }
