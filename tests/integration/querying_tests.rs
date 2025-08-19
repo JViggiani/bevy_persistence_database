@@ -1108,3 +1108,93 @@ fn system_pass_through_single(
     let (_e2, (h2, _p2)) = pq.single().expect("single failed");
     state.single_health_via_single = h2.value;
 }
+
+// Presence OR tree combined with a value filter: ((Health AND Position) OR PlayerName) AND Health.value >= 100
+#[db_matrix_test]
+fn test_presence_value_combination_and_or() {
+    let (db, _container) = setup();
+
+    // Seed: only the first should match after value filter (Health.value >= 100)
+    let mut app_seed = App::new();
+    app_seed.add_plugins(PersistencePlugins(db.clone()));
+    app_seed.world_mut().spawn((Health { value: 120 }, Position { x: 0.0, y: 0.0 })); // match
+    app_seed.world_mut().spawn(PlayerName { name: "p".into() }); // present via OR, but filtered out by value predicate
+    app_seed.world_mut().spawn(Health { value: 80 }); // Health present but under threshold
+    app_seed.update();
+    commit_sync(&mut app_seed).expect("seed commit failed");
+
+    // App under test: load using presence OR + value filter
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+
+    fn sys(
+        pq: PersistentQuery<
+            &Guid,
+            bevy::prelude::Or<(
+                (bevy::prelude::With<Health>, bevy::prelude::With<Position>),
+                bevy::prelude::With<PlayerName>
+            )>,
+        >
+    ) {
+        let _ = pq.filter(Health::value().gte(100)).ensure_loaded();
+    }
+    app.add_systems(bevy::prelude::Update, sys);
+    app.update();
+
+    // Only one entity should have been loaded
+    let mut q = app.world_mut().query::<&Guid>();
+    let count = q.iter(&app.world()).count();
+    assert_eq!(count, 1, "expected exactly 1 entity to match presence OR + value filter");
+}
+
+// Presence-only complex tree: ((Health AND Position) OR PlayerName) AND NOT Creature
+#[db_matrix_test]
+fn test_presence_expression_complex_and_or_not() {
+    let (db, _container) = setup();
+
+    // Seed various combinations:
+    // E1: H+P -> match
+    // E2: PlayerName -> match
+    // E3: H only -> no (needs H+P or PlayerName)
+    // E4: H+P+Creature -> excluded by NOT Creature
+    // E5: PlayerName+Creature -> excluded by NOT Creature
+    // E6: P only -> no
+    // E7: H+P+PlayerName -> match
+    let mut app_seed = App::new();
+    app_seed.add_plugins(PersistencePlugins(db.clone()));
+    app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 })); // E1
+    app_seed.world_mut().spawn(PlayerName { name: "pn".into() }); // E2
+    app_seed.world_mut().spawn(Health { value: 2 }); // E3
+    app_seed.world_mut().spawn((Health { value: 3 }, Position { x: 1.0, y: 1.0 }, Creature { is_screaming: false })); // E4
+    app_seed.world_mut().spawn((PlayerName { name: "pc".into() }, Creature { is_screaming: true })); // E5
+    app_seed.world_mut().spawn(Position { x: 2.0, y: 2.0 }); // E6
+    app_seed.world_mut().spawn((Health { value: 4 }, Position { x: 3.0, y: 3.0 }, PlayerName { name: "both".into() })); // E7
+    app_seed.update();
+    commit_sync(&mut app_seed).expect("seed commit failed");
+
+    // App under test: presence-only complex expression
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+
+    fn sys(
+        mut pq: PersistentQuery<
+            &Guid,
+            (
+                bevy::prelude::Or<(
+                    (bevy::prelude::With<Health>, bevy::prelude::With<Position>),
+                    bevy::prelude::With<PlayerName>
+                )>,
+                bevy::prelude::Without<Creature>
+            ),
+        >
+    ) {
+        let _ = pq.ensure_loaded();
+    }
+    app.add_systems(bevy::prelude::Update, sys);
+    app.update();
+
+    // Expect E1, E2, E7 loaded => 3
+    let mut q = app.world_mut().query::<&Guid>();
+    let count = q.iter(&app.world()).count();
+    assert_eq!(count, 3, "expected 3 entities for ((H AND P) OR PlayerName) AND NOT Creature");
+}
