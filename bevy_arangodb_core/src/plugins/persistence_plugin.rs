@@ -698,12 +698,29 @@ impl Plugin for PersistencePluginCore {
 #[derive(Clone)]
 pub struct PersistencePlugins(pub Arc<dyn DatabaseConnection>);
 
+// Conditionally add Bevy's LogPlugin only if no global subscriber is set and the plugin
+// hasn't already been added to this App. This avoids "already set" errors but still
+// enables logging when nothing has initialized tracing yet.
+#[derive(Clone)]
+struct MaybeAddLogPlugin;
+
+impl Plugin for MaybeAddLogPlugin {
+    fn build(&self, app: &mut App) {
+        // Use Bevy's re-export of tracing to avoid adding a direct dependency
+        let already_has_subscriber = bevy::log::tracing::dispatcher::has_been_set();
+        let already_added = app.is_plugin_added::<bevy::log::LogPlugin>();
+        if !already_has_subscriber && !already_added {
+            app.add_plugins(bevy::log::LogPlugin::default());
+        }
+    }
+}
+
 impl PluginGroup for PersistencePlugins {
     fn build(self) -> PluginGroupBuilder {
         MinimalPlugins
             .build()
-            // Ensure bevy::log is wired so SystemParam logs print in apps/tests
-            .add(bevy::log::LogPlugin::default())
+            // Only initialize logging if nothing else has already set a global subscriber
+            .add(MaybeAddLogPlugin)
             .add(PersistencePluginCore::new(self.0.clone()))
     }
 }
