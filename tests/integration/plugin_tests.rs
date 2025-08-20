@@ -1,7 +1,8 @@
-use bevy::prelude::{App, Events};
+use bevy::prelude::{App, Events, IntoScheduleConfigs};
 use bevy_arangodb_core::{
     CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
     TriggerCommit,
+    commit_sync, PersistentQuery, persistence_plugin::PersistenceSystemSet,
 };
 use crate::common::*;
 use std::sync::Arc;
@@ -129,4 +130,38 @@ fn test_queued_commit_persists_all_changes() {
         .unwrap();
     let pos: Position = serde_json::from_value(pos_json).unwrap();
     assert_eq!(pos.x, 50.0);
+}
+
+#[db_matrix_test]
+fn test_postupdate_load_applies_next_frame() {
+    let (db, _container) = setup();
+
+    // GIVEN: one entity to load
+    let mut app1 = App::new();
+    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.world_mut().spawn((Health { value: 7 }, Position { x: 1.0, y: 2.0 }));
+    app1.update();
+    commit_sync(&mut app1).expect("commit failed");
+
+    // WHEN: load is triggered from PostUpdate
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    fn postupdate_load(mut pq: PersistentQuery<(&Health, &Position)>) {
+        let _ = pq.ensure_loaded();
+    }
+    // Ensure the loader runs before PreCommit so ops are applied in the same frame.
+    app2.add_systems(
+        bevy::prelude::PostUpdate,
+        postupdate_load.before(PersistenceSystemSet::PreCommit),
+    );
+
+    // First frame: load queued and applied within PostUpdate; data is visible immediately
+    app2.update();
+    let mut q0 = app2.world_mut().query::<&Health>();
+    assert_eq!(q0.iter(&app2.world()).count(), 1, "PostUpdate load should be visible in the same frame");
+
+    // Second frame: remains visible
+    app2.update();
+    let mut q1 = app2.world_mut().query::<(&Health, &Position)>();
+    assert_eq!(q1.iter(&app2.world()).count(), 1, "Loaded entity should be present");
 }

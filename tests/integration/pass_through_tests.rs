@@ -2,10 +2,12 @@ use bevy::prelude::*;
 use bevy_arangodb_core::{
     PersistencePluginCore, PersistentQuery, commit_sync,
 };
+use bevy_arangodb_core::persistence_plugin::PersistencePlugins;
 use crate::common::*;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use bevy_arangodb_derive::db_matrix_test;
 use crate::common::CountingDbConnection;
+use bevy::prelude::IntoScheduleConfigs;
 
 #[db_matrix_test]
 fn test_ensure_loaded_then_pass_through() {
@@ -129,4 +131,115 @@ fn test_deref_forwards_bevy_query_methods() {
     }
     app.add_systems(Update, verify);
     app.update();
+}
+
+#[derive(bevy::prelude::Resource, Default)]
+struct PassThroughState {
+    loaded_count: usize,
+    got_sum_first_two: i32,
+    combos_of_two: usize,
+    single_health: i32,
+    single_health_via_single: i32,
+}
+
+// Enqueue a DB load during Update
+fn system_load_hp(mut pq: PersistentQuery<(&Health, &Position)>) {
+    let _ = pq.ensure_loaded();
+}
+
+// Validate get/get_many/iter_combinations after a load
+fn system_pass_through_core(
+    mut pq: PersistentQuery<(&Health, &Position)>,
+    mut state: bevy::prelude::ResMut<PassThroughState>,
+) {
+    // Load from DB first
+    let mut ids = Vec::new();
+    pq.ensure_loaded();
+    for (e, (_h, _p)) in pq.iter() {
+        ids.push(e);
+        state.loaded_count += 1;
+    }
+    // get for the first entity
+    if let Some(&first) = ids.get(0) {
+        let (_e, (h, _p)) = pq.get(first).expect("get() failed");
+        assert!(h.value >= 0);
+    }
+    // get_many for two entities with smallest health
+    if ids.len() >= 2 {
+        let mut pairs: Vec<(bevy::prelude::Entity, i32)> = ids
+            .iter()
+            .map(|&e| {
+                let (_e, (h, _)) = pq.get(e).expect("get() failed");
+                (e, h.value)
+            })
+            .collect();
+        pairs.sort_by_key(|(_, v)| *v);
+        let a = pairs[0].0;
+        let b = pairs[1].0;
+        let arr = pq.get_many([a, b]).expect("get_many failed");
+        state.got_sum_first_two = arr.iter().map(|(_, (h, _))| h.value).sum();
+    }
+    // combinations of 2
+    state.combos_of_two = pq.iter_combinations::<2>().count();
+}
+
+// Validate single()/get_single() after a load with a presence filter
+fn system_pass_through_single(
+    pq: PersistentQuery<(&Health, &Position), With<PlayerName>>,
+    mut state: bevy::prelude::ResMut<PassThroughState>,
+) {
+    let (_e, (h, _p)) = pq.single().expect("single failed");
+    state.single_health = h.value;
+
+    let (_e2, (h2, _p2)) = pq.single().expect("single failed");
+    state.single_health_via_single = h2.value;
+}
+
+#[db_matrix_test]
+fn test_persistent_query_pass_through_methods() {
+    let (db, _container) = setup();
+
+    // GIVEN: three entities with Health+Position, one also with PlayerName
+    let mut app = App::new();
+    app.add_plugins(PersistencePlugins(db.clone()));
+    app.world_mut().spawn((Health { value: 10 }, Position { x: 1.0, y: 1.0 }, PlayerName { name: "only".into() }));
+    app.world_mut().spawn((Health { value: 20 }, Position { x: 2.0, y: 2.0 }));
+    app.world_mut().spawn((Health { value: 30 }, Position { x: 3.0, y: 3.0 }));
+    app.update();
+    commit_sync(&mut app).expect("Initial commit failed");
+
+    // WHEN: run systems that first load, then use pass-through methods
+    let mut app2 = App::new();
+    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.insert_resource(PassThroughState::default());
+
+    // Enqueue load during Update
+    app2.add_systems(bevy::prelude::Update, system_load_hp);
+    // Run pass-through checks after deferred ops apply in PostUpdate
+    app2.add_systems(
+        bevy::prelude::PostUpdate,
+        system_pass_through_core.after(bevy_arangodb_core::PersistenceSystemSet::PreCommit),
+    );
+    app2.add_systems(
+        bevy::prelude::PostUpdate,
+        system_pass_through_single.after(system_pass_through_core),
+    );
+
+    // Single frame: Update + PostUpdate
+    app2.update();
+
+    // THEN: pass-through results match in-world state
+    let st = app2.world().resource::<PassThroughState>();
+    // Loaded three entities
+    assert_eq!(st.loaded_count, 3);
+
+    // get_many sum of first two health values should be 10 + 20 = 30 (order-dependent but deterministic for first two)
+    assert_eq!(st.got_sum_first_two, 30);
+
+    // Combinations of 3 choose 2 = 3
+    assert_eq!(st.combos_of_two, 3);
+
+    // single (filtered by PlayerName) should be the one with health 10
+    assert_eq!(st.single_health, 10);
+    assert_eq!(st.single_health_via_single, 10);
 }
