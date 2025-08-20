@@ -130,8 +130,8 @@ impl PersistenceQuery {
 
          let mut result = Vec::with_capacity(documents.len());
          if !documents.is_empty() {
-             // map existing GUIDs→entities
-             let mut existing = std::collections::HashMap::new();
+             // map existing GUIDs→entities (use bevy::utils::HashMap for perf)
+             let mut existing: bevy::platform::collections::HashMap<String, bevy::prelude::Entity> = bevy::platform::collections::HashMap::default();
              for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
                  existing.insert(guid.id().to_string(), e);
              }

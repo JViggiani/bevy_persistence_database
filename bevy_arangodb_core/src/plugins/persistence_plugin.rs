@@ -628,26 +628,24 @@ impl Plugin for PersistencePluginCore {
             let ptr: *mut World = app.world_mut() as *mut World;
             bevy::log::trace!("PersistencePluginCore: inserting initial ImmediateWorldPtr {:p}", ptr);
             if app.world().get_resource::<ImmediateWorldPtr>().is_none() {
-                app.insert_resource(ImmediateWorldPtr(ptr));
+                app.insert_resource(ImmediateWorldPtr::new(ptr));
             } else {
-                app.world_mut().resource_mut::<ImmediateWorldPtr>().0 = ptr;
+                app.world_mut().resource_mut::<ImmediateWorldPtr>().set(ptr);
             }
         }
 
-        // Publish a raw world pointer each frame so PersistentQuery can apply loads immediately.
+        // Publisher function for the raw world pointer
         fn publish_immediate_world_ptr(world: &mut World) {
             let ptr: *mut World = world as *mut World;
             if world.get_resource::<ImmediateWorldPtr>().is_none() {
-                world.insert_resource(ImmediateWorldPtr(ptr));
+                world.insert_resource(ImmediateWorldPtr::new(ptr));
             } else {
-                world.resource_mut::<ImmediateWorldPtr>().0 = ptr;
+                world.resource_mut::<ImmediateWorldPtr>().set(ptr);
             }
         }
-        // Run at the very start of the frame and again in PostUpdate to keep it fresh.
+
+        // Update pointer at the very start of the frame
         app.add_systems(First, publish_immediate_world_ptr);
-        app.add_systems(PreUpdate, publish_immediate_world_ptr);
-        app.add_systems(Update, publish_immediate_world_ptr);
-        app.add_systems(PostUpdate, publish_immediate_world_ptr);
 
         // Remove the process_queued_component_data system - we don't need it anymore
 
@@ -682,6 +680,7 @@ impl Plugin for PersistencePluginCore {
             (
                 (
                     apply_deferred_world_ops,
+                    publish_immediate_world_ptr,
                     auto_despawn_tracking_system,
                     handle_commit_trigger,
                     commit_event_listener,

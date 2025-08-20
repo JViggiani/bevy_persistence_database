@@ -48,7 +48,7 @@ fn test_query_lens_join_filtered_world_only() {
         let _: QueryLens<(&Health, &Position, &PlayerName), ()> = names.join_filtered(&mut *common);
 
         // Count results using a fresh QueryState over the current World state
-        let world: &World = unsafe { &*wp.0 };
+        let world: &World = wp.as_world();
         if let Some(mut qs) = QueryState::<(&Health, &Position, &PlayerName), ()>::try_new(world) {
             st.joined_count = qs.iter(world).count();
         } else {
@@ -101,7 +101,7 @@ fn test_join_between_two_persistent_queries_loaded_inline() {
         let _: QueryLens<(&Health, &Position, &PlayerName), ()> = names.join_filtered(&mut common);
 
         // Count intersection immediately via a fresh QueryState
-        let world: &World = unsafe { &*wp.0 };
+        let world: &World = wp.as_world();
         if let Some(mut qs) = QueryState::<(&Health, &Position, &PlayerName), ()>::try_new(world) {
             st.joined_count = qs.iter(world).count();
         } else {

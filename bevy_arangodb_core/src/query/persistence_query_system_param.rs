@@ -89,7 +89,28 @@ thread_local! {
 
 /// Unsafe world pointer published each frame to enable immediate application of DB results.
 #[derive(Resource, Clone, Copy)]
-pub struct ImmediateWorldPtr(pub *mut World);
+pub struct ImmediateWorldPtr(*mut World);
+
+impl ImmediateWorldPtr {
+    #[inline]
+    pub fn new(ptr: *mut World) -> Self {
+        Self(ptr)
+    }
+    #[inline]
+    pub fn set(&mut self, ptr: *mut World) {
+        self.0 = ptr;
+    }
+    #[inline]
+    pub fn as_world(&self) -> &World {
+        // Main thread only; pointer provided by exclusive systems
+        unsafe { &*self.0 }
+    }
+    #[inline]
+    pub fn as_world_mut(&self) -> &mut World {
+        // Main thread only; pointer provided by exclusive systems
+        unsafe { &mut *self.0 }
+    }
+}
 // Safety: used only on the main thread in exclusive systems; we uphold Bevy's aliasing rules.
 unsafe impl Send for ImmediateWorldPtr {}
 unsafe impl Sync for ImmediateWorldPtr {}
@@ -117,6 +138,89 @@ where
     F: ToPresenceSpec + FilterSupported,
     Q: QueryDataToComponents,
 {
+    // DRY: apply a single document to the world/session (immediate or deferred paths reuse this).
+    #[inline]
+    fn apply_one_document(
+        world: &mut World,
+        session: &mut PersistenceSession,
+        doc: &serde_json::Value,
+        comps: &[&'static str],
+        allow_overwrite: bool,
+        key_field: &str,
+    ) {
+        let Some(key) = doc.get(key_field).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+            bevy::log::trace!("apply_one_document: skipping doc missing key '{}'", key_field);
+            return;
+        };
+        let version = doc
+            .get(BEVY_PERSISTENCE_VERSION_FIELD)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+
+        // Try to find an existing entity by Guid first.
+        let existing_entity = world
+            .query::<(Entity, &Guid)>()
+            .iter(world)
+            .find(|(_, g)| g.id() == key)
+            .map(|(e, _)| e);
+
+        // Resolve or spawn the entity for this key
+        let (entity, existed) = if let Some(existing) = existing_entity {
+            if !session.entity_keys.contains_key(&existing) {
+                session.entity_keys.insert(existing, key.clone());
+            }
+            (existing, true)
+        } else if let Some((candidate, _)) = session
+            .entity_keys
+            .iter()
+            .find(|(_, k)| **k == key)
+            .map(|(e, k)| (*e, k.clone()))
+        {
+            if world.get_entity(candidate).is_ok() {
+                (candidate, true)
+            } else {
+                let e = world.spawn(Guid::new(key.clone())).id();
+                session.entity_keys.insert(e, key.clone());
+                (e, false)
+            }
+        } else {
+            let e = world.spawn(Guid::new(key.clone())).id();
+            session.entity_keys.insert(e, key.clone());
+            (e, false)
+        };
+
+        if existed && !allow_overwrite {
+            bevy::log::trace!("apply_one_document: skip overwrite entity={:?} key={}", entity, key);
+            return;
+        }
+
+        // Cache/refresh version
+        session
+            .version_manager
+            .set_version(VersionKey::Entity(key.clone()), version);
+
+        // Insert components
+        if !comps.is_empty() {
+            for &comp_name in comps {
+                if let Some(val) = doc.get(comp_name) {
+                    if let Some(deser) = session.component_deserializers.get(comp_name) {
+                        if let Err(e) = deser(world, entity, val.clone()) {
+                            bevy::log::error!("Failed to deserialize component {}: {}", comp_name, e);
+                        }
+                    }
+                }
+            }
+        } else {
+            for (registered_name, deser) in session.component_deserializers.iter() {
+                if let Some(val) = doc.get(registered_name) {
+                    if let Err(e) = deser(world, entity, val.clone()) {
+                        bevy::log::error!("Failed to deserialize component {}: {}", registered_name, e);
+                    }
+                }
+            }
+        }
+    }
+
     /// Internal: compute cache hash, execute spec, apply documents/resources, update cache.
     fn execute_combined_load(
         &mut self,
@@ -148,7 +252,7 @@ where
         }
         let query_hash = hasher.finish();
 
-        bevy::log::info!(
+        bevy::log::debug!(
             "PQ::execute_combined_load enter: type={} hash={:#x} cache_policy={:?} salts={:?}",
             std::any::type_name::<Q>(),
             query_hash,
@@ -160,7 +264,7 @@ where
             CachePolicy::ForceRefresh => true,
             CachePolicy::UseCache => !self.cache.contains(query_hash),
         };
-        bevy::log::info!(
+        bevy::log::debug!(
             "PQ::execute_combined_load: should_query_db={} presence_with={:?} presence_without={:?} fetch_only={:?} expr={:?}",
             should_query_db, presence_with, presence_without, fetch_only, value_filters
         );
@@ -175,8 +279,8 @@ where
                 return_full_docs: force_full_docs || (presence_with.is_empty() && presence_without.is_empty()),
             };
 
-            bevy::log::debug!(
-                "PQ::execute_combined_load: type={} salts={:?} presence_with={:?} presence_without={:?} fetch_only={:?} filter={:?} cache_policy={:?}",
+            bevy::log::trace!(
+                "PQ::execute_combined_load spec: type={} salts={:?} presence_with={:?} presence_without={:?} fetch_only={:?} filter={:?} cache_policy={:?}",
                 std::any::type_name::<Q>(),
                 hash_salts,
                 presence_with,
@@ -202,145 +306,26 @@ where
                         fetch_only.clone()
                     };
 
-                    // If we have an ImmediateWorldPtr, apply immediately; otherwise defer.
                     if let Some(ptr_res) = &self.world_ptr {
-                        // SAFETY: Pointer provided by an exclusive system this frame.
-                        let world: &mut World = unsafe { &mut *ptr_res.0 };
+                        let world: &mut World = ptr_res.as_world_mut();
 
-                        // Apply documents now (inline version of process_documents' inner closure)
                         let key_field = self.db.0.document_key_field();
                         for doc in documents {
-                            let Some(key) = doc.get(key_field).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
-                                bevy::log::debug!("PQ::immediate_apply: skipping doc missing key_field={}", key_field);
-                                continue;
-                            };
-                            let version = doc
-                                .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(1);
-                            let comps = comps_to_deser.clone();
-
-                            bevy::log::trace!(
-                                "PQ::immediate_apply: key={} version={} will_insert={:?}",
-                                key, version, comps
-                            );
-
-                            // First check if an entity with this Guid already exists in the world
-                            let existing_entity = world
-                                .query::<(Entity, &Guid)>()
-                                .iter(world)
-                                .find(|(_, g)| g.id() == key)
-                                .map(|(e, _)| e);
-
                             world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                                // Resolve or spawn the entity for this key
-                                let (entity, existed) = if let Some(existing) = existing_entity {
-                                    // Found an existing entity with this Guid - use it
-                                    if !session.entity_keys.contains_key(&existing) {
-                                        session.entity_keys.insert(existing, key.clone());
-                                    }
-                                    bevy::log::debug!("PQ::immediate_apply: reuse existing entity {:?} for key={}", existing, key);
-                                    (existing, true)
-                                } else if let Some((candidate, _)) = session
-                                    .entity_keys
-                                    .iter()
-                                    .find(|(_, k)| **k == key)
-                                    .map(|(e, k)| (*e, k.clone()))
-                                {
-                                    // Session has a mapping - verify it's still valid
-                                    let ok = world.get_entity(candidate).is_ok();
-                                    bevy::log::trace!(
-                                        "PQ::immediate_apply: found mapping to {:?}, alive={}",
-                                        candidate, ok
-                                    );
-                                    if ok {
-                                        (candidate, true)
-                                    } else {
-                                        let e = world.spawn(Guid::new(key.clone())).id();
-                                        session.entity_keys.insert(e, key.clone());
-                                        bevy::log::debug!("PQ::immediate_apply: mapping stale; spawned new entity {:?} for key={}", e, key);
-                                        (e, false)
-                                    }
-                                } else {
-                                    // No existing entity found - spawn a new one
-                                    let e = world.spawn(Guid::new(key.clone())).id();
-                                    session.entity_keys.insert(e, key.clone());
-                                    bevy::log::debug!("PQ::immediate_apply: spawned new entity {:?} for key={}", e, key);
-                                    (e, false)
-                                };
-
-                                if existed && !allow_overwrite {
-                                    bevy::log::trace!(
-                                        "PQ::immediate_apply: skip overwrite entity={:?} key={}",
-                                        entity, key
-                                    );
-                                    return;
-                                }
-
-                                // Cache/refresh version
-                                session
-                                    .version_manager
-                                    .set_version(VersionKey::Entity(key.clone()), version);
-
-                                // Insert components
-                                if !comps.is_empty() {
-                                    for &comp_name in &comps {
-                                        if let Some(val) = doc.get(comp_name) {
-                                            if let Some(deser) = session.component_deserializers.get(comp_name) {
-                                                if let Err(e) = deser(world, entity, val.clone()) {
-                                                    bevy::log::error!("Failed to deserialize component {}: {}", comp_name, e);
-                                                } else {
-                                                    bevy::log::trace!(
-                                                        "PQ::immediate_apply: inserted {} on entity={:?}",
-                                                        comp_name, entity
-                                                    );
-                                                }
-                                            } else {
-                                                bevy::log::debug!(
-                                                     "PQ::immediate_apply: no deserializer registered for {}",
-                                                     comp_name
-                                                 );
-                                            }
-                                        } else {
-                                            bevy::log::trace!(
-                                                "PQ::immediate_apply: component {} missing in doc key={}",
-                                                comp_name, key
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    for (registered_name, deser) in session.component_deserializers.iter() {
-                                        if let Some(val) = doc.get(registered_name) {
-                                            if let Err(e) = deser(world, entity, val.clone()) {
-                                                bevy::log::error!("Failed to deserialize component {}: {}", registered_name, e);
-                                            } else {
-                                                bevy::log::trace!(
-                                                    "PQ::immediate_apply: inserted {} on entity={:?}",
-                                                    registered_name, entity
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
+                                Self::apply_one_document(world, &mut session, &doc, &comps_to_deser, allow_overwrite, key_field);
                             });
                         }
 
-                        // After inline mutations, ensure any internal buffers are applied.
-                        // This is a no-op if no deferred commands were queued, but safe.
-                        bevy::log::debug!("PQ::immediate_apply: world.flush()");
+                        bevy::log::trace!("PQ::immediate_apply: world.flush()");
                         world.flush();
 
-                        // After immediate application, warm-up using a fresh QueryState so counts
-                        // reflect the current World this tick (SystemParam Query won’t refresh mid-system).
+                        // Warm-up current archetypes count for diagnostics
                         let lhs_cnt = {
                             let mut qs: bevy::ecs::query::QueryState<(Entity, Q), F> =
                                 bevy::ecs::query::QueryState::new(world);
                             qs.iter(&*world).count()
                         };
-                        bevy::log::debug!(
-                            "PQ::immediate_apply: warm-up lhs_iter={} (rhs logged in join_filtered)",
-                            lhs_cnt
-                        );
+                        bevy::log::trace!("PQ::immediate_apply: warm-up lhs_iter={}", lhs_cnt);
 
                         // Fetch resources immediately
                         world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
@@ -354,7 +339,6 @@ where
                         });
                     } else {
                         bevy::log::trace!("PQ::execute_combined_load: deferring {} docs", documents.len());
-                        // Fallback: defer mutations to PostUpdate
                         self.process_documents(documents, &comps_to_deser, allow_overwrite);
 
                         // Also fetch resources alongside any query (deferred)
@@ -370,7 +354,7 @@ where
                         }));
                     }
 
-                    bevy::log::debug!("PQ::execute_combined_load: inserting cache key {:#x}", query_hash);
+                    bevy::log::trace!("PQ::execute_combined_load: caching hash {:#x}", query_hash);
                     self.cache.insert(query_hash);
                 }
                 Err(e) => {
@@ -378,7 +362,7 @@ where
                 }
             }
         } else {
-            bevy::log::debug!("Skipping DB query - using cached results for hash={:#x}", query_hash);
+            bevy::log::trace!("Skipping DB query - using cached results for hash={:#x}", query_hash);
         }
     }
 
@@ -455,7 +439,7 @@ where
     ) {
         let key_field = self.db.0.document_key_field();
         let explicit_components = comp_names.to_vec();
-        bevy::log::debug!(
+        bevy::log::trace!(
             "PQ::process_documents: deferring {} docs; comps={:?}; allow_overwrite={}",
             documents.len(),
             explicit_components,
@@ -463,99 +447,15 @@ where
         );
 
         for doc in documents {
-            let key = match doc.get(key_field).and_then(|v| v.as_str()) {
-                Some(k) => k.to_string(),
-                None => continue,
-            };
-            let version = doc
-                .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(1);
-
             let doc_clone = doc.clone();
             let comps = explicit_components.clone();
             let allow = allow_overwrite;
+            let key_field = key_field.to_string();
 
             self.ops.push(Box::new(move |world: &mut World| {
-                bevy::log::debug!("PQ::process_documents/op: applying key={}", key);
+                bevy::log::trace!("PQ::process_documents/op: applying deferred document");
                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                    // Resolve or spawn the entity for this key
-                    let (entity, existed) = if let Some((candidate, _)) = session
-                        .entity_keys
-                        .iter()
-                        .find(|(_, k)| **k == key)
-                        .map(|(e, k)| (*e, k.clone()))
-                    {
-                        if world.get_entity(candidate).is_ok() {
-                            (candidate, true)
-                        } else {
-                            // Stale mapping: replace with a new entity for this key.
-                            let e = world.spawn(Guid::new(key.clone())).id();
-                            session.entity_keys.insert(e, key.clone());
-                            bevy::log::debug!("PQ::process_documents/op: mapping stale; spawned new entity {:?} for key={}", e, key);
-                            (e, false)
-                        }
-                    } else {
-                        // No session mapping: try to find an existing entity by Guid and reuse it.
-                        if let Some((existing, _)) = world
-                            .query::<(bevy::prelude::Entity, &Guid)>()
-                            .iter(world)
-                            .find(|(_, g)| g.id() == key)
-                        {
-                            session.entity_keys.insert(existing, key.clone());
-                            (existing, true)
-                        } else {
-                            let e = world.spawn(Guid::new(key.clone())).id();
-                            session.entity_keys.insert(e, key.clone());
-                            bevy::log::debug!("PQ::process_documents/op: spawned new entity {:?} for key={}", e, key);
-                            (e, false)
-                        }
-                    };
-
-                    // If the entity already exists and we're not force-refreshing (or presence-merge), do nothing.
-                    if existed && !allow {
-                        bevy::log::trace!(
-                            "Skipping update for existing entity {} (no overwrite allowed)",
-                            key
-                        );
-                        return;
-                    }
-
-                    // Cache version (for new entities or when forcing refresh / presence-merge)
-                    session
-                        .version_manager
-                        .set_version(VersionKey::Entity(key.clone()), version);
-
-                    // Insert components
-                    if !comps.is_empty() {
-                        for &comp_name in &comps {
-                            // When forcing refresh or presence-merge, we overwrite; otherwise only for brand-new entities
-                            if let Some(val) = doc_clone.get(comp_name) {
-                                if let Some(deser) = session.component_deserializers.get(comp_name)
-                                {
-                                    if let Err(e) = deser(world, entity, val.clone()) {
-                                        bevy::log::error!(
-                                            "Failed to deserialize component {}: {}",
-                                            comp_name,
-                                            e
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        for (registered_name, deser) in session.component_deserializers.iter() {
-                            if let Some(val) = doc_clone.get(registered_name) {
-                                if let Err(e) = deser(world, entity, val.clone()) {
-                                    bevy::log::error!(
-                                        "Failed to deserialize component {}: {}",
-                                        registered_name,
-                                        e
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    Self::apply_one_document(world, &mut session, &doc_clone, &comps, allow, &key_field);
                 });
             }));
         }
@@ -639,7 +539,7 @@ where
         NewD: bevy::ecs::query::QueryData,
         NewF: bevy::ecs::query::QueryFilter,
     {
-        bevy::log::info!(
+        bevy::log::debug!(
             "PQ::join_filtered enter: lhs_type={} rhs_type={}",
             std::any::type_name::<Q>(),
             std::any::type_name::<Q2>(),
@@ -702,7 +602,7 @@ where
 
         // For joined inline loads, always bypass cache to ensure materialization happens now.
         let cache_policy: CachePolicy = CachePolicy::ForceRefresh;
-        bevy::log::debug!("PQ::join_filtered: forcing DB refresh for joined load");
+        bevy::log::trace!("PQ::join_filtered: forcing DB refresh for joined load");
 
         // Single DB load on the LHS with full docs; this materializes both sides' components.
         self.execute_combined_load(
@@ -717,7 +617,7 @@ where
 
         // Warm-up using fresh QueryStates so counts reflect immediate inserts this tick.
         if let Some(ptr_res) = &self.world_ptr {
-            let world: &World = unsafe { &*ptr_res.0 };
+            let world: &World = ptr_res.as_world();
             let (lhs_cnt, rhs_cnt, joined_cnt) = {
                 if let (Some(mut lhs_state), Some(mut rhs_state)) = (
                     bevy::ecs::query::QueryState::<(Entity, Q), F>::try_new(world),
@@ -733,7 +633,7 @@ where
                     (0, 0, 0)
                 }
             };
-            bevy::log::debug!(
+            bevy::log::trace!(
                 "PQ::join_filtered warm-up: lhs_iter={} rhs_iter={} joined_preview={}",
                 lhs_cnt, rhs_cnt, joined_cnt
             );
