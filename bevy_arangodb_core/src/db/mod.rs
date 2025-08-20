@@ -1,4 +1,5 @@
 pub mod connection;
+mod shared;
 #[cfg(feature = "arango")]
 mod arango_connection;
 #[cfg(feature = "postgres")]

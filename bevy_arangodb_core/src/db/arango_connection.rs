@@ -16,6 +16,25 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use once_cell::sync::Lazy;
+use crate::db::shared::{GroupedOperations, check_operation_success, OperationType};
+
+// Local helper to pull out the version field
+fn extract_version(doc: &Value, key: &str) -> Result<u64, PersistenceError> {
+    doc.get(BEVY_PERSISTENCE_VERSION_FIELD)
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| {
+            PersistenceError::new(format!(
+                "Document '{}' is missing version field '{}'",
+                key, BEVY_PERSISTENCE_VERSION_FIELD
+            ))
+        })
+}
+
+// Local constants and enums to avoid magic strings
+const JSON_KEY_FIELD: &str = "key";
+const AQL_BIND_DOCS: &str = "docs";
+const AQL_BIND_PATCHES: &str = "patches";
+const AQL_BIND_DELETES: &str = "deletes";
 
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
@@ -294,10 +313,7 @@ impl DatabaseConnection for ArangoDbConnection {
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
             match col.document::<Value>(&key).await {
                 Ok(doc) => {
-                    let version = doc.document
-                        .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                        .and_then(|v| v.as_u64())
-                        .ok_or_else(|| PersistenceError::new(format!("Document '{}' is missing version field '{}'", key, BEVY_PERSISTENCE_VERSION_FIELD)))?;
+                    let version = extract_version(&doc.document, &key)?;
                     Ok(Some((doc.document, version)))
                 }
                 Err(e) => {
@@ -357,10 +373,7 @@ impl DatabaseConnection for ArangoDbConnection {
             // A document may not exist, so we handle the error.
             match col.document::<Value>(&res_key).await {
                 Ok(doc) => {
-                    let version = doc.document
-                        .get(BEVY_PERSISTENCE_VERSION_FIELD)
-                        .and_then(|v| v.as_u64())
-                        .ok_or_else(|| PersistenceError::new(format!("Resource '{}' is missing version field '{}'", res_key, BEVY_PERSISTENCE_VERSION_FIELD)))?;
+                    let version = extract_version(&doc.document, &res_key)?;
                     Ok(Some((doc.document, version)))
                 }
                 Err(e) => {
@@ -411,6 +424,8 @@ impl DatabaseConnection for ArangoDbConnection {
         operations: Vec<TransactionOperation>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
         let db = self.db.clone();
+        // The DB-level key attribute (e.g., `_key`) for returns
+        let key_attr = self.document_key_field();
         async move {
             let collections = TransactionCollections::builder()
                 .write(vec![
@@ -427,65 +442,22 @@ impl DatabaseConnection for ArangoDbConnection {
                 .await
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
 
-            // Group operations by kind/collection
-            let mut ent_creates: Vec<Value> = Vec::new();
-            let mut ent_updates: Vec<Value> = Vec::new(); // objects { key, expected, patch }
-            let mut ent_deletes: Vec<Value> = Vec::new(); // objects { key, expected }
-
-            let mut res_creates: Vec<Value> = Vec::new();
-            let mut res_updates: Vec<Value> = Vec::new(); // objects { key, expected, patch }
-            let mut res_deletes: Vec<Value> = Vec::new(); // objects { key, expected }
-
-            for op in operations {
-                match op {
-                    TransactionOperation::CreateDocument { collection, data } => {
-                        match collection {
-                            Collection::Entities => ent_creates.push(data),
-                            Collection::Resources => res_creates.push(data),
-                        }
-                    }
-                    TransactionOperation::UpdateDocument {
-                        collection,
-                        key,
-                        expected_current_version,
-                        patch,
-                    } => {
-                        let obj = serde_json::json!({
-                            "key": key,
-                            "expected": expected_current_version,
-                            "patch": patch
-                        });
-                        match collection {
-                            Collection::Entities => ent_updates.push(obj),
-                            Collection::Resources => res_updates.push(obj),
-                        }
-                    }
-                    TransactionOperation::DeleteDocument {
-                        collection,
-                        key,
-                        expected_current_version,
-                    } => {
-                        let obj = serde_json::json!({
-                            "key": key,
-                            "expected": expected_current_version,
-                        });
-                        match collection {
-                            Collection::Entities => ent_deletes.push(obj),
-                            Collection::Resources => res_deletes.push(obj),
-                        }
-                    }
-                }
-            }
-
+            // Use "key" as the JSON property in the grouped operations to match AQL `p.key`
+            let groups = GroupedOperations::from_operations(operations, JSON_KEY_FIELD);
             let mut new_keys: Vec<String> = Vec::new();
 
-            // 1) Entity creates (RETURN NEW._key)
-            if !ent_creates.is_empty() {
-                let aql = "FOR d IN @docs INSERT d INTO entities RETURN NEW._key";
+            // 1) Entity creates
+            if !groups.entity_creates.is_empty() {
+                let aql = format!(
+                    "FOR d IN @{bind} INSERT d INTO {col} RETURN NEW.`{key}`",
+                    bind = AQL_BIND_DOCS,
+                    col = Collection::Entities,
+                    key = key_attr
+                );
                 let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert("docs".into(), Value::Array(ent_creates));
+                bind_vars.insert(AQL_BIND_DOCS.into(), Value::Array(groups.entity_creates.clone()));
                 let query = AqlQuery::builder()
-                    .query(aql)
+                    .query(&aql)
                     .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
                     .build();
                 let keys: Vec<String> = trx
@@ -495,22 +467,22 @@ impl DatabaseConnection for ArangoDbConnection {
                 new_keys.extend(keys);
             }
 
-            // 2) Entity updates (detect conflicts)
-            if !ent_updates.is_empty() {
-                let requested: Vec<String> = ent_updates
-                    .iter()
-                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
-                    .collect();
+            // 2) Entity updates
+            if !groups.entity_updates.is_empty() {
+                let requested = groups.extract_keys(&groups.entity_updates, JSON_KEY_FIELD);
                 let aql = format!(
-                    "FOR p IN @patches
-                       LET doc = DOCUMENT('entities', p.key)
+                    "FOR p IN @{patches}
+                       LET doc = DOCUMENT('{col}', p.{key})
                        FILTER doc != null AND doc.{ver} == p.expected
-                       UPDATE doc WITH p.patch IN entities OPTIONS {{ mergeObjects: true }}
-                       RETURN p.key",
+                       UPDATE doc WITH p.patch IN {col} OPTIONS {{ mergeObjects: true }}
+                       RETURN p.{key}",
+                    patches = AQL_BIND_PATCHES,
+                    col = Collection::Entities,
+                    key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD
                 );
                 let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert("patches".into(), Value::Array(ent_updates));
+                bind_vars.insert(AQL_BIND_PATCHES.into(), Value::Array(groups.entity_updates.clone()));
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
@@ -519,35 +491,26 @@ impl DatabaseConnection for ArangoDbConnection {
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                if updated.len() != requested.len() {
-                    // Find first missing key and return Conflict
-                    if let Some(conflict_key) = requested
-                        .into_iter()
-                        .find(|k| !updated.iter().any(|u| u == k))
-                    {
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        return Err(PersistenceError::new("Update conflict (entities)"));
-                    }
-                }
+                let col_name = Collection::Entities.to_string();
+                check_operation_success(requested, updated, &OperationType::Update, col_name.as_str())?;
             }
 
-            // 3) Entity deletes (detect conflicts)
-            if !ent_deletes.is_empty() {
-                let requested: Vec<String> = ent_deletes
-                    .iter()
-                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
-                    .collect();
+            // 3) Entity deletes
+            if !groups.entity_deletes.is_empty() {
+                let requested = groups.extract_keys(&groups.entity_deletes, JSON_KEY_FIELD);
                 let aql = format!(
-                    "FOR p IN @deletes
-                       LET doc = DOCUMENT('entities', p.key)
+                    "FOR p IN @{deletes}
+                       LET doc = DOCUMENT('{col}', p.{key})
                        FILTER doc != null AND doc.{ver} == p.expected
-                       REMOVE doc IN entities
-                       RETURN p.key",
+                       REMOVE doc IN {col}
+                       RETURN p.{key}",
+                    deletes = AQL_BIND_DELETES,
+                    col = Collection::Entities,
+                    key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD
                 );
                 let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert("deletes".into(), Value::Array(ent_deletes));
+                bind_vars.insert(AQL_BIND_DELETES.into(), Value::Array(groups.entity_deletes.clone()));
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
@@ -556,25 +519,21 @@ impl DatabaseConnection for ArangoDbConnection {
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                if removed.len() != requested.len() {
-                    if let Some(conflict_key) = requested
-                        .into_iter()
-                        .find(|k| !removed.iter().any(|u| u == k))
-                    {
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        return Err(PersistenceError::new("Delete conflict (entities)"));
-                    }
-                }
+                let col_name = Collection::Entities.to_string();
+                check_operation_success(requested, removed, &OperationType::Delete, col_name.as_str())?;
             }
 
-            // 4) Resource creates (no keys returned)
-            if !res_creates.is_empty() {
-                let aql = "FOR d IN @docs INSERT d INTO resources";
+            // 4) Resource creates
+            if !groups.resource_creates.is_empty() {
+                let aql = format!(
+                    "FOR d IN @{bind} INSERT d INTO {col}",
+                    bind = AQL_BIND_DOCS,
+                    col = Collection::Resources
+                );
                 let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert("docs".into(), Value::Array(res_creates));
+                bind_vars.insert(AQL_BIND_DOCS.into(), Value::Array(groups.resource_creates.clone()));
                 let query = AqlQuery::builder()
-                    .query(aql)
+                    .query(&aql)
                     .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
                     .build();
                 let _: Vec<Value> = trx
@@ -583,22 +542,22 @@ impl DatabaseConnection for ArangoDbConnection {
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
             }
 
-            // 5) Resource updates (detect conflicts)
-            if !res_updates.is_empty() {
-                let requested: Vec<String> = res_updates
-                    .iter()
-                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
-                    .collect();
+            // 5) Resource updates
+            if !groups.resource_updates.is_empty() {
+                let requested = groups.extract_keys(&groups.resource_updates, JSON_KEY_FIELD);
                 let aql = format!(
-                    "FOR p IN @patches
-                       LET doc = DOCUMENT('resources', p.key)
+                    "FOR p IN @{patches}
+                       LET doc = DOCUMENT('{col}', p.{key})
                        FILTER doc != null AND doc.{ver} == p.expected
-                       UPDATE doc WITH p.patch IN resources OPTIONS {{ mergeObjects: true }}
-                       RETURN p.key",
+                       UPDATE doc WITH p.patch IN {col} OPTIONS {{ mergeObjects: true }}
+                       RETURN p.{key}",
+                    patches = AQL_BIND_PATCHES,
+                    col = Collection::Resources,
+                    key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD
                 );
                 let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert("patches".into(), Value::Array(res_updates));
+                bind_vars.insert(AQL_BIND_PATCHES.into(), Value::Array(groups.resource_updates.clone()));
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
@@ -607,34 +566,26 @@ impl DatabaseConnection for ArangoDbConnection {
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                if updated.len() != requested.len() {
-                    if let Some(conflict_key) = requested
-                        .into_iter()
-                        .find(|k| !updated.iter().any(|u| u == k))
-                    {
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        return Err(PersistenceError::new("Update conflict (resources)"));
-                    }
-                }
+                let col_name = Collection::Resources.to_string();
+                check_operation_success(requested, updated, &OperationType::Update, col_name.as_str())?;
             }
 
-            // 6) Resource deletes (rare, but support and detect conflicts)
-            if !res_deletes.is_empty() {
-                let requested: Vec<String> = res_deletes
-                    .iter()
-                    .filter_map(|v| v.get("key").and_then(|k| k.as_str()).map(|s| s.to_string()))
-                    .collect();
+            // 6) Resource deletes
+            if !groups.resource_deletes.is_empty() {
+                let requested = groups.extract_keys(&groups.resource_deletes, JSON_KEY_FIELD);
                 let aql = format!(
-                    "FOR p IN @deletes
-                       LET doc = DOCUMENT('resources', p.key)
+                    "FOR p IN @{deletes}
+                       LET doc = DOCUMENT('{col}', p.{key})
                        FILTER doc != null AND doc.{ver} == p.expected
-                       REMOVE doc IN resources
-                       RETURN p.key",
+                       REMOVE doc IN {col}
+                       RETURN p.{key}",
+                    deletes = AQL_BIND_DELETES,
+                    col = Collection::Resources,
+                    key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD
                 );
                 let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert("deletes".into(), Value::Array(res_deletes));
+                bind_vars.insert(AQL_BIND_DELETES.into(), Value::Array(groups.resource_deletes.clone()));
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
@@ -643,16 +594,8 @@ impl DatabaseConnection for ArangoDbConnection {
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                if removed.len() != requested.len() {
-                    if let Some(conflict_key) = requested
-                        .into_iter()
-                        .find(|k| !removed.iter().any(|u| u == k))
-                    {
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        return Err(PersistenceError::new("Delete conflict (resources)"));
-                    }
-                }
+                let col_name = Collection::Resources.to_string();
+                check_operation_success(requested, removed, &OperationType::Delete, col_name.as_str())?;
             }
 
             trx.commit()

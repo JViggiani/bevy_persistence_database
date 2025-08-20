@@ -4,9 +4,10 @@
 //!   resources(id text pk, bevy_persistence_version bigint not null, doc jsonb not null)
 
 use crate::db::connection::{
-    Collection, DatabaseConnection, PersistenceError, TransactionOperation,
+    DatabaseConnection, PersistenceError, TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD,
 };
+use crate::db::shared::{GroupedOperations, OperationType, check_operation_success};
 use crate::query::filter_expression::{BinaryOperator, FilterExpression};
 use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use bevy::log::{debug, error, info};
@@ -18,6 +19,11 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_postgres::{Client, Config, NoTls};
 use tokio_postgres::types::ToSql;
+
+// Local constants to avoid magic strings
+const KEY_COL: &str = "id";
+const ENTITIES_TABLE: &str = "entities";
+const RESOURCES_TABLE: &str = "resources";
 
 // Typed parameter carrier for filter translation
 enum SqlParam {
@@ -216,7 +222,7 @@ impl PostgresDbConnection {
                     args.push(p);
                     format!("${}", idx)
                 }
-                FilterExpression::DocumentKey => "id".to_string(),
+                FilterExpression::DocumentKey => KEY_COL.to_string(),
                 FilterExpression::Field { component_name, field_name } => field_path(component_name, field_name),
                 FilterExpression::BinaryOperator { op, lhs, rhs } => {
                     let op_str = match op {
@@ -312,7 +318,7 @@ impl PostgresDbConnection {
 
 impl DatabaseConnection for PostgresDbConnection {
     fn document_key_field(&self) -> &'static str {
-        "id"
+        KEY_COL
     }
 
     fn execute_keys(
@@ -320,7 +326,7 @@ impl DatabaseConnection for PostgresDbConnection {
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
         let (where_sql, params) = Self::build_where(spec);
-        let sql = format!("SELECT id FROM entities WHERE {}", where_sql);
+        let sql = format!("SELECT {k} FROM {t} WHERE {w}", k = KEY_COL, t = ENTITIES_TABLE, w = where_sql);
         let client = self.client.clone();
         bevy::log::debug!("[pg] execute_keys: {}; params_len={}", sql, params.len());
         async move {
@@ -354,18 +360,19 @@ impl DatabaseConnection for PostgresDbConnection {
         // - Else: return just id + version.
         let sql = if spec.return_full_docs {
             format!(
-                "SELECT (doc || jsonb_build_object('id', id, '{}', bevy_persistence_version)) AS doc \
-                 FROM entities WHERE {}",
-                BEVY_PERSISTENCE_VERSION_FIELD,
-                where_sql
+                "SELECT (doc || jsonb_build_object('{k}', {k}, '{ver}', bevy_persistence_version)) AS doc \
+                 FROM {t} WHERE {w}",
+                k = KEY_COL,
+                ver = BEVY_PERSISTENCE_VERSION_FIELD,
+                t = ENTITIES_TABLE,
+                w = where_sql
             )
         } else if !spec.fetch_only.is_empty() {
-            // Build a single jsonb_build_object with CASE fields, then strip nulls
             fn q(s: &str) -> String { s.replace('\'', "''") }
             let mut proj = format!(
-                // Keep jsonb_build_object OPEN here (no closing ')')
-                "SELECT jsonb_strip_nulls(jsonb_build_object('id', id, '{}', bevy_persistence_version",
-                BEVY_PERSISTENCE_VERSION_FIELD
+                "SELECT jsonb_strip_nulls(jsonb_build_object('{k}', {k}, '{ver}', bevy_persistence_version",
+                k = KEY_COL,
+                ver = BEVY_PERSISTENCE_VERSION_FIELD
             );
             for name in &spec.fetch_only {
                 let key = q(name);
@@ -374,16 +381,16 @@ impl DatabaseConnection for PostgresDbConnection {
                     k = key
                 ));
             }
-            // Now close jsonb_build_object and jsonb_strip_nulls
-            proj.push_str(")) AS doc FROM entities WHERE ");
-            proj.push_str(&where_sql);
+            proj.push_str(&format!(")) AS doc FROM {t} WHERE {w}", t = ENTITIES_TABLE, w = where_sql));
             proj
         } else {
             format!(
-                "SELECT jsonb_build_object('id', id, '{}', bevy_persistence_version) AS doc \
-                 FROM entities WHERE {}",
-                BEVY_PERSISTENCE_VERSION_FIELD,
-                where_sql
+                "SELECT jsonb_build_object('{k}', {k}, '{ver}', bevy_persistence_version) AS doc \
+                 FROM {t} WHERE {w}",
+                k = KEY_COL,
+                ver = BEVY_PERSISTENCE_VERSION_FIELD,
+                t = ENTITIES_TABLE,
+                w = where_sql
             )
         };
 
@@ -431,64 +438,21 @@ impl DatabaseConnection for PostgresDbConnection {
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg START TRANSACTION failed: {}", e)))?;
 
-            // Group ops
-            let mut ent_creates: Vec<serde_json::Value> = Vec::new();
-            let mut ent_updates: Vec<serde_json::Value> = Vec::new(); // { id, expected, patch }
-            let mut ent_deletes: Vec<serde_json::Value> = Vec::new(); // { id, expected }
-
-            let mut res_creates: Vec<serde_json::Value> = Vec::new();
-            let mut res_updates: Vec<serde_json::Value> = Vec::new();
-            let mut res_deletes: Vec<serde_json::Value> = Vec::new();
-
-            for op in operations {
-                match op {
-                    TransactionOperation::CreateDocument { collection, data } => match collection {
-                        Collection::Entities => ent_creates.push(data),
-                        Collection::Resources => res_creates.push(data),
-                    },
-                    TransactionOperation::UpdateDocument {
-                        collection,
-                        key,
-                        expected_current_version,
-                        patch,
-                    } => {
-                        let rec = serde_json::json!({
-                            "id": key,
-                            "expected": expected_current_version,
-                            "patch": patch
-                        });
-                        match collection {
-                            Collection::Entities => ent_updates.push(rec),
-                            Collection::Resources => res_updates.push(rec),
-                        }
-                    }
-                    TransactionOperation::DeleteDocument {
-                        collection,
-                        key,
-                        expected_current_version,
-                    } => {
-                        let rec = serde_json::json!({ "id": key, "expected": expected_current_version });
-                        match collection {
-                            Collection::Entities => ent_deletes.push(rec),
-                            Collection::Resources => res_deletes.push(rec),
-                        }
-                    }
-                }
-            }
-
+            let groups = GroupedOperations::from_operations(operations, KEY_COL);
             let mut new_entity_ids: Vec<String> = Vec::new();
 
-            // 1) Entity creates: generate IDs client-side, single INSERT FROM jsonb array
-            if !ent_creates.is_empty() {
+            // 1) Entity creates
+            if !groups.entity_creates.is_empty() {
                 use uuid::Uuid;
-                let ids: Vec<String> = ent_creates
+                let ids: Vec<String> = groups.entity_creates
                     .iter()
                     .map(|_| Uuid::new_v4().to_string())
                     .collect();
 
                 let ver_field = BEVY_PERSISTENCE_VERSION_FIELD;
-                let input_docs: Vec<serde_json::Value> = ent_creates
-                    .into_iter()
+                let input_docs: Vec<serde_json::Value> = groups.entity_creates
+                    .iter()
+                    .cloned()
                     .zip(ids.iter())
                     .map(|(doc, id)| {
                         let ver = doc.get(ver_field).and_then(|v| v.as_i64()).unwrap_or(1);
@@ -497,110 +461,95 @@ impl DatabaseConnection for PostgresDbConnection {
                     .collect();
                 let input_json = serde_json::Value::Array(input_docs);
 
-                let sql = r#"
+                let sql = format!(r#"
                     WITH input AS (
-                        SELECT (x->>'id')::text      AS id,
+                        SELECT (x->>'{k}')::text      AS {k},
                                (x->>'ver')::bigint    AS ver,
                                (x->'doc')::jsonb      AS doc
                         FROM jsonb_array_elements($1::jsonb) AS x
                     )
-                    INSERT INTO entities (id, bevy_persistence_version, doc)
-                    SELECT id, ver, doc FROM input
-                "#;
+                    INSERT INTO {t} ({k}, bevy_persistence_version, doc)
+                    SELECT {k}, ver, doc FROM input
+                "#, k = KEY_COL, t = ENTITIES_TABLE);
 
-                tx.execute(sql, &[&input_json])
+                tx.execute(&sql, &[&input_json])
                     .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch insert (entities) failed: {}", e)))?;
+                    .map_err(|e| PersistenceError::new(format!("pg batch insert ({}) failed: {}", ENTITIES_TABLE, e)))?;
 
                 new_entity_ids = ids;
             }
 
-            // 2) Entity updates: optimistic check, merge JSONB, return ids updated
-            if !ent_updates.is_empty() {
-                let requested: Vec<String> = ent_updates
-                    .iter()
-                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                    .collect();
+            // 2) Entity updates
+            if !groups.entity_updates.is_empty() {
+                let requested = groups.extract_keys(&groups.entity_updates, KEY_COL);
 
-                let upd_sql = r#"
+                let upd_sql = format!(r#"
                     WITH input AS (
-                        SELECT (x->>'id')::text        AS id,
+                        SELECT (x->>'{k}')::text        AS {k},
                                (x->>'expected')::bigint AS expected,
                                (x->'patch')::jsonb      AS patch
                         FROM jsonb_array_elements($1::jsonb) AS x
                     ),
                     updated AS (
-                        UPDATE entities e
+                        UPDATE {t} e
                         SET doc = e.doc || i.patch,
                             bevy_persistence_version = i.expected + 1
                         FROM input i
-                        WHERE e.id = i.id AND e.bevy_persistence_version = i.expected
-                        RETURNING e.id
+                        WHERE e.{k} = i.{k} AND e.bevy_persistence_version = i.expected
+                        RETURNING e.{k}
                     )
-                    SELECT id FROM updated
-                "#;
+                    SELECT {k} FROM updated
+                "#, k = KEY_COL, t = ENTITIES_TABLE);
 
                 let rows = tx
-                    .query(upd_sql, &[&serde_json::Value::Array(ent_updates.clone())])
+                    .query(&upd_sql, &[&serde_json::Value::Array(groups.entity_updates.clone())])
                     .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch update (entities) failed: {}", e)))?;
+                    .map_err(|e| PersistenceError::new(format!("pg batch update ({}) failed: {}", ENTITIES_TABLE, e)))?;
                 let updated: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
 
-                if updated.len() != requested.len() {
-                    if let Some(conflict_key) = requested.into_iter().find(|k| !updated.iter().any(|u| u == k)) {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::new("Update conflict (entities)"));
-                    }
+                if let Err(e) = check_operation_success(requested, updated, &OperationType::Update, ENTITIES_TABLE) {
+                    let _ = tx.rollback().await;
+                    return Err(e);
                 }
             }
 
-            // 3) Entity deletes: optimistic check
-            if !ent_deletes.is_empty() {
-                let requested: Vec<String> = ent_deletes
-                    .iter()
-                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                    .collect();
+            // 3) Entity deletes
+            if !groups.entity_deletes.is_empty() {
+                let requested = groups.extract_keys(&groups.entity_deletes, KEY_COL);
 
-                let del_sql = r#"
+                let del_sql = format!(r#"
                     WITH input AS (
-                        SELECT (x->>'id')::text        AS id,
+                        SELECT (x->>'{k}')::text        AS {k},
                                (x->>'expected')::bigint AS expected
                         FROM jsonb_array_elements($1::jsonb) AS x
                     ),
                     deleted AS (
-                        DELETE FROM entities e
+                        DELETE FROM {t} e
                         USING input i
-                        WHERE e.id = i.id AND e.bevy_persistence_version = i.expected
-                        RETURNING e.id
+                        WHERE e.{k} = i.{k} AND e.bevy_persistence_version = i.expected
+                        RETURNING e.{k}
                     )
-                    SELECT id FROM deleted
-                "#;
+                    SELECT {k} FROM deleted
+                "#, k = KEY_COL, t = ENTITIES_TABLE);
 
                 let rows = tx
-                    .query(del_sql, &[&serde_json::Value::Array(ent_deletes.clone())])
+                    .query(&del_sql, &[&serde_json::Value::Array(groups.entity_deletes.clone())])
                     .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch delete (entities) failed: {}", e)))?;
+                    .map_err(|e| PersistenceError::new(format!("pg batch delete ({}) failed: {}", ENTITIES_TABLE, e)))?;
                 let deleted: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
 
-                if deleted.len() != requested.len() {
-                    if let Some(conflict_key) = requested.into_iter().find(|k| !deleted.iter().any(|u| u == k)) {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::new("Delete conflict (entities)"));
-                    }
+                if let Err(e) = check_operation_success(requested, deleted, &OperationType::Delete, ENTITIES_TABLE) {
+                    let _ = tx.rollback().await;
+                    return Err(e);
                 }
             }
 
             // 4) Resource creates
-            if !res_creates.is_empty() {
+            if !groups.resource_creates.is_empty() {
                 let ver_field = BEVY_PERSISTENCE_VERSION_FIELD;
-                let input_docs: Vec<serde_json::Value> = res_creates
-                    .into_iter()
+                let input_docs: Vec<serde_json::Value> = groups.resource_creates
+                    .iter()
+                    .cloned()
                     .map(|doc| {
                         let id = doc
                             .get("id")
@@ -613,104 +562,88 @@ impl DatabaseConnection for PostgresDbConnection {
                     .collect::<Result<_, PersistenceError>>()?;
                 let input_json = serde_json::Value::Array(input_docs);
 
-                let sql = r#"
+                let sql = format!(r#"
                     WITH input AS (
-                        SELECT (x->>'id')::text      AS id,
+                        SELECT (x->>'{k}')::text      AS {k},
                                (x->>'ver')::bigint    AS ver,
                                (x->'doc')::jsonb      AS doc
                         FROM jsonb_array_elements($1::jsonb) AS x
                     )
-                    INSERT INTO resources (id, bevy_persistence_version, doc)
-                    SELECT id, ver, doc FROM input
-                "#;
+                    INSERT INTO {t} ({k}, bevy_persistence_version, doc)
+                    SELECT {k}, ver, doc FROM input
+                "#, k = KEY_COL, t = RESOURCES_TABLE);
 
-                tx.execute(sql, &[&input_json])
+                tx.execute(&sql, &[&input_json])
                     .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch insert (resources) failed: {}", e)))?;
+                    .map_err(|e| PersistenceError::new(format!("pg batch insert ({}) failed: {}", RESOURCES_TABLE, e)))?;
             }
 
             // 5) Resource updates
-            if !res_updates.is_empty() {
-                let requested: Vec<String> = res_updates
-                    .iter()
-                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                    .collect();
+            if !groups.resource_updates.is_empty() {
+                let requested = groups.extract_keys(&groups.resource_updates, KEY_COL);
 
-                let upd_sql = r#"
+                let upd_sql = format!(r#"
                     WITH input AS (
-                        SELECT (x->>'id')::text        AS id,
+                        SELECT (x->>'{k}')::text        AS {k},
                                (x->>'expected')::bigint AS expected,
                                (x->'patch')::jsonb      AS patch
                         FROM jsonb_array_elements($1::jsonb) AS x
                     ),
                     updated AS (
-                        UPDATE resources r
+                        UPDATE {t} r
                         SET doc = r.doc || i.patch,
                             bevy_persistence_version = i.expected + 1
                         FROM input i
-                        WHERE r.id = i.id AND r.bevy_persistence_version = i.expected
-                        RETURNING r.id
+                        WHERE r.{k} = i.{k} AND r.bevy_persistence_version = i.expected
+                        RETURNING r.{k}
                     )
-                    SELECT id FROM updated
-                "#;
+                    SELECT {k} FROM updated
+                "#, k = KEY_COL, t = RESOURCES_TABLE);
 
                 let rows = tx
-                    .query(upd_sql, &[&serde_json::Value::Array(res_updates.clone())])
+                    .query(&upd_sql, &[&serde_json::Value::Array(groups.resource_updates.clone())])
                     .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch update (resources) failed: {}", e)))?;
+                    .map_err(|e| PersistenceError::new(format!("pg batch update ({}) failed: {}", RESOURCES_TABLE, e)))?;
                 let updated: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
 
-                if updated.len() != requested.len() {
-                    if let Some(conflict_key) = requested.into_iter().find(|k| !updated.iter().any(|u| u == k)) {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::new("Update conflict (resources)"));
-                    }
+                if let Err(e) = check_operation_success(requested, updated, &OperationType::Update, RESOURCES_TABLE) {
+                    let _ = tx.rollback().await;
+                    return Err(e);
                 }
             }
 
             // 6) Resource deletes
-            if !res_deletes.is_empty() {
-                let requested: Vec<String> = res_deletes
-                    .iter()
-                    .filter_map(|v| v.get("id").and_then(|s| s.as_str()).map(|s| s.to_string()))
-                    .collect();
+            if !groups.resource_deletes.is_empty() {
+                let requested = groups.extract_keys(&groups.resource_deletes, KEY_COL);
 
-                let del_sql = r#"
+                let del_sql = format!(r#"
                     WITH input AS (
-                        SELECT (x->>'id')::text        AS id,
+                        SELECT (x->>'{k}')::text        AS {k},
                                (x->>'expected')::bigint AS expected
                         FROM jsonb_array_elements($1::jsonb) AS x
                     ),
                     deleted AS (
-                        DELETE FROM resources r
+                        DELETE FROM {t} r
                         USING input i
-                        WHERE r.id = i.id AND r.bevy_persistence_version = i.expected
-                        RETURNING r.id
+                        WHERE r.{k} = i.{k} AND r.bevy_persistence_version = i.expected
+                        RETURNING r.{k}
                     )
-                    SELECT id FROM deleted
-                "#;
+                    SELECT {k} FROM deleted
+                "#, k = KEY_COL, t = RESOURCES_TABLE);
 
                 let rows = tx
-                    .query(del_sql, &[&serde_json::Value::Array(res_deletes.clone())])
+                    .query(&del_sql, &[&serde_json::Value::Array(groups.resource_deletes.clone())])
                     .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch delete (resources) failed: {}", e)))?;
+                    .map_err(|e| PersistenceError::new(format!("pg batch delete ({}) failed: {}", RESOURCES_TABLE, e)))?;
                 let deleted: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
 
-                if deleted.len() != requested.len() {
-                    if let Some(conflict_key) = requested.into_iter().find(|k| !deleted.iter().any(|u| u == k)) {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::Conflict { key: conflict_key });
-                    } else {
-                        tx.rollback().await.ok();
-                        return Err(PersistenceError::new("Delete conflict (resources)"));
-                    }
+                if let Err(e) = check_operation_success(requested, deleted, &OperationType::Delete, RESOURCES_TABLE) {
+                    let _ = tx.rollback().await;
+                    return Err(e);
                 }
             }
 
-            // COMMIT and return entity ids (for Guid assignment)
+            // COMMIT and return entity ids
             tx.commit()
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg COMMIT failed: {}", e)))?;
@@ -730,7 +663,7 @@ impl DatabaseConnection for PostgresDbConnection {
             debug!("[pg] fetch_document {}", key);
             let row_opt = client
                 .query_opt(
-                    "SELECT doc, bevy_persistence_version FROM entities WHERE id = $1",
+                    &format!("SELECT doc, bevy_persistence_version FROM {t} WHERE {k} = $1", t = ENTITIES_TABLE, k = KEY_COL),
                     &[&key],
                 )
                 .await
@@ -760,7 +693,7 @@ impl DatabaseConnection for PostgresDbConnection {
             debug!("[pg] fetch_component key={} comp={}", key, comp);
             let row_opt = client
                 .query_opt(
-                    "SELECT doc -> $2 FROM entities WHERE id = $1",
+                    &format!("SELECT doc -> $2 FROM {t} WHERE {k} = $1", t = ENTITIES_TABLE, k = KEY_COL),
                     &[&key, &comp],
                 )
                 .await
@@ -786,7 +719,7 @@ impl DatabaseConnection for PostgresDbConnection {
             debug!("[pg] fetch_resource {}", key);
             let row_opt = client
                 .query_opt(
-                    "SELECT doc, bevy_persistence_version FROM resources WHERE id = $1",
+                    &format!("SELECT doc, bevy_persistence_version FROM {t} WHERE {k} = $1", t = RESOURCES_TABLE, k = KEY_COL),
                     &[&key],
                 )
                 .await
@@ -809,7 +742,7 @@ impl DatabaseConnection for PostgresDbConnection {
             let client = client.lock().await;
             debug!("[pg] clear_entities");
             client
-                .batch_execute("TRUNCATE TABLE entities")
+                .batch_execute(&format!("TRUNCATE TABLE {}", ENTITIES_TABLE))
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg clear_entities failed: {}", e)))?;
             Ok(())
@@ -823,7 +756,7 @@ impl DatabaseConnection for PostgresDbConnection {
             let client = client.lock().await;
             debug!("[pg] clear_resources");
             client
-                .batch_execute("TRUNCATE TABLE resources")
+                .batch_execute(&format!("TRUNCATE TABLE {}", RESOURCES_TABLE))
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg clear_resources failed: {}", e)))?;
             Ok(())
