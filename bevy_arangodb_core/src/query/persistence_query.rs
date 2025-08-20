@@ -93,13 +93,18 @@ impl PersistenceQuery {
         fetch_only.sort_unstable();
         fetch_only.dedup();
 
-        PersistenceQuerySpecification {
+        let spec = PersistenceQuerySpecification {
             presence_with: self.component_names.clone(),
             presence_without: self.without_component_names.clone(),
             fetch_only,
             value_filters: self.filter_expr.clone(),
             return_full_docs: full_docs,
-        }
+        };
+        bevy::log::debug!(
+            "[builder] build_spec full_docs={} presence_with={:?} without={:?} fetch_only={:?} filter={:?}",
+            full_docs, spec.presence_with, spec.presence_without, spec.fetch_only, spec.value_filters
+        );
+        spec
     }
 
     /// Run the query for keys only.
@@ -112,69 +117,77 @@ impl PersistenceQuery {
 
     /// Load matching entities into the World.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
-        // remove the session resource
-        let mut session = world.remove_resource::<PersistenceSession>().unwrap();
+         // remove the session resource
+         let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
-        // fetch full documents in one go
-        let spec = self.build_spec(true);
-        let documents = self.db.execute_documents(&spec)
-            .await
-            .expect("Batch document fetch failed");
+         // fetch full documents in one go
+         let spec = self.build_spec(true);
+         bevy::log::debug!("[builder] fetch_into issuing execute_documents");
+         let documents = self.db.execute_documents(&spec)
+             .await
+             .expect("Batch document fetch failed");
+         bevy::log::debug!("[builder] fetch_into: backend returned {} documents", documents.len());
 
-        let mut result = Vec::with_capacity(documents.len());
-        if !documents.is_empty() {
-            // map existing GUIDs→entities
-            let mut existing = std::collections::HashMap::new();
-            for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
-                existing.insert(guid.id().to_string(), e);
-            }
+         let mut result = Vec::with_capacity(documents.len());
+         if !documents.is_empty() {
+             // map existing GUIDs→entities
+             let mut existing = std::collections::HashMap::new();
+             for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
+                 existing.insert(guid.id().to_string(), e);
+             }
 
-            for doc in documents {
-                let key_field = self.db.document_key_field();
-                let key = doc[key_field].as_str().unwrap().to_string();
-                let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap_or(1);
+             for doc in documents {
+                 let key_field = self.db.document_key_field();
+                 let key = doc[key_field].as_str().unwrap_or_default().to_string();
+                 if key.is_empty() {
+                     bevy::log::debug!("[builder] fetch_into: skipping doc missing key '{}'", key_field);
+                     continue;
+                 }
+                 let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap_or(1);
 
-                // Resolve entity (reuse if already present by Guid, otherwise spawn)
-                let entity = if let Some(&e) = existing.get(&key) {
-                    e
-                } else {
-                    let e = world.spawn(Guid::new(key.clone())).id();
-                    existing.insert(key.clone(), e);
-                    e
-                };
+                 // Resolve entity (reuse if already present by Guid, otherwise spawn)
+                 let entity = if let Some(&e) = existing.get(&key) {
+                     e
+                 } else {
+                     let e = world.spawn(Guid::new(key.clone())).id();
+                     existing.insert(key.clone(), e);
+                     e
+                 };
 
-                // Ensure the session knows about this entity<->key mapping for future operations
-                session.entity_keys.insert(entity, key.clone());
+                 // Ensure the session knows about this entity<->key mapping for future operations
+                 session.entity_keys.insert(entity, key.clone());
 
-                // Cache/refresh version for both new and existing entities
-                session
-                    .version_manager
-                    .set_version(VersionKey::Entity(key.clone()), version);
+                 // Cache/refresh version for both new and existing entities
+                 session
+                     .version_manager
+                     .set_version(VersionKey::Entity(key.clone()), version);
 
-                // Overwrite requested components on existing entities (manual builder policy)
-                let mut to_deser = self.component_names.clone();
-                to_deser.extend(self.fetch_only_component_names.iter().copied());
-                to_deser.sort_unstable();
-                to_deser.dedup();
-                for &comp in &to_deser {
-                    if let Some(val) = doc.get(comp) {
-                        if let Some(deser) = session.component_deserializers.get(comp) {
-                            deser(world, entity, val.clone())
-                                .expect("component deserialization failed");
-                        }
-                    }
-                }
+                 // Overwrite requested components on existing entities (manual builder policy)
+                 let mut to_deser = self.component_names.clone();
+                 to_deser.extend(self.fetch_only_component_names.iter().copied());
+                 to_deser.sort_unstable();
+                 to_deser.dedup();
+                 bevy::log::trace!("[builder] deserializing {:?} for key={}", to_deser, key);
+                 for &comp in &to_deser {
+                     if let Some(val) = doc.get(comp) {
+                         if let Some(deser) = session.component_deserializers.get(comp) {
+                             deser(world, entity, val.clone())
+                                 .expect("component deserialization failed");
+                         }
+                     }
+                 }
 
-                result.push(entity);
-            }
-        }
+                 result.push(entity);
+             }
+         }
 
-        session.fetch_and_insert_resources(&*self.db, world)
-            .await
-            .expect("resource deserialization failed");
+         session.fetch_and_insert_resources(&*self.db, world)
+             .await
+             .expect("resource deserialization failed");
 
-        world.insert_resource(session);
-        result
+         world.insert_resource(session);
+         bevy::log::debug!("[builder] fetch_into: inserted {} entities into world", result.len());
+         result
     }
 }
 

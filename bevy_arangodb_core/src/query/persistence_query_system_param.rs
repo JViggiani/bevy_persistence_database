@@ -87,6 +87,13 @@ thread_local! {
     static PQ_WITHOUT_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = Default::default();
 }
 
+/// Unsafe world pointer published each frame to enable immediate application of DB results.
+#[derive(Resource, Clone, Copy)]
+pub struct ImmediateWorldPtr(pub *mut World);
+// Safety: used only on the main thread in exclusive systems; we uphold Bevy's aliasing rules.
+unsafe impl Send for ImmediateWorldPtr {}
+unsafe impl Sync for ImmediateWorldPtr {}
+
 /// System parameter for querying entities from both the world and database
 #[derive(SystemParam)]
 pub struct PersistentQuery<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static = ()> {
@@ -100,6 +107,8 @@ pub struct PersistentQuery<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'sta
     runtime: Res<'w, TokioRuntime>,
     /// Add access to the deferred ops queue (immutable; interior mutability)
     ops: Res<'w, DeferredWorldOperations>,
+    /// Optional: immediate world access for in-system materialization
+    world_ptr: Option<Res<'w, ImmediateWorldPtr>>,
 }
 
 impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static>
@@ -108,11 +117,274 @@ where
     F: ToPresenceSpec + FilterSupported,
     Q: QueryDataToComponents,
 {
+    /// Internal: compute cache hash, execute spec, apply documents/resources, update cache.
+    fn execute_combined_load(
+        &mut self,
+        cache_policy: CachePolicy,
+        presence_with: Vec<&'static str>,
+        presence_without: Vec<&'static str>,
+        fetch_only: Vec<&'static str>,
+        value_filters: Option<FilterExpression>,
+        hash_salts: &[&'static str],
+        force_full_docs: bool,
+    ) {
+        // Compute cache hash
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::any::type_name::<Q>().hash(&mut hasher);
+        for &salt in hash_salts {
+            salt.hash(&mut hasher);
+        }
+        for &name in &presence_with {
+            name.hash(&mut hasher);
+        }
+        for &name in &presence_without {
+            name.hash(&mut hasher);
+        }
+        for &name in &fetch_only {
+            name.hash(&mut hasher);
+        }
+        if let Some(expr) = &value_filters {
+            format!("{:?}", expr).hash(&mut hasher);
+        }
+        let query_hash = hasher.finish();
+
+        bevy::log::info!(
+            "PQ::execute_combined_load enter: type={} hash={:#x} cache_policy={:?} salts={:?}",
+            std::any::type_name::<Q>(),
+            query_hash,
+            cache_policy,
+            hash_salts
+        );
+
+        let should_query_db = match cache_policy {
+            CachePolicy::ForceRefresh => true,
+            CachePolicy::UseCache => !self.cache.contains(query_hash),
+        };
+        bevy::log::info!(
+            "PQ::execute_combined_load: should_query_db={} presence_with={:?} presence_without={:?} fetch_only={:?} expr={:?}",
+            should_query_db, presence_with, presence_without, fetch_only, value_filters
+        );
+
+        if should_query_db {
+            let spec = PersistenceQuerySpecification {
+                presence_with: presence_with.clone(),
+                presence_without: presence_without.clone(),
+                fetch_only: fetch_only.clone(),
+                value_filters: value_filters.clone(),
+                // Force full docs when requested (e.g. for joins), otherwise keep the optimized behavior.
+                return_full_docs: force_full_docs || (presence_with.is_empty() && presence_without.is_empty()),
+            };
+
+            bevy::log::debug!(
+                "PQ::execute_combined_load: type={} salts={:?} presence_with={:?} presence_without={:?} fetch_only={:?} filter={:?} cache_policy={:?}",
+                std::any::type_name::<Q>(),
+                hash_salts,
+                presence_with,
+                presence_without,
+                fetch_only,
+                value_filters,
+                cache_policy
+            );
+
+            match self.runtime.block_on(self.db.0.execute_documents(&spec)) {
+                Ok(documents) => {
+                    bevy::log::debug!(
+                        "PQ::execute_combined_load: backend returned {} documents; immediate_world_ptr={}",
+                        documents.len(),
+                        self.world_ptr.is_some()
+                    );
+                    let allow_overwrite =
+                        matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_with.is_empty();
+
+                    let comps_to_deser: Vec<&'static str> = if presence_with.is_empty() && presence_without.is_empty() {
+                        Vec::new()
+                    } else {
+                        fetch_only.clone()
+                    };
+
+                    // If we have an ImmediateWorldPtr, apply immediately; otherwise defer.
+                    if let Some(ptr_res) = &self.world_ptr {
+                        // SAFETY: Pointer provided by an exclusive system this frame.
+                        let world: &mut World = unsafe { &mut *ptr_res.0 };
+
+                        // Apply documents now (inline version of process_documents' inner closure)
+                        let key_field = self.db.0.document_key_field();
+                        for doc in documents {
+                            let Some(key) = doc.get(key_field).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+                                bevy::log::debug!("PQ::immediate_apply: skipping doc missing key_field={}", key_field);
+                                continue;
+                            };
+                            let version = doc
+                                .get(BEVY_PERSISTENCE_VERSION_FIELD)
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(1);
+                            let comps = comps_to_deser.clone();
+
+                            bevy::log::trace!(
+                                "PQ::immediate_apply: key={} version={} will_insert={:?}",
+                                key, version, comps
+                            );
+
+                            // First check if an entity with this Guid already exists in the world
+                            let existing_entity = world
+                                .query::<(Entity, &Guid)>()
+                                .iter(world)
+                                .find(|(_, g)| g.id() == key)
+                                .map(|(e, _)| e);
+
+                            world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                                // Resolve or spawn the entity for this key
+                                let (entity, existed) = if let Some(existing) = existing_entity {
+                                    // Found an existing entity with this Guid - use it
+                                    if !session.entity_keys.contains_key(&existing) {
+                                        session.entity_keys.insert(existing, key.clone());
+                                    }
+                                    bevy::log::debug!("PQ::immediate_apply: reuse existing entity {:?} for key={}", existing, key);
+                                    (existing, true)
+                                } else if let Some((candidate, _)) = session
+                                    .entity_keys
+                                    .iter()
+                                    .find(|(_, k)| **k == key)
+                                    .map(|(e, k)| (*e, k.clone()))
+                                {
+                                    // Session has a mapping - verify it's still valid
+                                    let ok = world.get_entity(candidate).is_ok();
+                                    bevy::log::trace!(
+                                        "PQ::immediate_apply: found mapping to {:?}, alive={}",
+                                        candidate, ok
+                                    );
+                                    if ok {
+                                        (candidate, true)
+                                    } else {
+                                        let e = world.spawn(Guid::new(key.clone())).id();
+                                        session.entity_keys.insert(e, key.clone());
+                                        bevy::log::debug!("PQ::immediate_apply: mapping stale; spawned new entity {:?} for key={}", e, key);
+                                        (e, false)
+                                    }
+                                } else {
+                                    // No existing entity found - spawn a new one
+                                    let e = world.spawn(Guid::new(key.clone())).id();
+                                    session.entity_keys.insert(e, key.clone());
+                                    bevy::log::debug!("PQ::immediate_apply: spawned new entity {:?} for key={}", e, key);
+                                    (e, false)
+                                };
+
+                                if existed && !allow_overwrite {
+                                    bevy::log::trace!(
+                                        "PQ::immediate_apply: skip overwrite entity={:?} key={}",
+                                        entity, key
+                                    );
+                                    return;
+                                }
+
+                                // Cache/refresh version
+                                session
+                                    .version_manager
+                                    .set_version(VersionKey::Entity(key.clone()), version);
+
+                                // Insert components
+                                if !comps.is_empty() {
+                                    for &comp_name in &comps {
+                                        if let Some(val) = doc.get(comp_name) {
+                                            if let Some(deser) = session.component_deserializers.get(comp_name) {
+                                                if let Err(e) = deser(world, entity, val.clone()) {
+                                                    bevy::log::error!("Failed to deserialize component {}: {}", comp_name, e);
+                                                } else {
+                                                    bevy::log::trace!(
+                                                        "PQ::immediate_apply: inserted {} on entity={:?}",
+                                                        comp_name, entity
+                                                    );
+                                                }
+                                            } else {
+                                                bevy::log::debug!(
+                                                     "PQ::immediate_apply: no deserializer registered for {}",
+                                                     comp_name
+                                                 );
+                                            }
+                                        } else {
+                                            bevy::log::trace!(
+                                                "PQ::immediate_apply: component {} missing in doc key={}",
+                                                comp_name, key
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    for (registered_name, deser) in session.component_deserializers.iter() {
+                                        if let Some(val) = doc.get(registered_name) {
+                                            if let Err(e) = deser(world, entity, val.clone()) {
+                                                bevy::log::error!("Failed to deserialize component {}: {}", registered_name, e);
+                                            } else {
+                                                bevy::log::trace!(
+                                                    "PQ::immediate_apply: inserted {} on entity={:?}",
+                                                    registered_name, entity
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
+                        // After inline mutations, ensure any internal buffers are applied.
+                        // This is a no-op if no deferred commands were queued, but safe.
+                        bevy::log::debug!("PQ::immediate_apply: world.flush()");
+                        world.flush();
+
+                        // After immediate application, warm-up using a fresh QueryState so counts
+                        // reflect the current World this tick (SystemParam Query won’t refresh mid-system).
+                        let lhs_cnt = {
+                            let mut qs: bevy::ecs::query::QueryState<(Entity, Q), F> =
+                                bevy::ecs::query::QueryState::new(world);
+                            qs.iter(&*world).count()
+                        };
+                        bevy::log::debug!(
+                            "PQ::immediate_apply: warm-up lhs_iter={} (rhs logged in join_filtered)",
+                            lhs_cnt
+                        );
+
+                        // Fetch resources immediately
+                        world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                            let rt = world
+                                .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
+                                .0
+                                .clone();
+                            let db = self.db.0.clone();
+                            bevy::log::trace!("PQ::immediate_apply: fetching resources");
+                            rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                        });
+                    } else {
+                        bevy::log::trace!("PQ::execute_combined_load: deferring {} docs", documents.len());
+                        // Fallback: defer mutations to PostUpdate
+                        self.process_documents(documents, &comps_to_deser, allow_overwrite);
+
+                        // Also fetch resources alongside any query (deferred)
+                        let db = self.db.0.clone();
+                        self.ops.push(Box::new(move |world: &mut World| {
+                            world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                                let rt = world
+                                    .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
+                                    .0
+                                    .clone();
+                                rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                            });
+                        }));
+                    }
+
+                    bevy::log::debug!("PQ::execute_combined_load: inserting cache key {:#x}", query_hash);
+                    self.cache.insert(query_hash);
+                }
+                Err(e) => {
+                    bevy::log::error!("Error fetching documents: {}", e);
+                }
+            }
+        } else {
+            bevy::log::debug!("Skipping DB query - using cached results for hash={:#x}", query_hash);
+        }
+    }
+
     /// Explicit load trigger that performs DB I/O (if needed) and returns self for pass-through use.
     /// This does not directly mutate the world; world mutations are applied by the plugin in PostUpdate.
     pub fn ensure_loaded(&mut self) -> &mut Self {
-        use crate::query::filter_expression::FilterExpression as FE;
-
         bevy::log::debug!("PersistentQuery::ensure_loaded called");
 
         // Drain transient config from TLS for this call
@@ -136,22 +408,8 @@ where
         without_names.extend(type_presence.withouts.iter().copied());
 
         // Collect components referenced by presence expr branches so we fetch them too
-        fn collect_presence_components(expr: &FE, acc: &mut Vec<&'static str>) {
-            match expr {
-                FE::Field { component_name, field_name } => {
-                    if field_name.is_empty() && !acc.contains(component_name) {
-                        acc.push(component_name);
-                    }
-                }
-                FE::BinaryOperator { lhs, rhs, .. } => {
-                    collect_presence_components(lhs, acc);
-                    collect_presence_components(rhs, acc);
-                }
-                _ => {}
-            }
-        }
         if let Some(expr) = &type_presence.expr {
-            collect_presence_components(expr, &mut fetch_names);
+            Self::collect_presence_components(expr, &mut fetch_names);
         }
 
         // Ensure fetch includes presence-gated components
@@ -162,12 +420,9 @@ where
         }
 
         // Dedup
-        fetch_names.sort_unstable();
-        fetch_names.dedup();
-        presence_names.sort_unstable();
-        presence_names.dedup();
-        without_names.sort_unstable();
-        without_names.dedup();
+        Self::sort_dedup(&mut fetch_names);
+        Self::sort_dedup(&mut presence_names);
+        Self::sort_dedup(&mut without_names);
 
         // 3) Combine presence-derived expression (from Or cases) with TLS filter via AND
         let combined_expr: Option<FilterExpression> = match (type_presence.expr, tls_filter_expression) {
@@ -177,67 +432,16 @@ where
             (None, None) => None,
         };
 
-        // Compute cache hash
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::any::type_name::<Q>().hash(&mut hasher);
-        for &name in &presence_names { name.hash(&mut hasher); }
-        for &name in &without_names { name.hash(&mut hasher); }
-        for &name in &fetch_names { name.hash(&mut hasher); }
-        if let Some(expr) = &combined_expr { format!("{:?}", expr).hash(&mut hasher); }
-        let query_hash = hasher.finish();
-
-        // Decide if we need to hit the DB based on cache policy
-        let should_query_db = match cache_policy {
-            CachePolicy::ForceRefresh => true,
-            CachePolicy::UseCache => !self.cache.contains(query_hash),
-        };
-
-        if should_query_db {
-            bevy::log::debug!("Querying database");
-            let spec = PersistenceQuerySpecification {
-                presence_with: presence_names.clone(),
-                presence_without: without_names.clone(),
-                fetch_only: fetch_names.clone(),
-                value_filters: combined_expr.clone(),
-                return_full_docs: presence_names.is_empty(),
-            };
-
-            match self.runtime.block_on(self.db.0.execute_documents(&spec)) {
-                Ok(documents) => {
-                    // Allow overwrite when explicitly requested or when presence gates are used.
-                    let allow_overwrite =
-                        matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_names.is_empty();
-
-                    // When presence gates exist, load only requested components; otherwise, load all registered found
-                    let comps_to_deser: Vec<&'static str> = if presence_names.is_empty() {
-                        Vec::new()
-                    } else {
-                        fetch_names.clone()
-                    };
-
-                    self.process_documents(documents, &comps_to_deser, allow_overwrite);
-
-                    // Also fetch resources alongside any query
-                    let db = self.db.0.clone();
-                    self.ops.push(Box::new(move |world: &mut World| {
-                        world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                            let rt = world
-                                .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
-                                .0
-                                .clone();
-                            rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
-                        });
-                    }));
-
-                    self.cache.insert(query_hash);
-                }
-                Err(e) => {
-                    bevy::log::error!("Error fetching documents: {}", e);
-                }
-            }
-        } else {
-            bevy::log::debug!("Skipping DB query - using cached results");
-        }
+        // Reuse the shared executor
+        self.execute_combined_load(
+            cache_policy,
+            presence_names,
+            without_names,
+            fetch_names,
+            combined_expr,
+            &[], // no extra salt
+            false, // don't force full docs for plain ensure_loaded
+        );
 
         self
     }
@@ -251,6 +455,12 @@ where
     ) {
         let key_field = self.db.0.document_key_field();
         let explicit_components = comp_names.to_vec();
+        bevy::log::debug!(
+            "PQ::process_documents: deferring {} docs; comps={:?}; allow_overwrite={}",
+            documents.len(),
+            explicit_components,
+            allow_overwrite
+        );
 
         for doc in documents {
             let key = match doc.get(key_field).and_then(|v| v.as_str()) {
@@ -267,6 +477,7 @@ where
             let allow = allow_overwrite;
 
             self.ops.push(Box::new(move |world: &mut World| {
+                bevy::log::debug!("PQ::process_documents/op: applying key={}", key);
                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                     // Resolve or spawn the entity for this key
                     let (entity, existed) = if let Some((candidate, _)) = session
@@ -281,12 +492,24 @@ where
                             // Stale mapping: replace with a new entity for this key.
                             let e = world.spawn(Guid::new(key.clone())).id();
                             session.entity_keys.insert(e, key.clone());
+                            bevy::log::debug!("PQ::process_documents/op: mapping stale; spawned new entity {:?} for key={}", e, key);
                             (e, false)
                         }
                     } else {
-                        let e = world.spawn(Guid::new(key.clone())).id();
-                        session.entity_keys.insert(e, key.clone());
-                        (e, false)
+                        // No session mapping: try to find an existing entity by Guid and reuse it.
+                        if let Some((existing, _)) = world
+                            .query::<(bevy::prelude::Entity, &Guid)>()
+                            .iter(world)
+                            .find(|(_, g)| g.id() == key)
+                        {
+                            session.entity_keys.insert(existing, key.clone());
+                            (existing, true)
+                        } else {
+                            let e = world.spawn(Guid::new(key.clone())).id();
+                            session.entity_keys.insert(e, key.clone());
+                            bevy::log::debug!("PQ::process_documents/op: spawned new entity {:?} for key={}", e, key);
+                            (e, false)
+                        }
                     };
 
                     // If the entity already exists and we're not force-refreshing (or presence-merge), do nothing.
@@ -398,7 +621,152 @@ where
     /// Force a refresh from the database, bypassing the cache
     pub fn force_refresh(self) -> Self {
         PQ_CACHE_POLICY.with(|p| *p.borrow_mut() = CachePolicy::ForceRefresh);
+        bevy::log::debug!("PQ::force_refresh: set cache policy to ForceRefresh");
         self
+    }
+
+    /// Smart join between two PersistentQuery params:
+    /// - Builds a combined presence/value spec (intersection) and performs a single DB load.
+    /// - Returns a Bevy QueryLens that views the world-only intersection of both queries.
+    /// Note: World mutations are applied in PostUpdate (PreCommit); schedule this system accordingly.
+    pub fn join_filtered<'a, 'w2, 's2, Q2, F2, NewD, NewF>(
+        &'a mut self,
+        other: &'a mut PersistentQuery<'w2, 's2, Q2, F2>,
+    ) -> bevy::ecs::system::QueryLens<'a, NewD, NewF>
+    where
+        Q2: QueryData<ReadOnly = Q2> + 'static + QueryDataToComponents,
+        F2: QueryFilter + 'static + ToPresenceSpec + FilterSupported,
+        NewD: bevy::ecs::query::QueryData,
+        NewF: bevy::ecs::query::QueryFilter,
+    {
+        bevy::log::info!(
+            "PQ::join_filtered enter: lhs_type={} rhs_type={}",
+            std::any::type_name::<Q>(),
+            std::any::type_name::<Q2>(),
+        );
+        // Collect fetch names from both query data types
+        let mut fetch_names: Vec<&'static str> = Vec::new();
+        Q::push_names(&mut fetch_names);
+        Q2::push_names(&mut fetch_names);
+
+        // Presence specs from both filters (type-driven)
+        let p1 = <F as ToPresenceSpec>::to_presence_spec();
+        let p2 = <F2 as ToPresenceSpec>::to_presence_spec();
+
+        let mut presence_with: Vec<&'static str> = Vec::new();
+        let mut presence_without: Vec<&'static str> = Vec::new();
+        presence_with.extend(p1.withs.iter().copied());
+        presence_with.extend(p2.withs.iter().copied());
+        presence_without.extend(p1.withouts.iter().copied());
+        presence_without.extend(p2.withouts.iter().copied());
+
+        // Collect components referenced by presence expressions so we fetch them too
+        if let Some(expr) = &p1.expr { Self::collect_presence_components(expr, &mut fetch_names); }
+        if let Some(expr) = &p2.expr { Self::collect_presence_components(expr, &mut fetch_names); }
+
+        // Ensure we gate presence by all components being joined (true intersection)
+        // This makes the backend return only documents containing all of Q and Q2.
+        presence_with.extend(fetch_names.iter().copied());
+
+        // Include presence-gated components in fetch list
+        for &n in &presence_with {
+            if !fetch_names.contains(&n) {
+                fetch_names.push(n);
+            }
+        }
+
+        // Dedup lists
+        Self::sort_dedup(&mut fetch_names);
+        Self::sort_dedup(&mut presence_with);
+        Self::sort_dedup(&mut presence_without);
+
+        // Combine presence/value expressions: (p1.expr AND p2.expr) AND (TLS filter, if any)
+        let presence_expr = match (p1.expr, p2.expr) {
+            (Some(a), Some(b)) => Some(a.and(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+        let tls_expr = PQ_FILTER_EXPRESSION.with(|f| f.borrow_mut().take());
+        let combined_expr = match (presence_expr, tls_expr) {
+            (Some(a), Some(b)) => Some(a.and(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        };
+
+        bevy::log::debug!(
+            "PQ::join_filtered spec: presence_with={:?} presence_without={:?} fetch_only={:?} expr={:?}",
+            presence_with, presence_without, fetch_names, combined_expr
+        );
+
+        // For joined inline loads, always bypass cache to ensure materialization happens now.
+        let cache_policy: CachePolicy = CachePolicy::ForceRefresh;
+        bevy::log::debug!("PQ::join_filtered: forcing DB refresh for joined load");
+
+        // Single DB load on the LHS with full docs; this materializes both sides' components.
+        self.execute_combined_load(
+            cache_policy,
+            presence_with.clone(),
+            presence_without.clone(),
+            fetch_names.clone(),
+            combined_expr.clone(),
+            &[std::any::type_name::<Q2>()],
+            true,
+        );
+
+        // Warm-up using fresh QueryStates so counts reflect immediate inserts this tick.
+        if let Some(ptr_res) = &self.world_ptr {
+            let world: &World = unsafe { &*ptr_res.0 };
+            let (lhs_cnt, rhs_cnt, joined_cnt) = {
+                if let (Some(mut lhs_state), Some(mut rhs_state)) = (
+                    bevy::ecs::query::QueryState::<(Entity, Q), F>::try_new(world),
+                    bevy::ecs::query::QueryState::<(Entity, Q2), F2>::try_new(world),
+                ) {
+                    let lc = lhs_state.iter(world).count();
+                    let rc = rhs_state.iter(world).count();
+                    let mut joined_state: bevy::ecs::query::QueryState<NewD, NewF> =
+                        lhs_state.join_filtered(world, &rhs_state);
+                    let jc = joined_state.query(world).iter().count();
+                    (lc, rc, jc)
+                } else {
+                    (0, 0, 0)
+                }
+            };
+            bevy::log::debug!(
+                "PQ::join_filtered warm-up: lhs_iter={} rhs_iter={} joined_preview={}",
+                lhs_cnt, rhs_cnt, joined_cnt
+            );
+        }
+
+        // Return a world-only joined view via the inner Bevy Query
+        let lens = self.query.join_filtered(&mut other.query);
+        bevy::log::debug!("PQ::join_filtered: returning lens");
+        lens
+    }
+
+    /// Small helper: collect component names referenced by presence expressions (component object checks).
+    #[inline]
+    fn collect_presence_components(expr: &FilterExpression, acc: &mut Vec<&'static str>) {
+        match expr {
+            FilterExpression::Field { component_name, field_name } => {
+                if field_name.is_empty() && !acc.contains(component_name) {
+                    acc.push(component_name);
+                }
+            }
+            FilterExpression::BinaryOperator { lhs, rhs, .. } => {
+                Self::collect_presence_components(lhs, acc);
+                Self::collect_presence_components(rhs, acc);
+            }
+            _ => {}
+        }
+    }
+
+    /// Small helper: sort + dedup in-place.
+    #[inline]
+    fn sort_dedup<T: Ord>(v: &mut Vec<T>) {
+        v.sort_unstable();
+        v.dedup();
     }
 }
 

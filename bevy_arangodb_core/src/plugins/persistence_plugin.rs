@@ -22,6 +22,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
 use crate::query::persistence_query_system_param::DeferredWorldOperations;
+use crate::query::persistence_query_system_param::ImmediateWorldPtr;
 use crate::query::PersistenceQueryCache;
 
 static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
@@ -622,6 +623,32 @@ impl Plugin for PersistencePluginCore {
         // Initialize deferred world ops queue
         app.init_resource::<DeferredWorldOperations>();
 
+        // Insert an initial raw world pointer so it's available before any user systems run.
+        {
+            let ptr: *mut World = app.world_mut() as *mut World;
+            bevy::log::trace!("PersistencePluginCore: inserting initial ImmediateWorldPtr {:p}", ptr);
+            if app.world().get_resource::<ImmediateWorldPtr>().is_none() {
+                app.insert_resource(ImmediateWorldPtr(ptr));
+            } else {
+                app.world_mut().resource_mut::<ImmediateWorldPtr>().0 = ptr;
+            }
+        }
+
+        // Publish a raw world pointer each frame so PersistentQuery can apply loads immediately.
+        fn publish_immediate_world_ptr(world: &mut World) {
+            let ptr: *mut World = world as *mut World;
+            if world.get_resource::<ImmediateWorldPtr>().is_none() {
+                world.insert_resource(ImmediateWorldPtr(ptr));
+            } else {
+                world.resource_mut::<ImmediateWorldPtr>().0 = ptr;
+            }
+        }
+        // Run at the very start of the frame and again in PostUpdate to keep it fresh.
+        app.add_systems(First, publish_immediate_world_ptr);
+        app.add_systems(PreUpdate, publish_immediate_world_ptr);
+        app.add_systems(Update, publish_immediate_world_ptr);
+        app.add_systems(PostUpdate, publish_immediate_world_ptr);
+
         // Remove the process_queued_component_data system - we don't need it anymore
 
         // Iterate over the registration functions from the global registry.
@@ -675,6 +702,8 @@ impl PluginGroup for PersistencePlugins {
     fn build(self) -> PluginGroupBuilder {
         MinimalPlugins
             .build()
+            // Ensure bevy::log is wired so SystemParam logs print in apps/tests
+            .add(bevy::log::LogPlugin::default())
             .add(PersistencePluginCore::new(self.0.clone()))
     }
 }

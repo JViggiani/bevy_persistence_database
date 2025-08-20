@@ -174,10 +174,19 @@ impl ArangoDbConnection {
             aql.push_str(&filters.join(" AND "));
         }
         if spec.return_full_docs {
-            aql.push_str("\n  RETURN doc");
+            // Always include the key field in returned documents so immediate apply can resolve entities.
+            // Use backticks to access system attribute names like `_key`.
+            let kf = self.document_key_field();
+            aql.push_str(&format!("\n  RETURN MERGE(doc, {{ \"{}\": doc.`{}` }})", kf, kf));
         } else {
             aql.push_str(&format!("\n  RETURN doc.{}", self.document_key_field()));
         }
+        bevy::log::debug!(
+            "[arango] AQL generated (return_full_docs={}):\n{}\nbind_vars={}",
+            spec.return_full_docs,
+            aql,
+            bind_vars.len()
+        );
         (aql, bind_vars)
     }
 }

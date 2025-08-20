@@ -78,12 +78,16 @@ fn ensure_global() -> &'static GlobalContainerState {
 #[ctor::ctor]
 fn initialize_logging() {
     if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "warn");
+        std::env::set_var("RUST_LOG", "bevy_arangodb_core=trace,bevy_arangodb=trace,debug");
     }
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+    let env = tracing_subscriber::EnvFilter::from_default_env();
+    let filter_str = env.to_string();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env)
         .with_test_writer()
-        .init();
+        .try_init();
+    eprintln!("[bevy_arangodb tests] tracing initialized (or already set). RUST_LOG={}", filter_str);
+
     let _ = ensure_global();
 }
 
