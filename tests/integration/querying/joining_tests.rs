@@ -7,7 +7,7 @@ use bevy_arangodb_core::{
     commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
 };
-use bevy_arangodb_core::query::persistence_query_system_param::ImmediateWorldPtr;
+use bevy_arangodb_core::query::immediate_world_ptr::ImmediateWorldPtr;
 use bevy_arangodb_derive::db_matrix_test;
 use crate::common::*;
 

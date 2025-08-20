@@ -21,8 +21,8 @@ use std::sync::{
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
-use crate::query::persistence_query_system_param::DeferredWorldOperations;
-use crate::query::persistence_query_system_param::ImmediateWorldPtr;
+use crate::query::deferred_ops::DeferredWorldOperations;
+use crate::query::immediate_world_ptr::ImmediateWorldPtr;
 use crate::query::PersistenceQueryCache;
 
 static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
