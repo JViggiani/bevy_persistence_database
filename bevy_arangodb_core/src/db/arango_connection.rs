@@ -208,6 +208,55 @@ impl ArangoDbConnection {
         );
         (aql, bind_vars)
     }
+
+    // Private helper to truncate any collection
+    fn clear_collection(&self, name: &str) -> BoxFuture<'static, Result<(), PersistenceError>> {
+        let db = self.db.clone();
+        let name = name.to_string();
+        async move {
+            let col = db
+                .collection(&name)
+                .await
+                .map_err(|e| PersistenceError::new(e.to_string()))?;
+            col.truncate()
+                .await
+                .map(|_| ())
+                .map_err(|e| PersistenceError::new(e.to_string()))
+        }
+        .boxed()
+    }
+
+    // Private helper to fetch a full document + version
+    fn fetch_with_version(
+        &self,
+        coll: Collection,
+        key: &str,
+    ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
+        let db = self.db.clone();
+        let name = coll.to_string();
+        let key = key.to_string();
+        async move {
+            let col = db
+                .collection(&name)
+                .await
+                .map_err(|e| PersistenceError::new(e.to_string()))?;
+            match col.document::<Value>(&key).await {
+                Ok(doc) => {
+                    let version = extract_version(&doc.document, &key)?;
+                    Ok(Some((doc.document, version)))
+                }
+                Err(e) => {
+                    if let ClientError::Arango(api_err) = &e {
+                        if api_err.error_num() == 1202 {
+                            return Ok(None);
+                        }
+                    }
+                    Err(PersistenceError::new(e.to_string()))
+                }
+            }
+        }
+        .boxed()
+    }
 }
 
 // Shared multi-thread runtime for sync operations (avoid per-call runtimes)
@@ -304,30 +353,7 @@ impl DatabaseConnection for ArangoDbConnection {
         &self,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        let db = self.db.clone();
-        let key = entity_key.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            match col.document::<Value>(&key).await {
-                Ok(doc) => {
-                    let version = extract_version(&doc.document, &key)?;
-                    Ok(Some((doc.document, version)))
-                }
-                Err(e) => {
-                    if let ClientError::Arango(api_err) = &e {
-                        if api_err.error_num() == 1202 {
-                            // entity not found
-                            return Ok(None);
-                        }
-                    }
-                    Err(PersistenceError::new(e.to_string()))
-                }
-            }
-        }
-        .boxed()
+        self.fetch_with_version(Collection::Entities, entity_key)
     }
 
     fn fetch_component(
@@ -363,60 +389,15 @@ impl DatabaseConnection for ArangoDbConnection {
         &self,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        let db = self.db.clone();
-        let res_key = resource_name.to_string();
-        async move {
-            let col = db
-                .collection(&Collection::Resources.to_string())
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            // A document may not exist, so we handle the error.
-            match col.document::<Value>(&res_key).await {
-                Ok(doc) => {
-                    let version = extract_version(&doc.document, &res_key)?;
-                    Ok(Some((doc.document, version)))
-                }
-                Err(e) => {
-                    if let ClientError::Arango(ref api_err) = e {
-                        if api_err.error_num() == 1202 { // 1202 is "document not found"
-                            return Ok(None);
-                        }
-                    }
-                    Err(PersistenceError::new(e.to_string()))
-                }
-            }
-        }
-        .boxed()
+        self.fetch_with_version(Collection::Resources, resource_name)
     }
 
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        let db = self.db.clone();
-        async move {
-            let col = db
-                .collection(&Collection::Entities.to_string())
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            col.truncate()
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
+        self.clear_collection(&Collection::Entities.to_string())
     }
 
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        let db = self.db.clone();
-        async move {
-            let col = db
-                .collection(&Collection::Resources.to_string())
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            col.truncate()
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            Ok(())
-        }
-        .boxed()
+        self.clear_collection(&Collection::Resources.to_string())
     }
 
     fn execute_transaction(

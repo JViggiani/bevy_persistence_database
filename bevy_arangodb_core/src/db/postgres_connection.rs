@@ -314,6 +314,47 @@ impl PostgresDbConnection {
         let sql = translate_rec(expr, &mut params);
         (sql, params)
     }
+
+    // Clear any table
+    fn clear_table(&self, table: String) -> BoxFuture<'static, Result<(), PersistenceError>> {
+        let client = self.client.clone();
+        let stmt = format!("TRUNCATE TABLE {}", table);
+        async move {
+            let c = client.lock().await;
+            c.batch_execute(&stmt)
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg clear failed: {}", e)))
+        }
+        .boxed()
+    }
+
+    // Fetch doc + version from a table
+    fn fetch_from_table(
+        &self,
+        table: String,
+        key: String,
+    ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
+        let client = self.client.clone();
+        let stmt = format!(
+            "SELECT doc, bevy_persistence_version FROM {} WHERE {} = $1",
+            table, KEY_COL
+        );
+        async move {
+            let c = client.lock().await;
+            let row_opt = c
+                .query_opt(&stmt, &[&key])
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg fetch failed: {}", e)))?;
+            if let Some(row) = row_opt {
+                let doc: Value = row.get(0);
+                let ver: i64 = row.get(1);
+                Ok(Some((doc, ver as u64)))
+            } else {
+                Ok(None)
+            }
+        }
+        .boxed()
+    }
 }
 
 impl DatabaseConnection for PostgresDbConnection {
@@ -656,28 +697,7 @@ impl DatabaseConnection for PostgresDbConnection {
         &self,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        let key = entity_key.to_string();
-        let client = self.client.clone();
-        async move {
-            let client = client.lock().await;
-            debug!("[pg] fetch_document {}", key);
-            let row_opt = client
-                .query_opt(
-                    &format!("SELECT doc, bevy_persistence_version FROM {t} WHERE {k} = $1", t = ENTITIES_TABLE, k = KEY_COL),
-                    &[&key],
-                )
-                .await
-                .map_err(|e| PersistenceError::new(format!("pg fetch_document failed: {}", e)))?;
-            if let Some(row) = row_opt {
-                let doc: Value = row.get(0);
-                // Do NOT inject "id" into JSON; tests expect only component fields + version
-                let ver: i64 = row.get(1);
-                Ok(Some((doc, ver as u64)))
-            } else {
-                Ok(None)
-            }
-        }
-        .boxed()
+        self.fetch_from_table(ENTITIES_TABLE.to_string(), entity_key.to_string())
     }
 
     fn fetch_component(
@@ -712,55 +732,14 @@ impl DatabaseConnection for PostgresDbConnection {
         &self,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        let key = resource_name.to_string();
-        let client = self.client.clone();
-        async move {
-            let client = client.lock().await;
-            debug!("[pg] fetch_resource {}", key);
-            let row_opt = client
-                .query_opt(
-                    &format!("SELECT doc, bevy_persistence_version FROM {t} WHERE {k} = $1", t = RESOURCES_TABLE, k = KEY_COL),
-                    &[&key],
-                )
-                .await
-                .map_err(|e| PersistenceError::new(format!("pg fetch_resource failed: {}", e)))?;
-            if let Some(row) = row_opt {
-                let doc: Value = row.get(0);
-                // Do NOT inject "id" into JSON resource blob either
-                let ver: i64 = row.get(1);
-                Ok(Some((doc, ver as u64)))
-            } else {
-                Ok(None)
-            }
-        }
-        .boxed()
+        self.fetch_from_table(RESOURCES_TABLE.to_string(), resource_name.to_string())
     }
 
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        let client = self.client.clone();
-        async move {
-            let client = client.lock().await;
-            debug!("[pg] clear_entities");
-            client
-                .batch_execute(&format!("TRUNCATE TABLE {}", ENTITIES_TABLE))
-                .await
-                .map_err(|e| PersistenceError::new(format!("pg clear_entities failed: {}", e)))?;
-            Ok(())
-        }
-        .boxed()
+        self.clear_table(ENTITIES_TABLE.to_string())
     }
 
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        let client = self.client.clone();
-        async move {
-            let client = client.lock().await;
-            debug!("[pg] clear_resources");
-            client
-                .batch_execute(&format!("TRUNCATE TABLE {}", RESOURCES_TABLE))
-                .await
-                .map_err(|e| PersistenceError::new(format!("pg clear_resources failed: {}", e)))?;
-            Ok(())
-        }
-        .boxed()
+        self.clear_table(RESOURCES_TABLE.to_string())
     }
 }
