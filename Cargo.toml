@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace]
-resolver = "2"
 members = [
-    "bevy_arangodb_core",
-    "bevy_arangodb_derive",
+  "bevy_arangodb_core",
 ]
 
 [workspace.package]

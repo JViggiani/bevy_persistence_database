@@ -587,3 +587,79 @@ impl DatabaseConnection for ArangoDbConnection {
         .boxed()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::persistence_query_specification::PersistenceQuerySpecification;
+    use crate::query::filter_expression::FilterExpression;
+    use serde_json::Value;
+    use std::{collections::HashMap, mem::MaybeUninit};
+
+    /// Helper to call the private builder without touching `db`.
+    fn build(spec: PersistenceQuerySpecification) -> (String, HashMap<String, Value>) {
+        let uninit: MaybeUninit<ArangoDbConnection> = MaybeUninit::uninit();
+        let conn: &ArangoDbConnection = unsafe { uninit.assume_init_ref() };
+        conn.build_query_internal(&spec)
+    }
+
+    #[test]
+    fn presence_only_filters_and_keys() {
+        let mut spec = PersistenceQuerySpecification::default();
+        spec.presence_with = vec!["Health"];
+        spec.return_full_docs = false;
+        let (aql, binds) = build(spec);
+
+        assert!(aql.contains("FOR doc IN entities"));
+        assert!(aql.contains("FILTER (doc.`Health` != null)"));
+        assert!(aql.contains("RETURN doc._key"));
+        assert!(binds.is_empty());
+    }
+
+    #[test]
+    fn presence_and_value_filter_pushes_bind_and_expr() {
+        let mut spec = PersistenceQuerySpecification::default();
+        spec.presence_with = vec!["Position"];
+        // example value filter: Position.x < 3.5
+        let expr = FilterExpression::field("Position", "x").lt(3.5);
+        spec.value_filters = Some(expr.clone());
+        spec.return_full_docs = false;
+
+        let (aql, binds) = build(spec);
+        // ensure both presence and value predicate appear
+        assert!(aql.contains("(doc.`Position` != null)"));
+        assert!(aql.contains("AND"));
+        assert!(aql.contains("<"));
+        // exactly one bind var
+        assert_eq!(binds.len(), 1);
+    }
+
+    #[test]
+    fn or_value_filter_generates_or_clause() {
+        let mut spec = PersistenceQuerySpecification::default();
+        // OR filter: key == "a" OR key == "b"
+        let f1 = FilterExpression::DocumentKey.eq("a");
+        let f2 = FilterExpression::DocumentKey.eq("b");
+        spec.value_filters = Some(f1.or(f2));
+        spec.return_full_docs = false;
+
+        let (aql, binds) = build(spec);
+        assert!(aql.contains("OR"));
+        // two binds: "a" and "b"
+        assert_eq!(binds.len(), 2);
+    }
+
+    #[test]
+    fn return_full_docs_merges_doc_and_key() {
+        let mut spec = PersistenceQuerySpecification::default();
+        spec.return_full_docs = true;
+        // no presence/value filters -> FILTER true
+        let (aql, binds) = build(spec);
+
+        assert!(aql.contains("FILTER true"));
+        // check MERGE(doc, { "_key": doc.`_key` })
+        assert!(aql.contains("RETURN MERGE(doc,"));
+        assert!(aql.contains("\"_key\": doc.`_key`"));
+        assert!(binds.is_empty());
+    }
+}

@@ -743,3 +743,63 @@ impl DatabaseConnection for PostgresDbConnection {
         self.clear_table(RESOURCES_TABLE.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::persistence_query_specification::PersistenceQuerySpecification;
+    use crate::query::filter_expression::FilterExpression;
+
+    /// Helper: run the private build_where and count params
+    fn build_where(spec: PersistenceQuerySpecification) -> (String, usize) {
+        let (sql, params) = PostgresDbConnection::build_where(&spec);
+        (sql, params.len())
+    }
+
+    #[test]
+    fn presence_only() {
+        let mut spec = PersistenceQuerySpecification::default();
+        spec.presence_with = vec!["Health"];
+        let (sql, p) = build_where(spec);
+        assert!(sql.contains("doc ? 'Health'"));
+        assert_eq!(p, 0);
+    }
+
+    #[test]
+    fn presence_without_only() {
+        let mut spec = PersistenceQuerySpecification::default();
+        spec.presence_without = vec!["Creature"];
+        let (sql, p) = build_where(spec);
+        assert!(sql.contains("NOT (doc ? 'Creature')"));
+        assert_eq!(p, 0);
+    }
+
+    #[test]
+    fn value_filter_generates_param_and_expr() {
+        let mut spec = PersistenceQuerySpecification::default();
+        spec.value_filters = Some(FilterExpression::field("Position","x").lt(3.5));
+        let (sql, p) = build_where(spec);
+        assert!(sql.contains("<"));
+        assert!(sql.contains("$1"));
+        assert_eq!(p, 1);
+    }
+
+    #[test]
+    fn or_value_filter_generates_two_params() {
+        let mut spec = PersistenceQuerySpecification::default();
+        let f1 = FilterExpression::DocumentKey.eq("a");
+        let f2 = FilterExpression::DocumentKey.eq("b");
+        spec.value_filters = Some(f1.or(f2));
+        let (sql, p) = build_where(spec);
+        assert!(sql.contains("OR"));
+        assert_eq!(p, 2);
+    }
+
+    #[test]
+    fn empty_spec_maps_to_true() {
+        let spec = PersistenceQuerySpecification::default();
+        let (sql, p) = build_where(spec);
+        assert_eq!(sql, "TRUE");
+        assert_eq!(p, 0);
+    }
+}
