@@ -19,6 +19,9 @@ pub struct PersistenceQuery {
 
     /// Components to fetch/deserialize without gating presence in backend
     pub(crate) fetch_only_component_names: Vec<&'static str>,
+    
+    /// Whether to return full documents (internal use)
+    force_full_docs: bool,
 }
 
 impl PersistenceQuery {
@@ -30,6 +33,7 @@ impl PersistenceQuery {
             filter_expr: None,
             without_component_names: Vec::new(),
             fetch_only_component_names: Vec::new(),
+            force_full_docs: false,
         }
     }
 
@@ -86,30 +90,43 @@ impl PersistenceQuery {
         self
     }
 
+    /// For component tests - internal use
+    #[cfg(test)]
+    pub fn for_component<T: Component + Persist>(mut self) -> Self {
+        self.component_names.push(T::name());
+        self
+    }
+
     /// Build a backend-agnostic spec
-    pub(crate) fn build_spec(&self, full_docs: bool) -> PersistenceQuerySpecification {
+    pub fn build_spec(&self) -> PersistenceQuerySpecification {
         let mut fetch_only = self.component_names.clone();
         fetch_only.extend(self.fetch_only_component_names.iter().copied());
         fetch_only.sort_unstable();
         fetch_only.dedup();
 
+        let presence_with = self.component_names.clone();
+        let presence_without = self.without_component_names.clone();
+        let value_filters = self.filter_expr.clone();
+        let force_full_docs = self.force_full_docs;
+
         let spec = PersistenceQuerySpecification {
-            presence_with: self.component_names.clone(),
-            presence_without: self.without_component_names.clone(),
-            fetch_only,
-            value_filters: self.filter_expr.clone(),
-            return_full_docs: full_docs,
+            presence_with: presence_with.clone(),
+            presence_without: presence_without.clone(),
+            fetch_only: fetch_only.clone(),
+            value_filters: value_filters.clone(),
+            return_full_docs: force_full_docs || (presence_with.is_empty() && presence_without.is_empty()),
+            pagination: None,
         };
         bevy::log::debug!(
             "[builder] build_spec full_docs={} presence_with={:?} without={:?} fetch_only={:?} filter={:?}",
-            full_docs, spec.presence_with, spec.presence_without, spec.fetch_only, spec.value_filters
+            force_full_docs, spec.presence_with, spec.presence_without, spec.fetch_only, spec.value_filters
         );
         spec
     }
 
     /// Run the query for keys only.
     pub async fn fetch_ids(&self) -> Vec<String> {
-        let spec = self.build_spec(false);
+        let spec = self.build_spec();
         self.db.execute_keys(&spec)
             .await
             .expect("query failed")
@@ -121,7 +138,10 @@ impl PersistenceQuery {
          let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
          // fetch full documents in one go
-         let spec = self.build_spec(true);
+         let mut query_with_full_docs = self.clone();
+         query_with_full_docs.force_full_docs = true;
+         let spec = query_with_full_docs.build_spec();
+         
          bevy::log::debug!("[builder] fetch_into issuing execute_documents");
          let documents = self.db.execute_documents(&spec)
              .await
@@ -191,6 +211,19 @@ impl PersistenceQuery {
     }
 }
 
+impl Clone for PersistenceQuery {
+    fn clone(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            component_names: self.component_names.clone(),
+            filter_expr: self.filter_expr.clone(),
+            without_component_names: self.without_component_names.clone(),
+            fetch_only_component_names: self.fetch_only_component_names.clone(),
+            force_full_docs: self.force_full_docs,
+        }
+    }
+}
+
 // Extension trait for PersistenceQuery to add component by name
 pub trait WithComponentExt {
     fn with_component(self, component_name: &'static str) -> Self;
@@ -225,6 +258,9 @@ mod tests {
     use std::sync::Arc;
     use futures::executor::block_on;
 
+    #[persist(component)]
+    struct Comp1;
+
     // Dummy components for skeleton tests
     #[persist(component)]
     struct A { value: i32 }
@@ -240,7 +276,7 @@ mod tests {
                 A::value().gt(10)
                 .and(B::name().eq("test"))
             );
-        let spec = q.build_spec(false);
+        let spec = q.build_spec();
 
         // Should require presence of both components by their Persist::name()
         assert!(spec.presence_with.contains(&<A as Persist>::name()));
@@ -260,7 +296,7 @@ mod tests {
             .filter(A::value().gt(10))
             .or(B::name().eq("foo"));
 
-        let spec = q.build_spec(false);
+        let spec = q.build_spec();
         // Expect filter present and not full-docs
         assert!(spec.value_filters.is_some());
         assert!(!spec.return_full_docs);
@@ -311,11 +347,16 @@ mod tests {
     #[test]
     fn build_spec_empty_filters() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let spec = PersistenceQuery::new(db).build_spec(false);
-        assert!(spec.value_filters.is_none());
-        assert!(spec.presence_with.is_empty());
+        let query = PersistenceQuery::new(db).for_component::<Comp1>();
+        let spec = query.build_spec();
+        
+        assert!(!spec.presence_with.is_empty());
         assert!(spec.presence_without.is_empty());
         assert!(!spec.return_full_docs);
+        
+        // One component requested to fetch
+        assert_eq!(spec.fetch_only.len(), 1);
+        assert_eq!(spec.fetch_only[0], "Comp1");
     }
 
     #[test]
@@ -341,13 +382,13 @@ mod tests {
     #[test]
     fn build_spec_single_and_multi() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let spec_single = PersistenceQuery::new(db.clone()).with::<H>().build_spec(false);
+        let spec_single = PersistenceQuery::new(db.clone()).with::<H>().build_spec();
         assert!(spec_single.presence_with.contains(&H::name()));
 
         let spec_multi = PersistenceQuery::new(db)
             .with::<H>()
             .with::<P>()
-            .build_spec(false);
+            .build_spec();
         assert!(spec_multi.presence_with.contains(&H::name()));
         assert!(spec_multi.presence_with.contains(&P::name()));
     }

@@ -586,6 +586,41 @@ impl DatabaseConnection for ArangoDbConnection {
         }
         .boxed()
     }
+
+    fn count_documents(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> BoxFuture<'static, Result<usize, PersistenceError>> {
+        let db = self.db.clone();
+        let (where_sql, bind_vars) = self.build_query_internal(spec);
+        
+        // Modify the AQL to count instead of returning docs
+        let count_aql = format!(
+            "RETURN LENGTH(\n  FOR doc IN {}\n  FILTER {}\n  RETURN 1\n)",
+            Collection::Entities,
+            where_sql.lines().skip(1).next().unwrap_or("true").trim_start_matches("FILTER ")
+        );
+        
+        bevy::log::debug!("[arango] count_documents AQL: {}", count_aql);
+        
+        async move {
+            let query = AqlQuery::builder()
+                .query(&count_aql)
+                .bind_vars(
+                    bind_vars.iter()
+                        .map(|(k,v)| (k.as_str(), v.clone()))
+                        .collect()
+                )
+                .build();
+                
+            let result: Vec<usize> = db
+                .aql_query(query)
+                .await
+                .map_err(|e| PersistenceError::new(e.to_string()))?;
+                
+            Ok(result.first().copied().unwrap_or(0))
+        }.boxed()
+    }
 }
 
 #[cfg(test)]

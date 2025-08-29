@@ -536,6 +536,41 @@ impl DatabaseConnection for PostgresDbConnection {
         .boxed()
     }
 
+    fn count_documents(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> BoxFuture<'static, Result<usize, PersistenceError>> {
+        let (where_sql, params) = Self::build_where(spec);
+        let sql = format!(
+            "SELECT COUNT(*) FROM {t} WHERE {w}",
+            t = ENTITIES_TABLE,
+            w = where_sql
+        );
+        
+        let client = self.client.clone();
+        bevy::log::debug!("[pg] count_documents: {}; params_len={}", sql, params.len());
+        
+        async move {
+            let client = client.lock().await;
+            
+            // Box typed params as Send
+            let boxed: Vec<Box<dyn ToSql + Sync + Send>> =
+                params.into_iter().map(|p| p.into_box()).collect();
+                
+            // Downcast references to &(dyn ToSql + Sync) for tokio-postgres
+            let param_refs: Vec<&(dyn ToSql + Sync)> =
+                boxed.iter().map(|b| &**b as &(dyn ToSql + Sync)).collect();
+                
+            let row = client
+                .query_one(&sql, param_refs.as_slice())
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg count_documents failed: {}", e)))?;
+                
+            let count: i64 = row.get(0);
+            Ok(count as usize)
+        }.boxed()
+    }
+
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,

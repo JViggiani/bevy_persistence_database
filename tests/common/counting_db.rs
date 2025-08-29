@@ -80,4 +80,15 @@ impl DatabaseConnection for CountingDbConnection {
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
         self.inner.clear_resources()
     }
+
+    fn count_documents(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> BoxFuture<'static, Result<usize, PersistenceError>> {
+        // Increment the counter since this is a DB operation
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        
+        // Forward the call to the inner connection
+        self.inner.count_documents(spec)
+    }
 }

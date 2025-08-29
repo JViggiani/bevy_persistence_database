@@ -1,11 +1,13 @@
 use crate::query::cache::CachePolicy;
 use crate::query::filter_expression::FilterExpression;
+use crate::query::persistence_query_specification::PaginationConfig;
 
 thread_local! {
     static PQ_ADDITIONAL_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
     static PQ_FILTER_EXPRESSION: std::cell::RefCell<Option<FilterExpression>> = const { std::cell::RefCell::new(None) };
     static PQ_CACHE_POLICY: std::cell::RefCell<CachePolicy> = const { std::cell::RefCell::new(CachePolicy::UseCache) };
     static PQ_WITHOUT_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PAGINATION_SIZE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 // Filter helpers
@@ -42,4 +44,20 @@ pub fn push_without_component(name: &'static str) {
 }
 pub fn drain_without_components() -> Vec<&'static str> {
     PQ_WITHOUT_COMPONENTS.with(|w| w.borrow_mut().drain(..).collect())
+}
+
+/// Set the pagination size for the next query
+pub fn set_pagination_size(size: usize) {
+    PAGINATION_SIZE.with(|cell| cell.set(Some(size)));
+}
+
+/// Take the pagination configuration for the current query
+pub fn take_pagination_config() -> Option<PaginationConfig> {
+    PAGINATION_SIZE.with(|cell| {
+        let size = cell.replace(None);
+        size.map(|page_size| PaginationConfig {
+            page_size,
+            page_number: 0,
+        })
+    })
 }

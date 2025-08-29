@@ -3,7 +3,7 @@
 
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::ecs::system::SystemParam;
-use bevy::prelude::{Entity, Query, Res, World};
+use bevy::prelude::{Entity, Query, Res};
 
 use crate::plugins::persistence_plugin::TokioRuntime;
 use crate::query::filter_expression::FilterExpression;
@@ -17,7 +17,7 @@ use crate::query::presence_spec::collect_presence_components;
 use crate::query::query_data_to_components::QueryDataToComponents;
 use crate::query::tls_config::{
     set_filter, take_filter, set_cache_policy, take_cache_policy,
-    drain_additional_components, drain_without_components,
+    drain_additional_components, drain_without_components, set_pagination_size,
 };
 
 
@@ -387,6 +387,13 @@ where
         } else {
             self.query.contains(entity)
         }
+    }
+
+    /// Execute a load with pagination to reduce memory pressure for large datasets
+    pub fn paginated_load(&mut self, page_size: usize) -> &mut Self {
+        // Configure TLS for chunked loading
+        set_pagination_size(page_size);
+        self.ensure_loaded()
     }
 }
 

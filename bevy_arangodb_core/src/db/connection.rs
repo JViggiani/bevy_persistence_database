@@ -1,6 +1,5 @@
 //! Defines the abstract `DatabaseConnection` trait.
 
-use downcast_rs::{Downcast, impl_downcast};
 use futures::future::BoxFuture;
 use mockall::automock;
 use serde_json::Value;
@@ -86,7 +85,7 @@ pub enum TransactionOperation {
 
 /// Abstracts database operations via async returns but remains object-safe.
 #[automock]
-pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
+pub trait DatabaseConnection: Send + Sync + std::fmt::Debug {
     /// Returns the name of the field used as the primary key for documents.
     /// The backend must include this field in any full-document results.
     fn document_key_field(&self) -> &'static str;
@@ -136,8 +135,13 @@ pub trait DatabaseConnection: Send + Sync + Downcast + fmt::Debug {
     fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
 
     fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
+
+    /// Count documents matching a specification without fetching them
+    fn count_documents(
+        &self,
+        spec: &PersistenceQuerySpecification,
+    ) -> BoxFuture<'static, Result<usize, PersistenceError>>;
 }
-impl_downcast!(DatabaseConnection);
 
 /// A resource wrapper around the DatabaseConnection
 #[derive(Resource)]
