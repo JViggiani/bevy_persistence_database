@@ -220,13 +220,20 @@ impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static>
                         bevy::log::trace!("PQ::immediate_apply: world.flush()");
                         world.flush();
 
-                        // Warm-up current archetypes count for diagnostics
+                        // Note: inner query (self.query) has a stale view of the world
+                        // Pass-through methods like get_many() use fresh world queries instead
+
+                        // Compare what the inner Query vs a fresh QueryState sees after immediate apply.
+                        let inner_cnt = self.query.iter().count();
+                        bevy::log::trace!("PQ::immediate_apply: inner_query_iter_count={}", inner_cnt);
+
+                        // Warm-up current archetypes count for diagnostics via fresh QueryState
                         let lhs_cnt = {
                             let mut qs: bevy::ecs::query::QueryState<(Entity, Q), F> =
                                 bevy::ecs::query::QueryState::new(world);
                             qs.iter(&*world).count()
                         };
-                        bevy::log::trace!("PQ::immediate_apply: warm-up lhs_iter={}", lhs_cnt);
+                        bevy::log::trace!("PQ::immediate_apply: fresh_qstate_iter_count={}", lhs_cnt);
 
                         // Fetch resources immediately
                         world.resource_scope(|world, mut session: Mut<PersistenceSession>| {

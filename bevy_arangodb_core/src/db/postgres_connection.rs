@@ -30,6 +30,9 @@ enum SqlParam {
     Text(String),
     Bool(bool),
     F64(f64),
+    TextArray(Vec<String>),
+    BoolArray(Vec<bool>),
+    F64Array(Vec<f64>),
 }
 impl SqlParam {
     // Make boxed params Send so futures remain Send
@@ -38,6 +41,9 @@ impl SqlParam {
             SqlParam::Text(s) => Box::new(s),
             SqlParam::Bool(b) => Box::new(b),
             SqlParam::F64(n) => Box::new(n),
+            SqlParam::TextArray(v) => Box::new(v),
+            SqlParam::BoolArray(v) => Box::new(v),
+            SqlParam::F64Array(v) => Box::new(v),
         }
     }
 }
@@ -302,8 +308,72 @@ impl PostgresDbConnection {
                             }
                         }
                         BinaryOperator::In => {
-                            // Not needed currently; keep disabled for safety
-                            "(FALSE)".to_string()
+                            // Expect RHS to be an array literal; infer type
+                            let (is_key, left_path, left_is_field, left_field_name) = match &**lhs {
+                                FilterExpression::DocumentKey => (true, KEY_COL.to_string(), false, ""),
+                                FilterExpression::Field { component_name, field_name } => {
+                                    (false, field_path(component_name, field_name), true, *field_name)
+                                }
+                                _ => (false, translate_rec(lhs, args), false, ""),
+                            };
+
+                            // Extract array from RHS
+                            let mut arr_text: Option<Vec<String>> = None;
+                            let mut arr_bool: Option<Vec<bool>> = None;
+                            let mut arr_num: Option<Vec<f64>> = None;
+
+                            if let FilterExpression::Literal(Value::Array(items)) = &**rhs {
+                                // classify
+                                if items.iter().all(|v| v.is_string()) {
+                                    arr_text = Some(items.iter().map(|v| v.as_str().unwrap().to_string()).collect());
+                                } else if items.iter().all(|v| v.is_boolean()) {
+                                    arr_bool = Some(items.iter().map(|v| v.as_bool().unwrap()).collect());
+                                } else if items.iter().all(|v| v.is_number()) {
+                                    arr_num = Some(items.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect());
+                                } else {
+                                    // fallback: coerce to strings
+                                    arr_text = Some(items.iter().map(|v| v.to_string()).collect());
+                                }
+                            } else {
+                                // Non-array RHS is invalid for IN; generate FALSE
+                                return "(FALSE)".to_string();
+                            }
+
+                            // Push typed array param and build ANY(...) expression
+                            if is_key {
+                                if let Some(v) = arr_text.take() {
+                                    let idx = { args.push(SqlParam::TextArray(v)); args.len() };
+                                    return format!("({} = ANY(${}::text[]))", KEY_COL, idx);
+                                }
+                                // keys are text; coerce others to text array
+                                let idx = if let Some(v) = arr_num.take() {
+                                    args.push(SqlParam::TextArray(v.into_iter().map(|n| n.to_string()).collect()));
+                                    args.len()
+                                } else if let Some(v) = arr_bool.take() {
+                                    args.push(SqlParam::TextArray(v.into_iter().map(|b| b.to_string()).collect()));
+                                    args.len()
+                                } else { args.len() };
+                                return format!("({} = ANY(${}::text[]))", KEY_COL, idx);
+                            }
+
+                            // Field-based IN
+                            if left_is_field && left_field_name.is_empty() {
+                                // Component object IN unsupported
+                                return "(FALSE)".to_string();
+                            }
+
+                            if let Some(v) = arr_num {
+                                let idx = { args.push(SqlParam::F64Array(v)); args.len() };
+                                format!("(({})::double precision = ANY(${}::double precision[]))", left_path, idx)
+                            } else if let Some(v) = arr_bool {
+                                let idx = { args.push(SqlParam::BoolArray(v)); args.len() };
+                                format!("(({})::boolean = ANY(${}::boolean[]))", left_path, idx)
+                            } else if let Some(v) = arr_text {
+                                let idx = { args.push(SqlParam::TextArray(v)); args.len() };
+                                format!("(({}) = ANY(${}::text[]))", left_path, idx)
+                            } else {
+                                "(FALSE)".to_string()
+                            }
                         }
                     }
                 }
@@ -801,5 +871,15 @@ mod tests {
         let (sql, p) = build_where(spec);
         assert_eq!(sql, "TRUE");
         assert_eq!(p, 0);
+    }
+
+    #[test]
+    fn in_operator_generates_array_param_any_clause() {
+        let mut spec = PersistenceQuerySpecification::default();
+        // key IN ('a','b','c')
+        spec.value_filters = Some(FilterExpression::DocumentKey.in_(vec!["a","b","c"]));
+        let (sql, pcount) = build_where(spec);
+        assert!(sql.contains("ANY("), "SQL should use ANY(...) for IN");
+        assert_eq!(pcount, 1, "single array param expected");
     }
 }
