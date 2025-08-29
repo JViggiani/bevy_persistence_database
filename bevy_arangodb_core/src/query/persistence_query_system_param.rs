@@ -127,92 +127,56 @@ where
         v.dedup();
     }
 
-    /// Collect matching entity IDs immediately using a fresh QueryState.
-    /// No mutation of `self`, so callers don't need `mut`.
-    fn entities_now(&self) -> Vec<Entity> {
-        bevy::log::debug!("PersistentQuery::entities_now called; has_world_ptr={}", self.world_ptr.is_some());
-        if let Some(ptr) = &self.world_ptr {
-            // Need to use mutable world reference for world.query()
-            let world: &mut World = ptr.as_world_mut();
-            
-            // IMPORTANT: Use the same filter type F as the original query
-            let v: Vec<Entity> = world.query_filtered::<(Entity, Q), F>()
-                .iter(world)
-                .map(|(e, _)| e)
-                .collect();
-                
-            bevy::log::debug!("PersistentQuery::entities_now returning {} entities", v.len());
-            return v;
-        }
-        // If no immediate world access, fall back to the stale query
-        self.query.iter().map(|(e, _)| e).collect()
-    }
-
     /// Returns an iterator over all matching entities with up-to-date world state,
     /// including entities loaded in the current frame.
     /// This overrides the `iter()` method from `Deref<Target=Query>`.
     pub fn iter(&self) -> Box<dyn Iterator<Item = <(Entity, Q) as QueryData>::Item<'_>> + '_> {
-        bevy::log::debug!("PersistentQuery::iter called (fresh version)");
+        bevy::log::trace!("PersistentQuery::iter called");
         
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
             
-            // Get entities first, then filter map through the query
-            let entities = self.entities_now();
-            bevy::log::debug!("PersistentQuery::iter using {} entities from entities_now()", entities.len());
-            
-            // Create fresh query state and use it directly
+            // Create fresh query state and use it directly - must be mutable
             let mut query_state = world.query_filtered::<(Entity, Q), F>();
             
-            // Collect into Vec to avoid lifetime issues with the query state
-            let results: Vec<_> = entities.into_iter()
-                .filter_map(|entity| query_state.get(world, entity).ok())
-                .collect();
-            
-            bevy::log::debug!("PersistentQuery::iter collected {} results", results.len());
-            return Box::new(results.into_iter());
+            // Collect all results to avoid reference to local query_state
+            let results: Vec<<(Entity, Q) as QueryData>::Item<'_>> = query_state.iter(world).collect();
+            Box::new(results.into_iter())
+        } else {
+            // Fall back to the original query if no immediate world access
+            Box::new(self.query.iter())
         }
-        
-        // Fall back to the original query if no immediate world access
-        Box::new(self.query.iter())
     }
 
     /// Returns a mutable iterator over all matching entities with up-to-date world state.
     /// This overrides the `iter_mut()` method from `Deref<Target=Query>`.
     pub fn iter_mut(&mut self) -> Box<dyn Iterator<Item = <(Entity, Q) as QueryData>::Item<'_>> + '_> {
-        bevy::log::debug!("PersistentQuery::iter_mut called (fresh version)");
+        bevy::log::trace!("PersistentQuery::iter_mut called");
         
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
             
-            // Get entities first, then filter map through the query
-            let entities = self.entities_now();
-            bevy::log::debug!("PersistentQuery::iter_mut using {} entities from entities_now()", entities.len());
-            
-            // Create fresh query state and use it directly
+            // Create fresh query state and use it directly - must be mutable
             let mut query_state = world.query_filtered::<(Entity, Q), F>();
             
-            // Collect into Vec to avoid lifetime issues with the query state
-            let results: Vec<_> = entities.into_iter()
-                .filter_map(|entity| query_state.get(world, entity).ok())
-                .collect();
-            
-            bevy::log::debug!("PersistentQuery::iter_mut collected {} results", results.len());
-            return Box::new(results.into_iter());
+            // Collect all results to avoid reference to local query_state
+            let results: Vec<<(Entity, Q) as QueryData>::Item<'_>> = query_state.iter(world).collect();
+            Box::new(results.into_iter())
+        } else {
+            // Fall back to the original query if no immediate world access
+            Box::new(self.query.iter_mut())
         }
-        
-        // Fall back to the original query if no immediate world access
-        Box::new(self.query.iter_mut())
     }
 
     /// Gets data for a specific entity with up-to-date world state.
     /// This overrides the `get()` method from `Deref<Target=Query>`.
+    #[inline]
     pub fn get(&self, entity: Entity) -> Result<<(Entity, Q) as QueryData>::Item<'_>, bevy::ecs::query::QueryEntityError> {
-        bevy::log::debug!("PersistentQuery::get called (fresh version)");
+        bevy::log::trace!("PersistentQuery::get called for entity {:?}", entity);
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            let mut query_state = world.query_filtered::<(Entity, Q), F>();
-            query_state.get(world, entity)
+            world.query_filtered::<(Entity, Q), F>().get(world, entity)
         } else {
             self.query.get(entity)
         }
@@ -220,12 +184,13 @@ where
 
     /// Gets mutable data for a specific entity with up-to-date world state.
     /// This overrides the `get_mut()` method from `Deref<Target=Query>`.
+    #[inline]
     pub fn get_mut(&mut self, entity: Entity) -> Result<<(Entity, Q) as QueryData>::Item<'_>, bevy::ecs::query::QueryEntityError> {
-        bevy::log::debug!("PersistentQuery::get_mut called (fresh version)");
+        bevy::log::trace!("PersistentQuery::get_mut called for entity {:?}", entity);
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            let mut query_state = world.query_filtered::<(Entity, Q), F>();
-            query_state.get(world, entity)
+            world.query_filtered::<(Entity, Q), F>().get(world, entity)
         } else {
             self.query.get_mut(entity)
         }
@@ -233,12 +198,13 @@ where
 
     /// Returns a single entity result with up-to-date world state.
     /// This overrides the `single()` method from `Deref<Target=Query>`.
+    #[inline]
     pub fn single(&self) -> Result<<(Entity, Q) as QueryData>::Item<'_>, bevy::ecs::query::QuerySingleError> {
-        bevy::log::debug!("PersistentQuery::single called (fresh version)");
+        bevy::log::trace!("PersistentQuery::single called");
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            let mut query_state = world.query_filtered::<(Entity, Q), F>();
-            query_state.single(world)
+            world.query_filtered::<(Entity, Q), F>().single(world)
         } else {
             self.query.single()
         }
@@ -246,12 +212,13 @@ where
 
     /// Returns a single mutable entity result with up-to-date world state.
     /// This overrides the `single_mut()` method from `Deref<Target=Query>`.
+    #[inline]
     pub fn single_mut(&mut self) -> Result<<(Entity, Q) as QueryData>::Item<'_>, bevy::ecs::query::QuerySingleError> {
-        bevy::log::debug!("PersistentQuery::single_mut called (fresh version)");
+        bevy::log::trace!("PersistentQuery::single_mut called");
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            let mut query_state = world.query_filtered::<(Entity, Q), F>();
-            query_state.single(world)
+            world.query_filtered::<(Entity, Q), F>().single(world)
         } else {
             self.query.single_mut()
         }
@@ -266,33 +233,18 @@ where
         [<< (Entity, Q) as QueryData>::ReadOnly as QueryData>::Item<'_>; N],
         bevy::ecs::query::QueryEntityError,
     > {
-        bevy::log::debug!(
-            "PersistentQuery::get_many called; has_world_ptr={}; N={}; entities={:?}",
-            self.world_ptr.is_some(),
-            N,
-            entities
-        );
+        bevy::log::trace!("PersistentQuery::get_many called with {} entities", N);
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
             
-            // Log entity existence and component match for debugging
             for (i, &entity) in entities.iter().enumerate() {
                 if !world.entities().contains(entity) {
                     bevy::log::warn!("Entity at index {} ({:?}) does not exist in world", i, entity);
                 }
             }
             
-            let mut query_state = world.query_filtered::<(Entity, Q), F>();
-            match query_state.get_many(world, entities) {
-                Ok(result) => {
-                    bevy::log::debug!("get_many succeeded");
-                    Ok(result)
-                }
-                Err(err) => {
-                    bevy::log::warn!("get_many failed: {:?}", err);
-                    Err(err)
-                }
-            }
+            world.query_filtered::<(Entity, Q), F>().get_many(world, entities)
         } else {
             self.query.get_many(entities)
         }
@@ -307,15 +259,11 @@ where
         [<< (Entity, Q) as QueryData>::ReadOnly as QueryData>::Item<'_>; N],
         bevy::ecs::query::QueryEntityError,
     > {
-        bevy::log::debug!(
-            "PersistentQuery::get_many_mut called; has_world_ptr={}; N={}",
-            self.world_ptr.is_some(),
-            N
-        );
+        bevy::log::trace!("PersistentQuery::get_many_mut called with {} entities", N);
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            let mut query_state = world.query_filtered::<(Entity, Q), F>();
-            query_state.get_many(world, entities)
+            world.query_filtered::<(Entity, Q), F>().get_many(world, entities)
         } else {
             self.query.get_many_mut(entities)
         }
@@ -327,30 +275,29 @@ where
         &self,
         entities: EntityList,
     ) -> Box<dyn Iterator<Item = <(Entity, Q) as QueryData>::Item<'_>> + '_> {
-        bevy::log::debug!("PersistentQuery::iter_many called (fresh version)");
+        bevy::log::trace!("PersistentQuery::iter_many called");
+        
+        // Collect into Vec because we need to own the entities across the iterator lifetime
+        let entity_vec: Vec<Entity> = entities.into_iter().collect();
         
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            
-            // Collect entities into a Vec
-            let entity_vec: Vec<Entity> = entities.into_iter().collect();
-            bevy::log::debug!("PersistentQuery::iter_many using {} entities", entity_vec.len());
-            
-            // Create fresh query state and use it directly
             let mut query_state = world.query_filtered::<(Entity, Q), F>();
             
-            // Collect into Vec to avoid lifetime issues with the query state
-            let results: Vec<_> = entity_vec.into_iter()
-                .filter_map(|entity| query_state.get(world, entity).ok())
-                .collect();
+            // Create a Vec of results to avoid closure lifetime issues
+            let mut results = Vec::new();
+            for entity in entity_vec {
+                if let Ok(item) = query_state.get(world, entity) {
+                    results.push(item);
+                }
+            }
             
-            bevy::log::debug!("PersistentQuery::iter_many collected {} results", results.len());
-            return Box::new(results.into_iter());
+            // Return an iterator over the collected results
+            Box::new(results.into_iter())
+        } else {
+            // Without immediate world access, use regular query
+            Box::new(self.query.iter_many(entity_vec))
         }
-        
-        // Fall back to the original query if no immediate world access
-        let entity_vec: Vec<Entity> = entities.into_iter().collect();
-        Box::new(self.query.iter_many(entity_vec))
     }
 
     /// Iterates with mutable access over a specific set of entities that match the query.
@@ -359,103 +306,44 @@ where
         &mut self,
         entities: EntityList,
     ) -> Box<dyn Iterator<Item = <(Entity, Q) as QueryData>::Item<'_>> + '_> {
-        bevy::log::debug!("PersistentQuery::iter_many_mut called (fresh version)");
+        bevy::log::trace!("PersistentQuery::iter_many_mut called");
+        
+        // Collect into Vec because we need to own the entities across the iterator lifetime
+        let entity_vec: Vec<Entity> = entities.into_iter().collect();
         
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
-            
-            // Collect entities into a Vec
-            let entity_vec: Vec<Entity> = entities.into_iter().collect();
-            bevy::log::debug!("PersistentQuery::iter_many_mut using {} entities", entity_vec.len());
-            
-            // Create fresh query state and use it directly
             let mut query_state = world.query_filtered::<(Entity, Q), F>();
             
-            // Collect into Vec to avoid lifetime issues with the query state
-            let results: Vec<_> = entity_vec.into_iter()
-                .filter_map(|entity| query_state.get(world, entity).ok())
-                .collect();
+            // Create a Vec of results to avoid closure lifetime issues
+            let mut results = Vec::new();
+            for entity in entity_vec {
+                if let Ok(item) = query_state.get(world, entity) {
+                    results.push(item);
+                }
+            }
             
-            bevy::log::debug!("PersistentQuery::iter_many_mut collected {} results", results.len());
-            return Box::new(results.into_iter());
+            // Return an iterator over the collected results
+            Box::new(results.into_iter())
+        } else {
+            // Without immediate world access, use regular query
+            Box::new(self.query.iter_many_mut(entity_vec))
         }
-        
-        // Fall back to the original query if no immediate world access
-        let entity_vec: Vec<Entity> = entities.into_iter().collect();
-        Box::new(self.query.iter_many_mut(entity_vec))
     }
 
     /// Returns an iterator over all combinations of N entities with up-to-date world state.
     /// This overrides the `iter_combinations()` method from `Deref<Target=Query>`.
     pub fn iter_combinations<const N: usize>(&self) -> Box<dyn Iterator<Item = [<(Entity, Q) as QueryData>::Item<'_>; N]> + '_> {
-        bevy::log::debug!("PersistentQuery::iter_combinations called (fresh version)");
-        // We'll keep this implementation since it doesn't have reference lifetime issues
-        if let Some(_ptr) = &self.world_ptr {
-            // Get all entities and manually build combinations
-            let entities = self.entities_now();
+        bevy::log::trace!("PersistentQuery::iter_combinations called");
+        
+        if let Some(ptr) = &self.world_ptr {
+            let world = ptr.as_world_mut();
+            let mut query_state = world.query_filtered::<(Entity, Q), F>();
             
-            // Generate combinations of entity IDs
-            struct Combinations<I> {
-                indices: Vec<usize>,
-                items: Vec<I>,
-                done: bool,
-                n: usize,
-            }
-            
-            impl<I: Clone> Iterator for Combinations<I> {
-                type Item = Vec<I>;
-                
-                fn next(&mut self) -> Option<Self::Item> {
-                    if self.done || self.items.len() < self.n {
-                        return None;
-                    }
-                    
-                    let result: Vec<I> = self.indices.iter().map(|&i| self.items[i].clone()).collect();
-                    
-                    // Find the rightmost index that can be incremented
-                    let mut i = self.n - 1;
-                    while i > 0 && self.indices[i] == self.items.len() - (self.n - i) {
-                        i -= 1;
-                    }
-                    
-                    // If we couldn't find one, we're done
-                    if i == 0 && self.indices[0] == self.items.len() - self.n {
-                        self.done = true;
-                    } else {
-                        // Increment the index and reset all to the right
-                        self.indices[i] += 1;
-                        for j in i+1..self.n {
-                            self.indices[j] = self.indices[j-1] + 1;
-                        }
-                    }
-                    
-                    Some(result)
-                }
-            }
-            
-            let combinations = Combinations {
-                indices: (0..N).collect(),
-                items: entities,
-                done: false,
-                n: N,
-            };
-            
-            // Map combinations of entity IDs to combinations of query results
-            Box::new(combinations.filter_map(move |combo| {
-                if combo.len() != N {
-                    return None;
-                }
-                
-                let entity_array: [Entity; N] = match combo.try_into() {
-                    Ok(arr) => arr,
-                    Err(_) => return None,
-                };
-                
-                match self.get_many(entity_array) {
-                    Ok(results) => Some(results),
-                    Err(_) => None,
-                }
-            }))
+            // Collect all combinations to avoid reference to local query_state
+            let combinations: Vec<[<(Entity, Q) as QueryData>::Item<'_>; N]> = 
+                query_state.iter_combinations::<N>(world).collect();
+            Box::new(combinations.into_iter())
         } else {
             // Without immediate world access, use regular query
             Box::new(self.query.iter_combinations::<N>())
@@ -465,10 +353,16 @@ where
     /// Returns an iterator over all combinations of N entities with mutable access and up-to-date world state.
     /// This overrides the `iter_combinations_mut()` method from `Deref<Target=Query>`.
     pub fn iter_combinations_mut<const N: usize>(&mut self) -> Box<dyn Iterator<Item = [<(Entity, Q) as QueryData>::Item<'_>; N]> + '_> {
-        bevy::log::debug!("PersistentQuery::iter_combinations_mut called (fresh version)");
-        if let Some(_ptr) = &self.world_ptr {
-            // Same implementation as iter_combinations since we create fresh QueryState anyway
-            self.iter_combinations::<N>()
+        bevy::log::trace!("PersistentQuery::iter_combinations_mut called");
+        
+        if let Some(ptr) = &self.world_ptr {
+            let world = ptr.as_world_mut();
+            let mut query_state = world.query_filtered::<(Entity, Q), F>();
+            
+            // Collect all combinations to avoid reference to local query_state
+            let combinations: Vec<[<(Entity, Q) as QueryData>::Item<'_>; N]> = 
+                query_state.iter_combinations::<N>(world).collect();
+            Box::new(combinations.into_iter())
         } else {
             // Without immediate world access, use regular query
             Box::new(self.query.iter_combinations_mut::<N>())
@@ -477,8 +371,10 @@ where
 
     /// Checks if the given entity matches the query.
     /// This overrides the `contains()` method from `Deref<Target=Query>`.
+    #[inline]
     pub fn contains(&self, entity: Entity) -> bool {
-        bevy::log::debug!("PersistentQuery::contains called (fresh version)");
+        bevy::log::trace!("PersistentQuery::contains called for entity {:?}", entity);
+        
         if let Some(ptr) = &self.world_ptr {
             let world = ptr.as_world_mut();
             
@@ -486,8 +382,8 @@ where
             let last_change_tick = world.last_change_tick();
             let change_tick = world.change_tick();
             
-            let query_state = world.query_filtered::<(Entity, Q), F>();
-            query_state.contains(entity, world, last_change_tick, change_tick)
+            world.query_filtered::<(Entity, Q), F>()
+                .contains(entity, world, last_change_tick, change_tick)
         } else {
             self.query.contains(entity)
         }
