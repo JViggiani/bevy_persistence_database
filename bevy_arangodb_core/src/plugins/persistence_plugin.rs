@@ -430,19 +430,21 @@ fn handle_commit_completed(
                             let nv = session.version_manager.get_version(&vk).unwrap_or(0) + 1;
                             session.version_manager.set_version(vk, nv);
                         }
+                        
                         // bump existing-entity versions
-                        let new_set: HashSet<_> = new_entities.iter().cloned().collect();
-                        let keys_to_update: Vec<_> = meta.dirty_entities
-                            .iter()
-                            .filter(|e| !new_set.contains(e))
-                            .filter_map(|e| session.entity_keys.get(e).cloned())
-                            .collect();
-                        for key in keys_to_update {
-                            let vk = VersionKey::Entity(key.clone());
-                            if let Some(v) = session.version_manager.get_version(&vk) {
-                                session.version_manager.set_version(vk, v + 1);
+                        for &entity in meta.dirty_entities.iter() {
+                            // Skip entities that were newly created in this commit
+                            if !new_entities.contains(&entity) {
+                                // Only update versions for existing entities (ones with keys)
+                                if let Some(key) = session.entity_keys.get(&entity) {
+                                    let vk = VersionKey::Entity(key.clone());
+                                    if let Some(v) = session.version_manager.get_version(&vk) {
+                                        session.version_manager.set_version(vk, v + 1);
+                                    }
+                                }
                             }
                         }
+                        
                         // remove versions for deleted entities
                         for e in &meta.despawned_entities {
                             if let Some(key) = session.entity_keys.get(e).cloned() {
