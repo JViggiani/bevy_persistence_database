@@ -1,11 +1,11 @@
 [package]
-name = "bevy_arangodb_root"
+name = "bevy_persistence_database_root"
 version = "0.1.0"
 edition = "2021"
 
 [workspace]
 members = [
-  "bevy_arangodb_core",
+  "bevy_persistence_database_core",
 ]
 
 [workspace.package]
@@ -31,9 +31,9 @@ debug = true
 
 [features]
 default = ["postgres", "arango"]
-arango = ["bevy_arangodb_core/arango"]
-postgres = ["bevy_arangodb_core/postgres"]
-ra-fallback = ["bevy_arangodb_derive/ra-fallback"]
+arango = ["bevy_persistence_database_core/arango"]
+postgres = ["bevy_persistence_database_core/postgres"]
+ra-fallback = ["bevy_persistence_database_derive/ra-fallback"]
 
 [dev-dependencies]
 bevy              = { workspace = true }
@@ -44,5 +44,5 @@ tokio             = { workspace = true, features = ["full", "macros", "rt"] }
 ctor              = { workspace = true }
 futures           = { workspace = true }
 tracing-subscriber = "0.3.19"
-bevy_arangodb_core   = { path = "bevy_arangodb_core" }
-bevy_arangodb_derive = { path = "bevy_arangodb_derive" }
+bevy_persistence_database_core   = { path = "bevy_persistence_database_core" }
+bevy_persistence_database_derive = { path = "bevy_persistence_database_derive" }

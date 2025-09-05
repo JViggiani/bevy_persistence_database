@@ -1,4 +1,4 @@
-//! A Bevy `Plugin` for integrating `bevy_arangodb`.
+//! A Bevy `Plugin` for integrating `bevy_persistence_database`.
 //!
 //! This plugin simplifies the setup process by managing the `PersistenceSession`
 //! as a resource and automatically adding systems for change detection.
@@ -558,7 +558,7 @@ impl Default for PersistencePluginConfig {
     }
 }
 
-/// A Bevy `Plugin` that sets up `bevy_arangodb`.
+/// A Bevy `Plugin` that sets up `bevy_persistence_database`.
 pub struct PersistencePluginCore {
     db: Arc<dyn DatabaseConnection>,
     config: PersistencePluginConfig,

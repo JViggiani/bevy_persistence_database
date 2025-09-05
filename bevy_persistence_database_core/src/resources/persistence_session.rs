@@ -470,7 +470,7 @@ mod arango_session {
     use crate::persist::Persist;
     use crate::registration::COMPONENT_REGISTRY;
     use bevy::prelude::World;
-    use bevy_arangodb_derive::persist;
+    use bevy_persistence_database_derive::persist;
     use serde_json::json;
 
     fn setup() {

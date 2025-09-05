@@ -1,12 +1,12 @@
 use bevy::prelude::{App, Events, IntoScheduleConfigs};
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
     TriggerCommit,
     commit_sync, PersistentQuery, persistence_plugin::PersistenceSystemSet,
 };
 use crate::common::*;
 use std::sync::Arc;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 
 #[test]
 fn test_trigger_commit_clears_event_queue() {

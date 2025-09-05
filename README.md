@@ -1,4 +1,4 @@
-# bevy_arangodb
+# bevy_persistence_database
 
 Persistence for Bevy ECS to ArangoDB or Postgres with an idiomatic Bevy Query API.
 
@@ -29,12 +29,12 @@ Add the core and derive crates, enabling one or both backends.
 ```toml
 [dependencies]
 bevy = { version = "0.16" }
-bevy_arangodb_core = { path = "bevy_arangodb/bevy_arangodb_core", features = ["arango", "postgres"] }
-bevy_arangodb_derive = { path = "bevy_arangodb/bevy_arangodb_derive" }
+bevy_persistence_database_core = { path = "bevy_persistence_database/bevy_persistence_database_core", features = ["arango", "postgres"] }
+bevy_persistence_database_derive = { path = "bevy_persistence_database/bevy_persistence_database_derive" }
 ```
 
 Backends and features
-- Enable features on bevy_arangodb_core:
+- Enable features on bevy_persistence_database_core:
   - arango: builds the ArangoDB backend (arangors).
   - postgres: builds the Postgres backend (tokio-postgres).
 - Provide an Arc<dyn DatabaseConnection> at startup:
@@ -49,7 +49,7 @@ Quickstart
 1) Persist-able types.
 
 ```rust
-use bevy_arangodb_derive::persist;
+use bevy_persistence_database_derive::persist;
 
 #[persist(component)]
 #[derive(Clone)]
@@ -67,7 +67,7 @@ pub struct GameSettings { pub difficulty: f32, pub map_name: String }
 
 ```rust
 use bevy::prelude::*;
-use bevy_arangodb_core::{persistence_plugin::PersistencePlugins, ArangoDbConnection};
+use bevy_persistence_database_core::{persistence_plugin::PersistencePlugins, ArangoDbConnection};
 use std::sync::Arc;
 
 fn main() {
@@ -81,7 +81,7 @@ fn main() {
     let db_name = "bevy_example";
     rt.block_on(ArangoDbConnection::ensure_database(url, user, pass, db_name)).unwrap();
     let db = rt.block_on(ArangoDbConnection::connect(url, user, pass, db_name)).unwrap();
-    let db = Arc::new(db) as Arc<dyn bevy_arangodb_core::DatabaseConnection>;
+    let db = Arc::new(db) as Arc<dyn bevy_persistence_database_core::DatabaseConnection>;
 
     App::new()
         .add_plugins(PersistencePlugins(db))
@@ -96,7 +96,7 @@ Loading pattern
 
 ```rust
 use bevy::prelude::*;
-use bevy_arangodb_core::PersistentQuery;
+use bevy_persistence_database_core::PersistentQuery;
 
 fn sys(
     mut pq: PersistentQuery<(&Health, Option<&Position>), (With<Health>, Without<Creature>, Or<(With<PlayerName>,)>)>
@@ -135,7 +135,7 @@ fn pass_through(mut pq: PersistentQuery<&Health>) {
 Key filtering
 - Single key:
 ```rust
-use bevy_arangodb_core::{PersistentQuery, Guid};
+use bevy_persistence_database_core::{PersistentQuery, Guid};
 
 fn by_key(mut pq: PersistentQuery<&Health>) {
     let _ = pq.where(Guid::key_field().eq("my-key")).ensure_loaded();

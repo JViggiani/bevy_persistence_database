@@ -252,7 +252,7 @@ mod tests {
     use super::*;
     use crate::db::connection::MockDatabaseConnection;
     use crate::{Persist, persistence_plugin::PersistencePluginCore};
-    use bevy_arangodb_derive::persist;
+    use bevy_persistence_database_derive::persist;
     use bevy::prelude::App;
     use serde_json::json;
     use std::sync::Arc;

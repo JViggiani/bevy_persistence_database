@@ -1,10 +1,10 @@
 use bevy::prelude::*;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     commit_sync, Guid, Persist, plugins::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, CommitStatus,
 };
 
 use crate::common::*;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
 fn test_create_new_entity() {

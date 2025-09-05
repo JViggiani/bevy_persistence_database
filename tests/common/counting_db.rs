@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-use bevy_arangodb_core::{DatabaseConnection, PersistenceError, TransactionOperation};
-use bevy_arangodb_core::query::persistence_query_specification::PersistenceQuerySpecification;
+use bevy_persistence_database_core::{DatabaseConnection, PersistenceError, TransactionOperation};
+use bevy_persistence_database_core::query::persistence_query_specification::PersistenceQuerySpecification;
 use futures::future::BoxFuture;
 use serde_json::Value;
 

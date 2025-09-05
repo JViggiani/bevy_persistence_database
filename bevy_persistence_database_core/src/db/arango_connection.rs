@@ -126,7 +126,7 @@ impl ArangoDbConnection {
     ) -> String {
         match expr {
             FilterExpression::Literal(v) => {
-                let name = format!("bevy_arangodb_bind_{}", bind_vars.len());
+                let name = format!("bevy_persistence_database_bind_{}", bind_vars.len());
                 bind_vars.insert(name.clone(), v.clone());
                 format!("@{}", name)
             }

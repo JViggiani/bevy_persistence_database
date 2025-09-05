@@ -1,9 +1,9 @@
 use bevy::prelude::*;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
 };
 use crate::common::*;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 
 fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
     // This will load entities from the database

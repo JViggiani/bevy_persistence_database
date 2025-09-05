@@ -1,9 +1,9 @@
 use bevy::prelude::App;
-use bevy_arangodb_core::PersistencePluginCore;
-use bevy_arangodb_core::persistence_plugin::PersistencePluginConfig;
-use bevy_arangodb_core::{ ArangoDbConnection, DatabaseConnection };
+use bevy_persistence_database_core::PersistencePluginCore;
+use bevy_persistence_database_core::persistence_plugin::PersistencePluginConfig;
+use bevy_persistence_database_core::{ ArangoDbConnection, DatabaseConnection };
 #[cfg(feature = "postgres")]
-use bevy_arangodb_core::PostgresDbConnection;
+use bevy_persistence_database_core::PostgresDbConnection;
 use std::sync::Arc;
 use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}, Mutex};
 use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
@@ -22,12 +22,12 @@ struct GlobalContainerState {
 
 impl Drop for GlobalContainerState {
     fn drop(&mut self) {
-        let keep = std::env::var("BEVY_ARANGODB_KEEP_CONTAINER")
+        let keep = std::env::var("bevy_persistence_database_KEEP_CONTAINER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if keep {
             if self.container.lock().unwrap().is_some() {
-                eprintln!("[bevy_arangodb tests] BEVY_ARANGODB_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", self.base_url);
+                eprintln!("[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", self.base_url);
             }
             return;
         }
@@ -91,12 +91,12 @@ fn initialize_logging() {
 #[ctor::dtor]
 fn teardown_container() {
     if let Some(state) = GLOBAL.get() {
-        let keep = std::env::var("BEVY_ARANGODB_KEEP_CONTAINER")
+        let keep = std::env::var("bevy_persistence_database_KEEP_CONTAINER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if keep {
             if state.container.lock().unwrap().is_some() {
-                eprintln!("[bevy_arangodb tests] BEVY_ARANGODB_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", state.base_url);
+                eprintln!("[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", state.base_url);
             }
             return;
         }
@@ -130,7 +130,7 @@ pub enum TestBackend { Arango, Postgres }
 
 // Public: which backends to run (default to all compiled)
 pub fn configured_backends() -> Vec<TestBackend> {
-    let raw = std::env::var("BEVY_ARANGODB_TEST_BACKENDS").unwrap_or_default();
+    let raw = std::env::var("bevy_persistence_database_TEST_BACKENDS").unwrap_or_default();
     let mut out = Vec::new();
     for token in raw.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) {
         match token.as_str() {
@@ -160,12 +160,12 @@ struct PgGlobalContainerState {
 #[cfg(feature = "postgres")]
 impl Drop for PgGlobalContainerState {
     fn drop(&mut self) {
-        let keep = std::env::var("BEVY_ARANGODB_KEEP_CONTAINER")
+        let keep = std::env::var("bevy_persistence_database_KEEP_CONTAINER")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         if keep {
             if self.container.lock().unwrap().is_some() {
-                eprintln!("[bevy_arangodb tests] BEVY_ARANGODB_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}", self.host, self.port);
+                eprintln!("[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}", self.host, self.port);
             }
             return;
         }
@@ -311,7 +311,7 @@ fn teardown_pg_container() {
         if keep {
             if state.container.lock().unwrap().is_some() {
                 eprintln!(
-                    "[bevy_arangodb tests] BEVY_POSTGRESDB_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}",
+                    "[bevy_persistence_database tests] BEVY_POSTGRESDB_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}",
                     state.host, state.port
                 );
             }

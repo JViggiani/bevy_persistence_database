@@ -1,4 +1,4 @@
-use bevy_arangodb_derive::persist;
+use bevy_persistence_database_derive::persist;
 
 #[derive(Clone)]
 #[persist(resource)]

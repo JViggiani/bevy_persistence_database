@@ -1,9 +1,9 @@
 use bevy::prelude::App;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
 };
 use crate::common::*;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
 fn test_load_resources_alongside_entities() {

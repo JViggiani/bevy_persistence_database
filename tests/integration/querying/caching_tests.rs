@@ -1,11 +1,11 @@
 use bevy::prelude::*;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
     DatabaseConnection, db::connection::DatabaseConnectionResource,
 };
 use crate::common::*;
 use crate::common::CountingDbConnection;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 
 // System that uses query twice to test caching

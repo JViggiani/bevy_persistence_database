@@ -2,13 +2,13 @@ use bevy::prelude::*;
 use bevy::prelude::IntoScheduleConfigs;
 use bevy::ecs::query::QueryState;
 use bevy::ecs::system::QueryLens;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     PersistentQuery,
     commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
 };
-use bevy_arangodb_core::query::immediate_world_ptr::ImmediateWorldPtr;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_core::query::immediate_world_ptr::ImmediateWorldPtr;
+use bevy_persistence_database_derive::db_matrix_test;
 use crate::common::*;
 
 // One PersistentQuery + one regular Query: join world-only after loading.

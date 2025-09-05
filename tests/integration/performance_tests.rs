@@ -1,13 +1,13 @@
 use bevy::prelude::App;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     commit_sync, persistence_plugin::PersistencePlugins, PersistencePluginCore, 
     persistence_plugin::PersistencePluginConfig
 };
-use bevy_arangodb_core::PersistentQuery;
+use bevy_persistence_database_core::PersistentQuery;
 use bevy::prelude::With;
 use std::time::Instant;
 use crate::common::*;
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 // Add imports for CSV output, timestamp, and git hash
 use std::{
     fs::OpenOptions,

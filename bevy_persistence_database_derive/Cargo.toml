@@ -1,5 +1,5 @@
 [package]
-name = "bevy_arangodb_derive"
+name = "bevy_persistence_database_derive"
 version = "0.1.0"
 edition.workspace = true
 

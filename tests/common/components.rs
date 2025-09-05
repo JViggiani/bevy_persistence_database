@@ -1,5 +1,5 @@
 use bevy::reflect::Reflect;
-use bevy_arangodb_derive::persist;
+use bevy_persistence_database_derive::persist;
 
 // Example component which derives additional traits - not required for the tests, but shows how to use the derive macro.
 #[derive(Debug, Reflect, Clone)]

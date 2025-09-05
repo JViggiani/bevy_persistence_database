@@ -1,5 +1,5 @@
 [package]
-name = "bevy_arangodb_core"
+name = "bevy_persistence_database_core"
 version = "0.1.0"
 edition.workspace = true
 
@@ -28,6 +28,6 @@ postgres = ["dep:tokio-postgres", "dep:uuid"]
 once_cell = { workspace = true }
 testcontainers = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
-bevy_arangodb_derive = { path = "../bevy_arangodb_derive" }
+bevy_persistence_database_derive = { path = "../bevy_persistence_database_derive" }
 ctor = { workspace = true }
 mockall.workspace = true

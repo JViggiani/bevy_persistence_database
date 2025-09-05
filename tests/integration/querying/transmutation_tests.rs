@@ -1,11 +1,11 @@
 use bevy::prelude::*;
 use bevy::prelude::IntoScheduleConfigs;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     PersistentQuery,
     commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
 };
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 use crate::common::*;
 
 // Load via ensure_loaded, then transmute to a world-only view and verify.

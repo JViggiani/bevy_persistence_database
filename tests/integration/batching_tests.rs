@@ -1,15 +1,15 @@
 use bevy::prelude::*;
-use bevy_arangodb_core::{
+use bevy_persistence_database_core::{
     commit_sync, CommitStatus, PersistenceError, Guid,
     persistence_plugin::PersistencePlugins, MockDatabaseConnection, PersistencePluginCore,
     persistence_plugin::PersistencePluginConfig, Collection, TransactionOperation,
 };
-use bevy_arangodb_core::PersistentQuery;
+use bevy_persistence_database_core::PersistentQuery;
 use bevy::prelude::With;
 use crate::common::{make_app, run_async, Health};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use bevy_arangodb_derive::db_matrix_test;
+use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
 fn test_successful_batch_commit_of_new_entities() {
@@ -241,7 +241,7 @@ fn test_atomic_multi_batch_commit() {
 #[test]
 fn test_batches_respect_config_max_ops() {
     use std::sync::Arc;
-    use bevy_arangodb_core::{
+    use bevy_persistence_database_core::{
         persistence_plugin::PersistencePluginConfig,
         PersistencePluginCore,
         MockDatabaseConnection,
