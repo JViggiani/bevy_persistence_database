@@ -2,10 +2,9 @@
 
 use bevy::prelude::Component;
 use serde::{Deserialize, Serialize, Serializer, Deserializer};
-use crate::dsl::Expression;
 
 /// A globally-unique identifier for an entity, used to link the Bevy `Entity`
-/// to its corresponding document in ArangoDB. This is typically the `_key`.
+/// to its corresponding document in the database. This is typically the document key.
 /// The inner value is private to prevent manual modification.
 #[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Guid(String);
@@ -39,11 +38,8 @@ impl Guid {
         &self.0
     }
 
-    /// Creates a DSL expression for the document _key field
-    pub fn key_field() -> Expression {
-        Expression::Field { 
-            component_name: "_key", 
-            field_name: "" 
-        }
+    /// Creates a value-expression for the document key field
+    pub fn key_field() -> crate::query::filter_expression::FilterExpression {
+        crate::query::filter_expression::FilterExpression::DocumentKey
     }
 }

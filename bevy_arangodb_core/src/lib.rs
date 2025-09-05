@@ -24,19 +24,24 @@ pub use plugins::persistence_plugin;
 pub use components::Guid;
 pub use db::{
     DatabaseConnection,
-    ArangoDbConnection,
     Collection,
     PersistenceError,
     TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD,
 };
+#[cfg(feature = "arango")]
+pub use db::ArangoDbConnection;
+#[cfg(feature = "postgres")]
+pub use db::PostgresDbConnection;
+pub use db::connection::DatabaseConnectionResource;
 pub use db::MockDatabaseConnection;
 pub use plugins::{
     CommitStatus, PersistencePluginCore, TriggerCommit, CommitCompleted,
     persistence_plugin::PersistenceSystemSet,
 };
-pub use query::{PersistenceQuery, dsl};
-pub use resources::{PersistenceSession, commit_and_wait as commit};
+pub use query::{PersistentQuery, PersistenceQueryCache, CachePolicy};
+
+pub use resources::{PersistenceSession, commit, commit_sync};
 pub use persist::Persist;
 
 pub use versioning::VersionManager;

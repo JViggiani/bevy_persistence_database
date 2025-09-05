@@ -1,22 +1,26 @@
 use bevy::prelude::App;
 use bevy_arangodb_core::{
-    commit, Guid, PersistenceError, persistence_plugin::PersistencePlugins,
-    PersistenceQuery, TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
+    commit_sync, Guid, PersistenceError, persistence_plugin::PersistencePlugins,
+    TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
 };
 use serde_json::json;
 
 use crate::common::*;
+use bevy_arangodb_core::PersistentQuery;
+use bevy::prelude::With;
+use bevy_arangodb_core::query::persistence_query::PersistenceQuery;
+use bevy_arangodb_derive::db_matrix_test;
 
-#[tokio::test]
-async fn test_update_conflict_is_detected() {
-    let (db, _container) = setup().await;
+#[db_matrix_test]
+fn test_update_conflict_is_detected() {
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
     // 1. Commit an entity with Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+    commit_sync(&mut app).expect("Initial commit failed");
 
     // Get the entity's key for direct DB manipulation
     let guid = app.world().get::<Guid>(entity_id).unwrap();
@@ -24,9 +28,7 @@ async fn test_update_conflict_is_detected() {
 
     // 2. Directly update the entity's document in the DB to increment its version
     // Fetch current document to get version
-    let (doc, version) = db
-        .fetch_document(&key)
-        .await
+    let (doc, version) = run_async(db.fetch_document(&key))
         .expect("Failed to fetch document")
         .expect("Document should exist");
 
@@ -38,13 +40,12 @@ async fn test_update_conflict_is_detected() {
     }
 
     // Execute direct update
-    db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
         expected_current_version: version,
         patch: updated_doc,
-    }])
-    .await
+    }]))
     .expect("Direct DB update failed");
 
     // 3. In the app, modify the same entity
@@ -55,32 +56,26 @@ async fn test_update_conflict_is_detected() {
     app.update();
 
     // 4. Attempt to commit - should fail with conflict
-    let result = commit(&mut app).await;
-    assert!(
-        matches!(result, Err(PersistenceError::Conflict { .. })),
-        "Expected conflict error, got {:?}",
-        result
-    );
+    let result = commit_sync(&mut app);
+    assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 }
 
-#[tokio::test]
-async fn test_delete_conflict_is_detected() {
-    let (db, _container) = setup().await;
+#[db_matrix_test]
+fn test_delete_conflict_is_detected() {
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
     // 1. Commit an entity
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+    commit_sync(&mut app).expect("Initial commit failed");
 
     let guid = app.world().get::<Guid>(entity_id).unwrap();
     let key = guid.id().to_string();
 
     // 2. Directly update its version in the DB
-    let (doc, version) = db
-        .fetch_document(&key)
-        .await
+    let (doc, version) = run_async(db.fetch_document(&key))
         .expect("Failed to fetch document")
         .expect("Document should exist");
 
@@ -89,13 +84,12 @@ async fn test_delete_conflict_is_detected() {
         obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
     }
 
-    db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
         expected_current_version: version,
         patch: updated_doc,
-    }])
-    .await
+    }]))
     .expect("Direct version update failed");
 
     // 3. In the app, despawn the entity
@@ -103,17 +97,13 @@ async fn test_delete_conflict_is_detected() {
     app.update();
 
     // 4. Attempt to commit - should fail with conflict
-    let result = commit(&mut app).await;
-    assert!(
-        matches!(result, Err(PersistenceError::Conflict { .. })),
-        "Expected conflict error on delete, got {:?}",
-        result
-    );
+    let result = commit_sync(&mut app);
+    assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 }
 
-#[tokio::test]
-async fn test_conflict_strategy_last_write_wins() {
-    let (db, _container) = setup().await;
+#[db_matrix_test]
+fn test_conflict_strategy_last_write_wins() {
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -123,15 +113,13 @@ async fn test_conflict_strategy_last_write_wins() {
         .spawn((Health { value: 100 }, Position { x: 0.0, y: 0.0 }))
         .id();
     app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+    commit_sync(&mut app).expect("Initial commit failed");
 
     let guid = app.world().get::<Guid>(entity_id).unwrap();
     let key = guid.id().to_string();
 
     // 2. Directly update Health and version in DB (simulating external process)
-    let (doc, version) = db
-        .fetch_document(&key)
-        .await
+    let (doc, version) = run_async(db.fetch_document(&key))
         .expect("Failed to fetch document")
         .expect("Document should exist");
 
@@ -141,13 +129,12 @@ async fn test_conflict_strategy_last_write_wins() {
         obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
     }
 
-    db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
         expected_current_version: version,
         patch: updated_doc,
-    }])
-    .await
+    }]))
     .expect("Direct DB update failed");
 
     // 3. In the app, modify Position
@@ -158,20 +145,30 @@ async fn test_conflict_strategy_last_write_wins() {
     app.update();
 
     // 4. First commit attempt - expect conflict
-    let result = commit(&mut app).await;
+    let result = commit_sync(&mut app);
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 
     // 5. Implement "last write wins" strategy:
-    // Reload the entity to get latest state
-    let loaded = PersistenceQuery::new(db.clone())
-        .with::<Health>()
-        .with::<Position>()
-        .filter(Guid::key_field().eq(&key))
-        .fetch_into(app.world_mut())
-        .await;
+    // Reload the entity by key inside the same app using a system-param PersistentQuery.
+    #[derive(bevy::prelude::Resource)] struct KeyRes(String);
+    fn reload_by_key(
+        pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>,
+        key: bevy::prelude::Res<KeyRes>,
+    ) {
+        let _ = pq.filter(Guid::key_field().eq(&key.0)).ensure_loaded();
+    }
+    app.insert_resource(KeyRes(key.clone()));
+    app.add_systems(bevy::prelude::Update, reload_by_key);
+    app.update();
 
-    assert_eq!(loaded.len(), 1);
-    let reloaded_entity = loaded[0];
+    // Locate the reloaded entity by Guid in the same world
+    let reloaded_entity = {
+        let mut q = app.world_mut().query::<(bevy::prelude::Entity, &Guid)>();
+        q.iter(&app.world())
+            .find(|(_, g)| g.id() == key)
+            .map(|(e, _)| e)
+            .expect("reloaded entity not found")
+    };
 
     // Verify we got the updated Health from DB
     assert_eq!(
@@ -187,12 +184,10 @@ async fn test_conflict_strategy_last_write_wins() {
     app.update();
 
     // 6. Second commit should succeed
-    commit(&mut app).await.expect("Second commit failed");
+    commit_sync(&mut app).expect("Second commit failed");
 
     // 7. Verify final state in DB has both changes
-    let (final_doc, _) = db
-        .fetch_document(&key)
-        .await
+    let (final_doc, _) = run_async(db.fetch_document(&key))
         .expect("Failed to fetch final document")
         .expect("Document should exist");
 
@@ -211,9 +206,9 @@ async fn test_conflict_strategy_last_write_wins() {
     assert_eq!(position_x, 50.0);
 }
 
-#[tokio::test]
-async fn test_conflict_strategy_three_way_merge() {
-    let (db, _container) = setup().await;
+#[db_matrix_test]
+fn test_conflict_strategy_three_way_merge() {
+    let (db, _container) = setup();
     let mut app = App::new();
     app.add_plugins(PersistencePlugins(db.clone()));
 
@@ -225,25 +220,24 @@ async fn test_conflict_strategy_three_way_merge() {
         .spawn((base_health.clone(), base_position.clone()))
         .id();
     app.update();
-    commit(&mut app).await.expect("Initial commit failed");
+    commit_sync(&mut app).expect("Initial commit failed");
 
     let guid = app.world().get::<Guid>(entity_id).unwrap();
     let key = guid.id().to_string();
 
     // 2. Simulate Session 1's change ("Theirs"): Directly update Health in DB.
-    let (doc, version) = db.fetch_document(&key).await.unwrap().unwrap();
+    let (doc, version) = run_async(db.fetch_document(&key)).unwrap().unwrap();
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
         obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
     }
-    db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
         collection: Collection::Entities,
         key: key.clone(),
         expected_current_version: version,
         patch: updated_doc,
-    }])
-    .await
+    }]))
     .expect("Direct DB update for Health failed");
 
     // 3. Simulate Session 2's change ("Mine"): In the app, modify Position.
@@ -259,17 +253,18 @@ async fn test_conflict_strategy_three_way_merge() {
     app.update();
 
     // 4. Attempt to commit Session 2's change, expecting a conflict.
-    let result = commit(&mut app).await;
+    let result = commit_sync(&mut app);
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 
     // 5. Conflict Resolution: Perform a three-way merge.
     // Fetch the latest version from the DB ("Theirs").
-    let loaded = PersistenceQuery::new(db.clone())
-        .with::<Health>()
-        .with::<Position>()
-        .filter(Guid::key_field().eq(&key))
-        .fetch_into(app.world_mut())
-        .await;
+    let loaded = run_async(
+        PersistenceQuery::new(db.clone())
+            .with::<Health>()
+            .with::<Position>()
+            .filter(Guid::key_field().eq(&key))
+            .fetch_into(app.world_mut()),
+    );
     assert_eq!(loaded.len(), 1);
     let reloaded_entity = loaded[0];
 
@@ -290,10 +285,10 @@ async fn test_conflict_strategy_three_way_merge() {
     app.update();
 
     // 6. Commit the merged result.
-    commit(&mut app).await.expect("Merged commit failed");
+    commit_sync(&mut app).expect("Merged commit failed");
 
     // 7. Assert that the final document has both the new Health and new Position.
-    let (final_doc, _) = db.fetch_document(&key).await.unwrap().unwrap();
+    let (final_doc, _) = run_async(db.fetch_document(&key)).unwrap().unwrap();
     let final_health: Health = serde_json::from_value(final_doc[Health::name()].clone()).unwrap();
     let final_position: Position = serde_json::from_value(final_doc[Position::name()].clone()).unwrap();
 

@@ -7,7 +7,7 @@ edition.workspace = true
 bevy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-arangors = { workspace = true }
+arangors = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 futures = { workspace = true }
 downcast-rs = "2.0.1"
@@ -16,6 +16,13 @@ bevy-tokio-tasks = "0.16.0"
 mockall.workspace = true
 futures-lite = "2.6.0"
 rayon = "1.10.0"
+uuid = { version = "1.18.0", features = ["v4"], optional = true }
+tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"], optional = true }
+
+[features]
+default = ["postgres", "arango"]
+arango = ["dep:arangors"]
+postgres = ["dep:tokio-postgres", "dep:uuid"]
 
 [dev-dependencies]
 once_cell = { workspace = true }

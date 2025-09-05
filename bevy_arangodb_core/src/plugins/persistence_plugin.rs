@@ -5,6 +5,7 @@
 
 use crate::registration::COMPONENT_REGISTRY;
 use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist, TransactionOperation, Collection};
+use crate::db::connection::DatabaseConnectionResource;
 use crate::versioning::version_manager::VersionKey;
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
@@ -19,6 +20,10 @@ use std::sync::{
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
+
+use crate::query::deferred_ops::DeferredWorldOperations;
+use crate::query::immediate_world_ptr::ImmediateWorldPtr;
+use crate::query::PersistenceQueryCache;
 
 static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
     Arc::new(
@@ -82,7 +87,13 @@ pub enum CommitStatus {
 }
 
 #[derive(Resource)]
-struct TokioRuntime(Arc<Runtime>);
+pub struct TokioRuntime(pub Arc<Runtime>);
+
+impl TokioRuntime {
+    pub fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
+        self.0.block_on(fut)
+    }
+}
 
 /// A system that handles the `TriggerCommit` event to change the `CommitStatus`.
 fn handle_commit_trigger(world: &mut World) {
@@ -419,19 +430,21 @@ fn handle_commit_completed(
                             let nv = session.version_manager.get_version(&vk).unwrap_or(0) + 1;
                             session.version_manager.set_version(vk, nv);
                         }
+                        
                         // bump existing-entity versions
-                        let new_set: HashSet<_> = new_entities.iter().cloned().collect();
-                        let keys_to_update: Vec<_> = meta.dirty_entities
-                            .iter()
-                            .filter(|e| !new_set.contains(e))
-                            .filter_map(|e| session.entity_keys.get(e).cloned())
-                            .collect();
-                        for key in keys_to_update {
-                            let vk = VersionKey::Entity(key.clone());
-                            if let Some(v) = session.version_manager.get_version(&vk) {
-                                session.version_manager.set_version(vk, v + 1);
+                        for &entity in meta.dirty_entities.iter() {
+                            // Skip entities that were newly created in this commit
+                            if !new_entities.contains(&entity) {
+                                // Only update versions for existing entities (ones with keys)
+                                if let Some(key) = session.entity_keys.get(&entity) {
+                                    let vk = VersionKey::Entity(key.clone());
+                                    if let Some(v) = session.version_manager.get_version(&vk) {
+                                        session.version_manager.set_version(vk, v + 1);
+                                    }
+                                }
                             }
                         }
+                        
                         // remove versions for deleted entities
                         for e in &meta.despawned_entities {
                             if let Some(key) = session.entity_keys.get(e).cloned() {
@@ -590,12 +603,14 @@ fn commit_event_listener(
 
 impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
-        // Initialize the global IO task pool so IoTaskPool::get() won’t panic
+        // Initialize the global IO task pool so IoTaskPool::get() won't panic
         IoTaskPool::get_or_init(|| TaskPool::new());
 
         let session = PersistenceSession::new(self.db.clone());
         app.insert_resource(session);
         app.insert_resource(self.config.clone());
+        // Add the database connection as a resource
+        app.insert_resource(DatabaseConnectionResource(self.db.clone()));
         app.init_resource::<RegisteredPersistTypes>();
         app.add_event::<TriggerCommit>();
         app.add_event::<CommitCompleted>();
@@ -604,6 +619,37 @@ impl Plugin for PersistencePluginCore {
 
         // Insert the dedicated Tokio runtime from the global static.
         app.insert_resource(TokioRuntime(TOKIO_RUNTIME.clone()));
+
+        // Add the query cache
+        app.init_resource::<PersistenceQueryCache>();
+        // Initialize deferred world ops queue
+        app.init_resource::<DeferredWorldOperations>();
+
+        // Insert an initial raw world pointer so it's available before any user systems run.
+        {
+            let ptr: *mut World = app.world_mut() as *mut World;
+            bevy::log::trace!("PersistencePluginCore: inserting initial ImmediateWorldPtr {:p}", ptr);
+            if app.world().get_resource::<ImmediateWorldPtr>().is_none() {
+                app.insert_resource(ImmediateWorldPtr::new(ptr));
+            } else {
+                app.world_mut().resource_mut::<ImmediateWorldPtr>().set(ptr);
+            }
+        }
+
+        // Publisher function for the raw world pointer
+        fn publish_immediate_world_ptr(world: &mut World) {
+            let ptr: *mut World = world as *mut World;
+            if world.get_resource::<ImmediateWorldPtr>().is_none() {
+                world.insert_resource(ImmediateWorldPtr::new(ptr));
+            } else {
+                world.resource_mut::<ImmediateWorldPtr>().set(ptr);
+            }
+        }
+
+        // Update pointer at the very start of the frame
+        app.add_systems(First, publish_immediate_world_ptr);
+
+        // Remove the process_queued_component_data system - we don't need it anymore
 
         // Iterate over the registration functions from the global registry.
         // Using .iter() instead of .drain() prevents test pollution.
@@ -618,11 +664,25 @@ impl Plugin for PersistencePluginCore {
             (PersistenceSystemSet::PreCommit, PersistenceSystemSet::Commit).chain(),
         );
 
-        // Add both PreCommit and Commit-phase systems:
+        // Apply queued world mutations (entity spawns, component inserts) in this frame.
+        // Use an exclusive system to get &mut World.
+        fn apply_deferred_world_ops(world: &mut World) {
+            // Drain the queue via the public method
+            let mut pending = world.resource::<DeferredWorldOperations>().drain();
+            // Apply all queued ops
+            for op in pending.drain(..) {
+                op(world);
+            }
+        }
+
+        // Add both PreCommit and Commit-phase systems, ensuring deferred ops are applied
+        // first in PostUpdate so pass-through systems see Update loads deterministically.
         app.add_systems(
             PostUpdate,
             (
                 (
+                    apply_deferred_world_ops,
+                    publish_immediate_world_ptr,
                     auto_despawn_tracking_system,
                     handle_commit_trigger,
                     commit_event_listener,
@@ -639,10 +699,110 @@ impl Plugin for PersistencePluginCore {
 #[derive(Clone)]
 pub struct PersistencePlugins(pub Arc<dyn DatabaseConnection>);
 
+// Conditionally add Bevy's LogPlugin only if no global subscriber is set and the plugin
+// hasn't already been added to this App. This avoids "already set" errors but still
+// enables logging when nothing has initialized tracing yet.
+#[derive(Clone)]
+struct MaybeAddLogPlugin;
+
+impl Plugin for MaybeAddLogPlugin {
+    fn build(&self, app: &mut App) {
+        // Use Bevy's re-export of tracing to avoid adding a direct dependency
+        let already_has_subscriber = bevy::log::tracing::dispatcher::has_been_set();
+        let already_added = app.is_plugin_added::<bevy::log::LogPlugin>();
+        if !already_has_subscriber && !already_added {
+            app.add_plugins(bevy::log::LogPlugin::default());
+        }
+    }
+}
+
 impl PluginGroup for PersistencePlugins {
     fn build(self) -> PluginGroupBuilder {
         MinimalPlugins
             .build()
+            // Only initialize logging if nothing else has already set a global subscriber
+            .add(MaybeAddLogPlugin)
             .add(PersistencePluginCore::new(self.0.clone()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Persist;
+    use serde::{Serialize, Deserialize};
+    
+    // Define a test component that implements Persist
+    #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestHealth {
+        value: i32
+    }
+    
+    impl Persist for TestHealth {
+        fn name() -> &'static str {
+            "TestHealth"
+        }
+    }
+    
+    #[test]
+    fn test_read_only_access_doesnt_mark_dirty() {
+        // Set up a minimal app with our system
+        let mut app = App::new();
+        
+        // Create a mock session and insert it as a resource
+        let mock_db = crate::db::MockDatabaseConnection::new();
+        let session = PersistenceSession::new(Arc::new(mock_db));
+        app.insert_resource(session);
+        
+        // Add our component tracking system
+        app.add_systems(Update, auto_dirty_tracking_entity_system::<TestHealth>);
+        
+        // Create an entity with our test component
+        let entity = app.world_mut().spawn(TestHealth { value: 100 }).id();
+        
+        // First update will mark it as dirty because it was just added
+        app.update();
+        
+        // Clear the dirty entities for our test
+        {
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
+            session.dirty_entities.clear();
+        }
+        
+        // Read the component without modifying it
+        {
+            let health = app.world().get::<TestHealth>(entity).unwrap();
+            assert_eq!(health.value, 100);
+        }
+        
+        // Update the app again - this should trigger the tracking system
+        app.update();
+        
+        // Verify the entity wasn't marked dirty after read-only access
+        {
+            let session = app.world().resource::<PersistenceSession>();
+            assert!(
+                !session.dirty_entities.contains(&entity),
+                "Entity was incorrectly marked dirty after read-only access"
+            );
+        }
+        
+        // Now modify the component
+        {
+            let mut health = app.world_mut().get_mut::<TestHealth>(entity).unwrap();
+            health.value = 200;
+        }
+        
+        // Update again - should mark as dirty
+        app.update();
+        
+        // Verify the entity was marked dirty after modification
+        {
+            let session = app.world().resource::<PersistenceSession>();
+            assert!(
+                session.dirty_entities.contains(&entity),
+                "Entity should be marked dirty after modification"
+            );
+        }
     }
 }

@@ -1,128 +1,165 @@
 # bevy_arangodb
 
-A Bevy plugin for persisting ECS state to ArangoDB, supporting components, resources, and querying. Built with async Rust and designed for seamless integration into Bevy's ECS architecture.
+Persistence for Bevy ECS to ArangoDB or Postgres with an idiomatic Bevy Query API.
 
-## Features
+Highlights
+- Bevy Query API consistency
+  - PersistentQuery SystemParam derefs to Bevy’s Query, so iter/get/single/get_many/contains/iter_combinations work as usual.
+  - Explicit load trigger: ensure_loaded performs DB I/O, then you use pass-throughs on world data.
+- Smart caching and explicit refresh
+  - Identical loads in the same frame coalesce into a single DB call.
+  - Repeated identical loads hit the cache. Use force_refresh to bypass it.
+- Presence and value filters
+  - Type-driven presence via With<T>, Without<T>, and Or<(…)>.
+  - Optional components in Q (Option<&T>) are fetched when present.
+  - Value filters: eq, ne, gt, gte, lt, lte, combined with and/or/in.
+  - Key filtering via Guid::key_field().eq("…") or .in_([...]).
+- Resources
+  - #[persist(resource)] resources are persisted and fetched alongside any query.
+- Optimistic concurrency and conflict handling
+  - Per-document versioning with conflict detection.
+- Batching and parallel commit
+  - Configurable batching with a thread pool and concurrent transaction execution.
+- Backends
+  - ArangoDB and Postgres, selected at build time via features.
 
-- **Component & Resource Persistence**: Automatically persist Bevy components and resources to ArangoDB documents.
-- **Ergonomic API**: Simple derive macros and minimal boilerplate to mark types for persistence.
-- **Type-Safe Querying**: Build complex queries with a type-safe DSL that leverages Rust's type system.
-- **Change Detection**: Leverages Bevy's built-in change detection to efficiently sync only modified data.
-- **Async/Await Support**: Full async support with a convenient `commit` function for easy integration.
-- **Optimistic Locking**: Automatic version management prevents data loss from concurrent modifications.
+Install
+Add the core and derive crates, enabling one or both backends.
 
-## Quick Start
+```toml
+[dependencies]
+bevy = { version = "0.16" }
+bevy_arangodb_core = { path = "bevy_arangodb/bevy_arangodb_core", features = ["arango", "postgres"] }
+bevy_arangodb_derive = { path = "bevy_arangodb/bevy_arangodb_derive" }
+```
 
-1. Derive persisted types:
+Backends and features
+- Enable features on bevy_arangodb_core:
+  - arango: builds the ArangoDB backend (arangors).
+  - postgres: builds the Postgres backend (tokio-postgres).
+- Provide an Arc<dyn DatabaseConnection> at startup:
+  - Arango:
+    - await ArangoDbConnection::ensure_database(url, user, pass, db_name)
+    - let db = ArangoDbConnection::connect(url, user, pass, db_name).await?
+  - Postgres:
+    - PostgresDbConnection::ensure_database(host, user, pass, db_name, Some(port)).await?
+    - let db = PostgresDbConnection::connect(host, user, pass, db_name, Some(port)).await?
 
-    ```rust
-    use bevy_arangodb::Persist;
-
-    #[persist(component)]
-    pub struct Health {
-        pub value: i32,
-    }
-
-    #[persist(resource)]
-    pub struct GameSettings {
-        pub difficulty: f32,
-        pub map_name: String,
-    }
-    ```
-
-2. Configure your Bevy `App`:
-
-    ```rust
-    use bevy::prelude::*;
-    use bevy_arangodb::{PersistencePlugins, ArangoDbConnection, commit};
-    use std::sync::Arc;
-
-    #[tokio::main]
-    async fn main() {
-        // 1) Connect to ArangoDB
-        let db = Arc::new(
-            ArangoDbConnection::connect(
-                "http://127.0.0.1:8529", "root", "password", "mydb"
-            )
-            .await
-            .unwrap()
-        );
-
-        // 2) Build Bevy app with plugin
-        let mut app = App::new();
-        app.add_plugins(DefaultPlugins);
-        app.add_plugins(PersistencePlugins(db.clone()));
-
-        // 3) Spawn entities or insert resources
-        app.world_mut().spawn(Health { value: 42 });
-        app.insert_resource(GameSettings { difficulty: 1.0, map_name: "level1".into() });
-
-        // 4) Run one tick to detect changes
-        app.update();
-
-        // 5) Persist all changes.
-        // `commit` is a helper that fires a `TriggerCommit` event and waits for
-        // a `CommitCompleted` event. You can also fire the event manually.
-        commit(&mut app).await.unwrap();
-    }
-    ```
-
-3. Query persisted data:
-
-    ```rust
-    use bevy_arangodb::{PersistenceQuery, PersistencePlugins, DatabaseConnection};
-    use std::sync::Arc;
-    use bevy::prelude::*;
-
-    async fn load_data(db: Arc<dyn DatabaseConnection>) {
-        let mut app = App::new();
-        app.add_plugins(PersistencePlugins(db.clone()));
-
-        // Only fetch Health > 10, also load Position if present
-        let entities = PersistenceQuery::new(db.clone())
-            .with::<Position>()
-            .filter(Health::value().gt(10))
-            .fetch_into(app.world_mut())
-            .await;
-
-        println!("Loaded {} entities", entities.len());
-    }
-    ```
-
-## Optimistic Locking
-
-The library automatically handles versioning to prevent race conditions when multiple processes access the same data. Each entity and resource document contains a `bevy_persistence_version` field that is checked during updates.
-
-When a version conflict is detected, the library returns a `PersistenceError::Conflict`. Your application can implement its own conflict resolution strategy:
+Quickstart
+1) Persist-able types.
 
 ```rust
-use bevy_arangodb::{commit, PersistenceError, PersistenceQuery};
+use bevy_arangodb_derive::persist;
 
-// Example: Last Write Wins strategy with retry
-async fn commit_with_retry(app: &mut App, max_retries: u32) -> Result<(), PersistenceError> {
-    for _ in 0..max_retries {
-        match commit(app).await {
-            Ok(()) => return Ok(()),
-            Err(PersistenceError::Conflict { key }) => {
-                // Reload the conflicted entity
-                let query = PersistenceQuery::new(db.clone())
-                    .with::<Health>()
-                    .with::<Position>();
-                query.fetch_into(app.world_mut()).await;
-                
-                // Re-apply your changes here
-                // ...
-                
-                // Try again
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    Err(PersistenceError::General("Max retries exceeded".into()))
+#[persist(component)]
+#[derive(Clone)]
+pub struct Health { pub value: i32 }
+
+#[persist(component)]
+pub struct Position { pub x: f32, pub y: f32 }
+
+#[persist(resource)]
+#[derive(Clone)]
+pub struct GameSettings { pub difficulty: f32, pub map_name: String }
+```
+
+2) Add the plugin with a real database connection.
+
+```rust
+use bevy::prelude::*;
+use bevy_arangodb_core::{persistence_plugin::PersistencePlugins, ArangoDbConnection};
+use std::sync::Arc;
+
+fn main() {
+    // Build a small runtime to create the DB connection up-front
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    // Arango example (see tests/common/setup.rs for the same pattern)
+    let url = "http://127.0.0.1:8529";
+    let user = "root";
+    let pass = "password";
+    let db_name = "bevy_example";
+    rt.block_on(ArangoDbConnection::ensure_database(url, user, pass, db_name)).unwrap();
+    let db = rt.block_on(ArangoDbConnection::connect(url, user, pass, db_name)).unwrap();
+    let db = Arc::new(db) as Arc<dyn bevy_arangodb_core::DatabaseConnection>;
+
+    App::new()
+        .add_plugins(PersistencePlugins(db))
+        .run();
 }
 ```
 
-The versioning is completely managed by the library - you don't need to worry about it unless you're handling conflicts.
+Loading pattern
+- Use PersistentQuery as a SystemParam.
+- Add value filters via .where(...) (alias of .filter(...)).
+- Explicitly trigger the load with .ensure_loaded(); then use pass-throughs on world-only data.
 
-See the `concurrency_tests.rs` file for more examples of merge strategies. 
+```rust
+use bevy::prelude::*;
+use bevy_arangodb_core::PersistentQuery;
+
+fn sys(
+    mut pq: PersistentQuery<(&Health, Option<&Position>), (With<Health>, Without<Creature>, Or<(With<PlayerName>,)>)>
+) {
+    let count = pq
+        .where(Health::value().gt(100))
+        .ensure_loaded()
+        .iter()
+        .count();
+    info!("Loaded {} entities", count);
+}
+```
+
+Pass-throughs are world-only
+After a load, PersistentQuery derefs to bevy::prelude::Query. Use standard accessors without new DB I/O:
+```rust
+fn pass_through(mut pq: PersistentQuery<&Health>) {
+    let _ = pq.ensure_loaded();
+
+    // single
+    if let Ok((_e, h)) = pq.get_single() {
+        info!("single: {}", h.value);
+    }
+
+    // get_many (array-of-entities)
+    let [a, b] = [e1, e2];
+    let Ok([(_, ha), (_, hb)]) = pq.get_many([a, b]) else { return; };
+
+    // iter_combinations
+    for [(_e1, h1), (_e2, h2)] in pq.iter_combinations() {
+        info!("pair: {} {}", h1.value, h2.value);
+    }
+}
+```
+
+Key filtering
+- Single key:
+```rust
+use bevy_arangodb_core::{PersistentQuery, Guid};
+
+fn by_key(mut pq: PersistentQuery<&Health>) {
+    let _ = pq.where(Guid::key_field().eq("my-key")).ensure_loaded();
+}
+```
+- Multiple keys via IN:
+```rust
+let _ = pq.where(Guid::key_field().in_(&["k1","k2","k3"])).ensure_loaded();
+```
+
+Optional Q semantics and presence via F
+- Option<&T> in Q fetches T only when present, without gating presence.
+- Presence is driven by type-level filters in F (With<T>, Without<T>, Or<(... )>), which gate backend queries.
+
+Caching and force-refresh
+- Default CachePolicy is UseCache. Identical loads coalesce within a frame and reuse cached results across frames.
+- Use force_refresh to bypass cache and overwrite world state:
+```rust
+let _ = pq.force_refresh().ensure_loaded();
+```
+
+Resources
+- #[persist(resource)] resources are fetched alongside any query call; versions are tracked and updated on commits automatically.
+
+Scheduling notes
+- Loads can run in Update or PostUpdate.
+- Deferred world mutations from loads are applied before PreCommit; schedule readers after PersistenceSystemSet::PreCommit to observe fresh data in the same frame.

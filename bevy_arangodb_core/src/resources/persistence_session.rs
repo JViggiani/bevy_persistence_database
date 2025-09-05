@@ -18,7 +18,7 @@ use std::{
     },
 };
 use crate::persist::Persist;
-use crate::plugins::persistence_plugin::{CommitEventListeners};
+use crate::plugins::persistence_plugin::{CommitEventListeners, TokioRuntime};
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use rayon::prelude::*;
@@ -43,6 +43,10 @@ pub struct PersistenceSession {
     pub(crate) version_manager: VersionManager,
     component_serializers: HashMap<TypeId, ComponentSerializer>,
     pub(crate) component_deserializers: HashMap<String, ComponentDeserializer>,
+    pub(crate) component_type_id_to_name: HashMap<TypeId, &'static str>,
+    // New: reverse lookup and presence checkers
+    pub(crate) component_name_to_type_id: HashMap<String, TypeId>,
+    pub(crate) component_presence: HashMap<String, Box<dyn Fn(&World, Entity) -> bool + Send + Sync>>,
     resource_serializers: HashMap<TypeId, ResourceSerializer>,
     resource_deserializers: HashMap<String, ResourceDeserializer>,
     resource_name_to_type_id: HashMap<String, TypeId>,
@@ -61,6 +65,14 @@ impl PersistenceSession {
     pub fn register_component<T: Component + Persist>(&mut self) {
         let ser_key = T::name();
         let type_id = TypeId::of::<T>();
+        self.component_type_id_to_name.insert(type_id, ser_key);
+        // reverse lookup
+        self.component_name_to_type_id.insert(ser_key.to_string(), type_id);
+        // presence checker
+        self.component_presence.insert(
+            ser_key.to_string(),
+            Box::new(|world: &World, entity: Entity| world.entity(entity).contains::<T>()),
+        );
         self.component_serializers.insert(type_id, Box::new(
             move |entity, world| -> Result<Option<(String, Value)>, PersistenceError> {
                 if let Some(c) = world.get::<T>(entity) {
@@ -134,6 +146,9 @@ impl PersistenceSession {
             db,
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
+            component_type_id_to_name: HashMap::new(),
+            component_name_to_type_id: HashMap::new(),
+            component_presence: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),
@@ -151,6 +166,9 @@ impl PersistenceSession {
             db,
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
+            component_type_id_to_name: HashMap::new(),
+            component_name_to_type_id: HashMap::new(),
+            component_presence: HashMap::new(),
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),
@@ -360,7 +378,9 @@ impl PersistenceSession {
                                         BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                                         serde_json::json!(1u64),
                                     );
-                                    obj.insert("_key".to_string(), Value::String(name.clone()));
+                                    // Use backend-specific key field instead of hardcoding "_key"
+                                    let key_field = session.db.document_key_field();
+                                    obj.insert(key_field.to_string(), Value::String(name.clone()));
                                 }
                                 resource_ops.push(TransactionOperation::CreateDocument {
                                     collection: Collection::Resources,
@@ -391,7 +411,7 @@ impl PersistenceSession {
 /// This function provides a clean `await`-able interface for the event-driven
 /// commit system. It sends a `TriggerCommit` event, then waits for a
 /// `CommitCompleted` event with a matching correlation ID.
-pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
+pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
     let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = oneshot::channel();
 
@@ -407,7 +427,7 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
     });
 
     // The timeout is applied to the entire commit-and-wait process.
-    timeout(std::time::Duration::from_secs(15), async {
+    timeout(std::time::Duration::from_secs(60), async {
         // Loop, calling app.update() and checking the receiver.
         // Yield to the executor each time to avoid blocking.
         loop {
@@ -433,7 +453,14 @@ pub async fn commit_and_wait(app: &mut App) -> Result<(), PersistenceError> {
         }
     })
     .await
-    .map_err(|_| PersistenceError::new("Commit timed out after 15 seconds"))?
+    .map_err(|_| PersistenceError::new("Commit timed out after 60 seconds"))?
+}
+
+// Add a synchronous convenience that uses the plugin’s runtime
+pub fn commit_sync(app: &mut App) -> Result<(), PersistenceError> {
+    // Clone the Arc<Runtime> out of the world without holding a borrow
+    let rt = { app.world().resource::<TokioRuntime>().0.clone() };
+    rt.block_on(commit(app))
 }
 
 #[cfg(test)]
