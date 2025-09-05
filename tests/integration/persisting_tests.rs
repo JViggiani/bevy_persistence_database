@@ -1,5 +1,7 @@
-use bevy::prelude::App;
-use bevy_arangodb_core::{commit_sync, Guid, Persist, persistence_plugin::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, CommitStatus};
+use bevy::prelude::*;
+use bevy_arangodb_core::{
+    commit_sync, Guid, Persist, plugins::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, CommitStatus,
+};
 
 use crate::common::*;
 use bevy_arangodb_derive::db_matrix_test;

@@ -723,3 +723,84 @@ impl PluginGroup for PersistencePlugins {
             .add(PersistencePluginCore::new(self.0.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Persist;
+    use serde::{Serialize, Deserialize};
+    
+    // Define a test component that implements Persist
+    #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct TestHealth {
+        value: i32
+    }
+    
+    impl Persist for TestHealth {
+        fn name() -> &'static str {
+            "TestHealth"
+        }
+    }
+    
+    #[test]
+    fn test_read_only_access_doesnt_mark_dirty() {
+        // Set up a minimal app with our system
+        let mut app = App::new();
+        
+        // Create a mock session and insert it as a resource
+        let mock_db = crate::db::MockDatabaseConnection::new();
+        let session = PersistenceSession::new(Arc::new(mock_db));
+        app.insert_resource(session);
+        
+        // Add our component tracking system
+        app.add_systems(Update, auto_dirty_tracking_entity_system::<TestHealth>);
+        
+        // Create an entity with our test component
+        let entity = app.world_mut().spawn(TestHealth { value: 100 }).id();
+        
+        // First update will mark it as dirty because it was just added
+        app.update();
+        
+        // Clear the dirty entities for our test
+        {
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
+            session.dirty_entities.clear();
+        }
+        
+        // Read the component without modifying it
+        {
+            let health = app.world().get::<TestHealth>(entity).unwrap();
+            assert_eq!(health.value, 100);
+        }
+        
+        // Update the app again - this should trigger the tracking system
+        app.update();
+        
+        // Verify the entity wasn't marked dirty after read-only access
+        {
+            let session = app.world().resource::<PersistenceSession>();
+            assert!(
+                !session.dirty_entities.contains(&entity),
+                "Entity was incorrectly marked dirty after read-only access"
+            );
+        }
+        
+        // Now modify the component
+        {
+            let mut health = app.world_mut().get_mut::<TestHealth>(entity).unwrap();
+            health.value = 200;
+        }
+        
+        // Update again - should mark as dirty
+        app.update();
+        
+        // Verify the entity was marked dirty after modification
+        {
+            let session = app.world().resource::<PersistenceSession>();
+            assert!(
+                session.dirty_entities.contains(&entity),
+                "Entity should be marked dirty after modification"
+            );
+        }
+    }
+}
