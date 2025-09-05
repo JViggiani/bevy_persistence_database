@@ -1,9 +1,9 @@
 use bevy::prelude::App;
-use bevy_persistence_database_core::PersistencePluginCore;
-use bevy_persistence_database_core::persistence_plugin::PersistencePluginConfig;
-use bevy_persistence_database_core::{ ArangoDbConnection, DatabaseConnection };
+use bevy_persistence_database::PersistencePluginCore;
+use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
+use bevy_persistence_database::{ ArangoDbConnection, DatabaseConnection };
 #[cfg(feature = "postgres")]
-use bevy_persistence_database_core::PostgresDbConnection;
+use bevy_persistence_database::PostgresDbConnection;
 use std::sync::Arc;
 use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}, Mutex};
 use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};

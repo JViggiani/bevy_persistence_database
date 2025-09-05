@@ -1,12 +1,12 @@
 [package]
-name = "bevy_persistence_database_core"
+name = "bevy_persistence_database"
 version = "0.1.0"
 edition.workspace = true
 publish = false
 description = "Core functionality for bevy_persistence_database"
 license-file = "../LICENSE"
 repository = "https://github.com/JViggiani/bevy_persistence_database"
-documentation = "https://docs.rs/bevy_persistence_database_core"
+documentation = "https://docs.rs/bevy_persistence_database"
 readme = "../README.md"
 keywords = ["bevy", "database", "persistence", "persistent", "arangodb", "postgres", "postgresql", "gamedev", "storage"]
 categories = ["game-development", "development-tools", "memory-management", "database", "asynchronous", "caching"]

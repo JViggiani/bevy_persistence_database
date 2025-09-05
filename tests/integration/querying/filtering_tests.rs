@@ -1,5 +1,5 @@
 use bevy::prelude::App;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
 };
 use crate::common::*;

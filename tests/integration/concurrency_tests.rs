@@ -1,14 +1,14 @@
 use bevy::prelude::App;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     commit_sync, Guid, PersistenceError, persistence_plugin::PersistencePlugins,
     TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist, Collection,
 };
 use serde_json::json;
 
 use crate::common::*;
-use bevy_persistence_database_core::PersistentQuery;
+use bevy_persistence_database::PersistentQuery;
 use bevy::prelude::With;
-use bevy_persistence_database_core::query::persistence_query::PersistenceQuery;
+use bevy_persistence_database::query::persistence_query::PersistenceQuery;
 use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]

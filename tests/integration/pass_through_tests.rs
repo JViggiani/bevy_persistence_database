@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_persistence_database_core::{commit_sync, persistence_plugin::PersistencePlugins, PersistentQuery, PersistenceSystemSet, Guid};
+use bevy_persistence_database::{commit_sync, persistence_plugin::PersistencePlugins, PersistentQuery, PersistenceSystemSet, Guid};
 use bevy_persistence_database_derive::db_matrix_test;
 use crate::common::*;
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};

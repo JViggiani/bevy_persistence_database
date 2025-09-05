@@ -1,9 +1,9 @@
 use bevy::prelude::App;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     commit_sync, persistence_plugin::PersistencePlugins, PersistencePluginCore, 
     persistence_plugin::PersistencePluginConfig
 };
-use bevy_persistence_database_core::PersistentQuery;
+use bevy_persistence_database::PersistentQuery;
 use bevy::prelude::With;
 use std::time::Instant;
 use crate::common::*;

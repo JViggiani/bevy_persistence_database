@@ -1,65 +1,56 @@
 //! Database persistence layer for Bevy ECS
-//!
-//! This crate provides a way to persist Bevy ECS components and resources to a database.
 
 // Re-export the derive macro
 pub use bevy_persistence_database_derive::persist;
 
-// Re-export core types from the core crate
-pub use bevy_persistence_database_core::{
-    // Core traits and marker
-    Persist,
-    
-    // Components
-    Guid,
-    
-    // Resources and session
-    PersistenceSession,
-    
-    // Connections
+// modules
+pub mod components;
+pub mod db;
+pub mod plugins;
+pub mod query;
+pub mod resources;
+pub mod registration;
+pub mod versioning;
+
+mod persist;
+
+// Public API
+pub use plugins::persistence_plugin;
+
+pub use components::Guid;
+pub use db::{
     DatabaseConnection,
-    DatabaseConnectionResource,
+    Collection,
     PersistenceError,
     TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD,
-    Collection,
 };
-
-// Conditionally re-export database implementations
 #[cfg(feature = "arango")]
-pub use bevy_persistence_database_core::ArangoDbConnection;
-
+pub use db::ArangoDbConnection;
 #[cfg(feature = "postgres")]
-pub use bevy_persistence_database_core::PostgresDbConnection;
-
-// Re-export plugins
-pub use bevy_persistence_database_core::plugins::{
-    PersistencePluginCore,
-    PersistencePlugins,
-    PersistencePluginConfig,
-    CommitCompleted,
-    CommitStatus,
-    TriggerCommit,
+pub use db::PostgresDbConnection;
+pub use db::connection::DatabaseConnectionResource;
+pub use db::MockDatabaseConnection;
+pub use plugins::{
+    CommitStatus, PersistencePluginCore, TriggerCommit, CommitCompleted,
+    persistence_plugin::PersistenceSystemSet,
 };
+pub use query::{PersistentQuery, PersistenceQueryCache, CachePolicy};
 
-// Re-export query functionality
-pub use bevy_persistence_database_core::query::{
-    FilterExpression,
-    BinaryOperator,
-    PersistentQuery,
-    PersistenceQuerySpecification,
-    PersistenceQueryCache,
-    CachePolicy,
-};
+pub use resources::{PersistenceSession, commit, commit_sync};
+pub use persist::Persist;
 
-// Re-export common utility functions
-pub use bevy_persistence_database_core::resources::commit;
-pub use bevy_persistence_database_core::resources::commit_sync;
+pub use versioning::VersionManager;
 
-/// Public prelude module for commonly used imports
+// Re-export for macro use
+#[doc(hidden)]
+pub use once_cell;
+
+// Convenient prelude for users
 pub mod prelude {
-    pub use crate::persist;
-    pub use bevy_persistence_database_core::{
+    pub use bevy::prelude::Component;
+    pub use crate::{
+        persist,
         Persist,
         Guid,
         PersistenceSession,
@@ -70,8 +61,8 @@ pub mod prelude {
     };
     
     #[cfg(feature = "arango")]
-    pub use bevy_persistence_database_core::ArangoDbConnection;
+    pub use crate::ArangoDbConnection;
     
     #[cfg(feature = "postgres")]
-    pub use bevy_persistence_database_core::PostgresDbConnection;
+    pub use crate::PostgresDbConnection;
 }

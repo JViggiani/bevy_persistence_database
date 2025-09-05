@@ -251,26 +251,17 @@ pub fn db_matrix_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 fn get_crate_path() -> proc_macro2::TokenStream {
     use proc_macro_crate::{crate_name, FoundCrate};
 
-    // First check if we're in the bevy_persistence_database crate (integration tests)
+    // First check if we're in the bevy_persistence_database crate
     if let Ok(FoundCrate::Itself) = crate_name("bevy_persistence_database") {
-        return quote!(::bevy_persistence_database::bevy_persistence_database_core);
+        return quote!(crate);
     }
 
-    // Then check for bevy_persistence_database_core
-    match crate_name("bevy_persistence_database_core") {
-        Ok(FoundCrate::Itself) => quote!(crate),
-        Ok(FoundCrate::Name(name)) => {
-            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-            quote!(::#ident)
-        }
-        Err(_) => {
-            // Try to find bevy_persistence_database as a dependency
-            if let Ok(FoundCrate::Name(name)) = crate_name("bevy_persistence_database") {
-                let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
-                quote!(::#ident::bevy_persistence_database_core)
-            } else {
-                quote!(::bevy_persistence_database_core)
-            }
-        }
+    // Then check if bevy_persistence_database is a dependency
+    if let Ok(FoundCrate::Name(name)) = crate_name("bevy_persistence_database") {
+        let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+        return quote!(::#ident);
     }
+
+    // If neither case matched, default to bevy_persistence_database
+    quote!(::bevy_persistence_database)
 }

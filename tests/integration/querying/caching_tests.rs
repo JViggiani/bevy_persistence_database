@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
     DatabaseConnection, db::connection::DatabaseConnectionResource,
 };

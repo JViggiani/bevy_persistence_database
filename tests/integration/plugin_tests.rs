@@ -1,5 +1,5 @@
 use bevy::prelude::{App, Events, IntoScheduleConfigs};
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
     TriggerCommit,
     commit_sync, PersistentQuery, persistence_plugin::PersistenceSystemSet,

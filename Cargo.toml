@@ -13,7 +13,6 @@ categories = ["game-development", "development-tools", "memory-management", "dat
 
 [workspace]
 members = [
-  "bevy_persistence_database_core",
   "bevy_persistence_database_derive",
 ]
 
@@ -39,24 +38,35 @@ testcontainers = "0.19.0"
 debug = true
 
 [dependencies]
-bevy_persistence_database_core = { path = "bevy_persistence_database_core" }
-bevy_persistence_database_derive = { path = "bevy_persistence_database_derive" }
+bevy_persistence_database_derive = { version = "0.1.0", path = "bevy_persistence_database_derive" }
 bevy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+arangors = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+futures = { workspace = true }
+downcast-rs = "2.0.1"
+once_cell = { workspace = true }
+bevy-tokio-tasks = "0.16.0"
+mockall = { workspace = true }
+futures-lite = "2.6.0"
+rayon = "1.10.0"
+uuid = { version = "1.18.0", features = ["v4"], optional = true }
+tokio-postgres = { version = "0.7.13", features = ["with-serde_json-1"], optional = true }
 
 [features]
 default = ["postgres", "arango"]
-arango = ["bevy_persistence_database_core/arango"]
-postgres = ["bevy_persistence_database_core/postgres"]
+arango = ["dep:arangors"]
+postgres = ["dep:tokio-postgres", "dep:uuid"]
 ra-fallback = ["bevy_persistence_database_derive/ra-fallback"]
 
 [dev-dependencies]
-bevy              = { workspace = true }
-serde             = { workspace = true, features = ["derive"] }
-serde_json        = { workspace = true }
-testcontainers    = { workspace = true }
-tokio             = { workspace = true, features = ["full", "macros", "rt"] }
-ctor              = { workspace = true }
-futures           = { workspace = true }
+bevy = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+testcontainers = { workspace = true }
+tokio = { workspace = true, features = ["full", "macros", "rt"] }
+ctor = { workspace = true }
+futures = { workspace = true }
 tracing-subscriber = "0.3.19"
-bevy_persistence_database_core   = { path = "bevy_persistence_database_core" }
 bevy_persistence_database_derive = { path = "bevy_persistence_database_derive" }

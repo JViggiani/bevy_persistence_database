@@ -2,12 +2,12 @@ use bevy::prelude::*;
 use bevy::prelude::IntoScheduleConfigs;
 use bevy::ecs::query::QueryState;
 use bevy::ecs::system::QueryLens;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     PersistentQuery,
     commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
 };
-use bevy_persistence_database_core::query::immediate_world_ptr::ImmediateWorldPtr;
+use bevy_persistence_database::query::immediate_world_ptr::ImmediateWorldPtr;
 use bevy_persistence_database_derive::db_matrix_test;
 use crate::common::*;
 

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     commit_sync, Guid, Persist, plugins::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, CommitStatus,
 };
 

@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy::prelude::IntoScheduleConfigs;
-use bevy_persistence_database_core::{
+use bevy_persistence_database::{
     PersistentQuery,
     commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
