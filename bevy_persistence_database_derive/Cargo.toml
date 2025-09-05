@@ -7,7 +7,7 @@ license-file = "LICENSE"
 repository = "https://github.com/your-username/bevy_persistence_database"
 documentation = "https://docs.rs/bevy_persistence_database_derive"
 keywords = ["bevy", "database", "persistence", "gamedev", "storage"]
-categories = ["game-development", "development-tools", "memory-management", "database", "asynchronous", "caching"]
+categories = ["game-development", "development-tools", "database", "asynchronous", "caching"]
 
 [lib]
 proc-macro = true
