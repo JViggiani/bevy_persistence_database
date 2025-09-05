@@ -1,15 +1,24 @@
 [package]
-name = "bevy_persistence_database_root"
+name = "bevy_persistence_database"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+description = "A persistence and database integration solution for the Bevy game engine"
+license-file = "LICENSE"
+repository = "https://github.com/JViggiani/bevy_persistence_database"
+homepage = "https://github.com/JViggiani/bevy_persistence_database"
+documentation = "https://docs.rs/bevy_persistence_database"
+readme = "README.md"
+keywords = ["bevy", "database", "persistence", "persistent", "arangodb", "postgres", "postgresql", "gamedev", "storage"]
+categories = ["game-development", "development-tools", "memory-management", "database", "asynchronous", "caching"]
 
 [workspace]
 members = [
   "bevy_persistence_database_core",
+  "bevy_persistence_database_derive",
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 
 [workspace.dependencies]
 bevy = "0.16.1"
@@ -28,6 +37,11 @@ testcontainers = "0.19.0"
 
 [profile.bench]
 debug = true
+
+[dependencies]
+bevy_persistence_database_core = { path = "bevy_persistence_database_core" }
+bevy_persistence_database_derive = { path = "bevy_persistence_database_derive" }
+bevy = { workspace = true }
 
 [features]
 default = ["postgres", "arango"]
