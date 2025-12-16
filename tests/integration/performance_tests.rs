@@ -42,7 +42,7 @@ fn test_persist_many_entities() {
     app.update();
     // --- prepare & commit phase ---
     let start_commit = Instant::now();
-    let res = commit_sync(&mut app);
+    let res = commit_sync(&mut app, db.clone());
     let duration_commit = start_commit.elapsed();
     res.expect("Bulk commit failed");
     
@@ -57,7 +57,7 @@ fn test_persist_many_entities() {
     
     // --- fetch phase in a new session ---
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
 
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
         let _ = pq.ensure_loaded();

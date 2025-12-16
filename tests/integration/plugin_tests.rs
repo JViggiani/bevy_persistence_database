@@ -11,6 +11,7 @@ use bevy_persistence_database_derive::db_matrix_test;
 #[test]
 fn test_trigger_commit_clears_event_queue() {
     let mut db = MockDatabaseConnection::new();
+    db.expect_document_key_field().return_const("_key");
     // Expect a transaction because sending events makes the world dirty,
     // which might trigger a commit if there are registered persistable types.
     // We allow it to be called any number of times.
@@ -19,11 +20,12 @@ fn test_trigger_commit_clears_event_queue() {
 
     let db = Arc::new(db);
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // GIVEN multiple TriggerCommit events are sent
-    app.world_mut().send_event(TriggerCommit::default());
-    app.world_mut().send_event(TriggerCommit::default());
+    let trigger = TriggerCommit { correlation_id: None, target_connection: db.clone() };
+    app.world_mut().send_event(trigger.clone());
+    app.world_mut().send_event(trigger);
 
     // WHEN the app updates
     let events_before_update = app.world().resource::<Events<TriggerCommit>>();
@@ -40,14 +42,14 @@ fn test_trigger_commit_clears_event_queue() {
 fn test_event_triggers_commit_and_persists_data() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // GIVEN an entity is spawned
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update(); // Run change detection
 
     // WHEN a TriggerCommit event is sent
-    app.world_mut().send_event(TriggerCommit::default());
+    app.world_mut().send_event(TriggerCommit { correlation_id: None, target_connection: db.clone() });
 
     // AND we manually drive the app loop until the commit is complete
     loop {
@@ -80,19 +82,19 @@ fn test_event_triggers_commit_and_persists_data() {
 fn test_queued_commit_persists_all_changes() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // GIVEN an initial entity is created and a commit is triggered
     let entity_a = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    app.world_mut().send_event(TriggerCommit::default());
+    app.world_mut().send_event(TriggerCommit { correlation_id: None, target_connection: db.clone() });
     app.update(); // Start the first commit
 
     // WHEN another entity is created and a second commit is triggered
     // before the first one has completed
     let entity_b = app.world_mut().spawn(Position { x: 50.0, y: 50.0 }).id();
     app.update();
-    app.world_mut().send_event(TriggerCommit::default());
+    app.world_mut().send_event(TriggerCommit { correlation_id: None, target_connection: db.clone() });
     app.update(); // This should queue the second commit
 
     // THEN the status should be InProgressAndDirty
@@ -138,14 +140,14 @@ fn test_postupdate_load_applies_next_frame() {
 
     // GIVEN: one entity to load
     let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.add_plugins(PersistencePlugins::new(db.clone()));
     app1.world_mut().spawn((Health { value: 7 }, Position { x: 1.0, y: 2.0 }));
     app1.update();
-    commit_sync(&mut app1).expect("commit failed");
+    commit_sync(&mut app1, db.clone()).expect("commit failed");
 
     // WHEN: load is triggered from PostUpdate
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn postupdate_load(mut pq: PersistentQuery<(&Health, &Position)>) {
         let _ = pq.ensure_loaded();
     }

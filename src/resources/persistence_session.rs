@@ -35,7 +35,6 @@ type ResourceDeserializer  = Box<dyn Fn(&mut World, Value) -> Result<(), Persist
 /// Manages a "unit of work": local World cache + change tracking + async runtime.
 #[derive(Resource)]
 pub struct PersistenceSession {
-    pub db: Arc<dyn DatabaseConnection>,
     pub(crate) dirty_entities: HashSet<Entity>,
     pub despawned_entities: HashSet<Entity>,
     pub entity_keys: HashMap<Entity, String>,
@@ -141,9 +140,13 @@ impl PersistenceSession {
 
     /// Testing constructor w/ mock DB.
     #[cfg(test)]
-    pub fn new_mocked(db: Arc<dyn DatabaseConnection>) -> Self {
+    pub fn new_mocked() -> Self {
+        Self::new()
+    }
+
+    /// Create a new session.
+    pub fn new() -> Self {
         Self {
-            db,
             component_serializers: HashMap::new(),
             component_deserializers: HashMap::new(),
             component_type_id_to_name: HashMap::new(),
@@ -160,25 +163,6 @@ impl PersistenceSession {
         }
     }
 
-    /// Create a new session.
-    pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
-        Self {
-            db,
-            component_serializers: HashMap::new(),
-            component_deserializers: HashMap::new(),
-            component_type_id_to_name: HashMap::new(),
-            component_name_to_type_id: HashMap::new(),
-            component_presence: HashMap::new(),
-            resource_serializers: HashMap::new(),
-            resource_deserializers: HashMap::new(),
-            resource_name_to_type_id: HashMap::new(),
-            dirty_entities: HashSet::new(),
-            despawned_entities: HashSet::new(),
-            dirty_resources: HashSet::new(),
-            entity_keys: HashMap::new(),
-            version_manager: VersionManager::new(),
-        }
-    }
 
     /// Fetch the document for the given key from `db` and deserialize its components
     /// into `world` for `entity`. Also caches the document version.
@@ -256,6 +240,7 @@ impl PersistenceSession {
         despawned_entities: &HashSet<Entity>,
         dirty_resources: &HashSet<TypeId>,
         thread_count: usize,
+        key_field: &str,
     ) -> Result<CommitData, PersistenceError> {
         let mut operations = Vec::new();
         let mut newly_created_entities = Vec::new();
@@ -379,7 +364,6 @@ impl PersistenceSession {
                                         serde_json::json!(1u64),
                                     );
                                     // Use backend-specific key field instead of hardcoding "_key"
-                                    let key_field = session.db.document_key_field();
                                     obj.insert(key_field.to_string(), Value::String(name.clone()));
                                 }
                                 resource_ops.push(TransactionOperation::CreateDocument {
@@ -408,10 +392,11 @@ impl PersistenceSession {
     }
 }
 
-/// This function provides a clean `await`-able interface for the event-driven
-/// commit system. It sends a `TriggerCommit` event, then waits for a
-/// `CommitCompleted` event with a matching correlation ID.
-pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
+/// Awaitable commit that uses the supplied connection for this request.
+pub async fn commit(
+    app: &mut App,
+    connection: Arc<dyn DatabaseConnection>,
+) -> Result<(), PersistenceError> {
     let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = oneshot::channel();
 
@@ -424,6 +409,7 @@ pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
     // Send the event to trigger the commit.
     app.world_mut().send_event(TriggerCommit {
         correlation_id: Some(correlation_id),
+        target_connection: connection,
     });
 
     // The timeout is applied to the entire commit-and-wait process.
@@ -456,17 +442,18 @@ pub async fn commit(app: &mut App) -> Result<(), PersistenceError> {
     .map_err(|_| PersistenceError::new("Commit timed out after 60 seconds"))?
 }
 
-// Add a synchronous convenience that uses the plugin’s runtime
-pub fn commit_sync(app: &mut App) -> Result<(), PersistenceError> {
-    // Clone the Arc<Runtime> out of the world without holding a borrow
+// Add synchronous conveniences that use the plugin’s runtime
+pub fn commit_sync(
+    app: &mut App,
+    connection: Arc<dyn DatabaseConnection>,
+) -> Result<(), PersistenceError> {
     let rt = { app.world().resource::<TokioRuntime>().0.clone() };
-    rt.block_on(commit(app))
+    rt.block_on(commit(app, connection))
 }
 
 #[cfg(test)]
 mod arango_session {
     use super::*;
-    use crate::db::connection::MockDatabaseConnection;
     use crate::persist::Persist;
     use crate::registration::COMPONENT_REGISTRY;
     use bevy::prelude::World;
@@ -487,8 +474,7 @@ mod arango_session {
     #[test]
     fn new_session_is_empty() {
         setup();
-        let mock_db = MockDatabaseConnection::new();
-        let session = PersistenceSession::new_mocked(Arc::new(mock_db));
+        let session = PersistenceSession::new_mocked();
         assert!(session.dirty_entities.is_empty());
         assert!(session.despawned_entities.is_empty());
     }
@@ -499,7 +485,7 @@ mod arango_session {
         let mut world = World::new();
         let entity = world.spawn_empty().id();
 
-        let mut session = PersistenceSession::new(Arc::new(MockDatabaseConnection::new()));
+        let mut session = PersistenceSession::new();
         session.register_component::<MyComp>();
 
         let deserializer = session.component_deserializers.get(MyComp::name()).unwrap();
@@ -513,7 +499,7 @@ mod arango_session {
         setup();
         let mut world = World::new();
 
-        let mut session = PersistenceSession::new(Arc::new(MockDatabaseConnection::new()));
+        let mut session = PersistenceSession::new();
         session.register_resource::<MyRes>();
 
         let deserializer = session.resource_deserializers.get(MyRes::name()).unwrap();

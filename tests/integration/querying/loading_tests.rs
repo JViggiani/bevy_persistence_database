@@ -12,15 +12,15 @@ fn test_load_specific_entities_into_new_session() {
 
     // Session 1: create data
     let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.add_plugins(PersistencePlugins::new(db.clone()));
     let _entity_to_load = app1.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 })).id();
     let _entity_to_ignore = app1.world_mut().spawn(Health { value: 99 }).id();
     app1.update();
-    commit_sync(&mut app1).expect("Initial commit failed");
+    commit_sync(&mut app1, db.clone()).expect("Initial commit failed");
 
     // Session 2: load (Health AND Position) with Health > 100
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn sys(
         pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>
     ) {
@@ -44,18 +44,18 @@ fn test_load_into_world_with_existing_entities() {
 
     // GIVEN entity A in DB, created by app1
     let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.add_plugins(PersistencePlugins::new(db.clone()));
     let a = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit_sync(&mut app1).expect("Commit for app1 failed");
+    commit_sync(&mut app1, db.clone()).expect("Commit for app1 failed");
     let key_a = app1.world().get::<Guid>(a).unwrap().id().to_string();
 
     // AND a fresh app2 with entity B already committed
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     let _b = app2.world_mut().spawn(Position { x: 1.0, y: 1.0 }).id();
     app2.update();
-    commit_sync(&mut app2).expect("Commit for app2 failed");
+    commit_sync(&mut app2, db.clone()).expect("Commit for app2 failed");
 
     // WHEN we query for A and load it into app2 via a system
     fn load_a(
@@ -82,7 +82,7 @@ fn test_load_into_world_with_existing_entities() {
 fn test_fetch_ids_only() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // Spawn entities with different components
     app.world_mut().spawn(Health { value: 100 });
@@ -90,7 +90,7 @@ fn test_fetch_ids_only() {
     app.world_mut().spawn((Health { value: 200 }, Position { x: 10.0, y: 20.0 }));
     app.world_mut().spawn(Position { x: 5.0, y: 5.0 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // Store Guids to verify them later
     let health_entities: Vec<String> = app.world_mut()
@@ -102,7 +102,7 @@ fn test_fetch_ids_only() {
 
     // Use a system to load Health where value > 75, then collect keys from world
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn load_health_gt_75(
         pq: PersistentQuery<&Health>
     ) {
@@ -122,7 +122,7 @@ fn test_fetch_ids_only() {
 
     // Health AND Position: load via presence, then collect keys
     let mut app3 = App::new();
-    app3.add_plugins(PersistencePlugins(db.clone()));
+    app3.add_plugins(PersistencePlugins::new(db.clone()));
     fn load_h_and_p(mut pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
         let _ = pq.ensure_loaded();
     }
@@ -147,14 +147,14 @@ fn test_duplicate_q_entries_are_deduped_and_work() {
 
     // GIVEN: one Health-only entity
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 99 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: Q requests &Health and Option<&Health> (duplicate)
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_duplicate_q_components);
     app2.update();
 
@@ -177,15 +177,15 @@ fn test_optional_component_in_q_is_fetched_if_present() {
 
     // GIVEN: one entity with Health only, one with Health+Position
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 1 });
     app.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 2.0 }));
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: run a system with Q = (&Health, Option<&Position>)
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_optional_component_fetch);
     app2.update();
 
@@ -210,15 +210,15 @@ fn test_no_presence_loads_all_docs_requested_by_optional_q() {
 
     // GIVEN: one Health-only, one Position-only
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 10 });
     app.world_mut().spawn(Position { x: 3.0, y: 4.0 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: Q has only Option<&Health> and Option<&Position>, no F presence filters
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_no_presence_optional_fetch);
     app2.update();
 

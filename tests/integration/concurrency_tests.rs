@@ -15,12 +15,12 @@ use bevy_persistence_database_derive::db_matrix_test;
 fn test_update_conflict_is_detected() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Commit an entity with Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // Get the entity's key for direct DB manipulation
     let guid = app.world().get::<Guid>(entity_id).unwrap();
@@ -56,7 +56,7 @@ fn test_update_conflict_is_detected() {
     app.update();
 
     // 4. Attempt to commit - should fail with conflict
-    let result = commit_sync(&mut app);
+    let result = commit_sync(&mut app, db.clone());
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 }
 
@@ -64,12 +64,12 @@ fn test_update_conflict_is_detected() {
 fn test_delete_conflict_is_detected() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Commit an entity
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     let guid = app.world().get::<Guid>(entity_id).unwrap();
     let key = guid.id().to_string();
@@ -97,7 +97,7 @@ fn test_delete_conflict_is_detected() {
     app.update();
 
     // 4. Attempt to commit - should fail with conflict
-    let result = commit_sync(&mut app);
+    let result = commit_sync(&mut app, db.clone());
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 }
 
@@ -105,7 +105,7 @@ fn test_delete_conflict_is_detected() {
 fn test_conflict_strategy_last_write_wins() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Commit an entity with Health and Position
     let entity_id = app
@@ -113,7 +113,7 @@ fn test_conflict_strategy_last_write_wins() {
         .spawn((Health { value: 100 }, Position { x: 0.0, y: 0.0 }))
         .id();
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     let guid = app.world().get::<Guid>(entity_id).unwrap();
     let key = guid.id().to_string();
@@ -145,7 +145,7 @@ fn test_conflict_strategy_last_write_wins() {
     app.update();
 
     // 4. First commit attempt - expect conflict
-    let result = commit_sync(&mut app);
+    let result = commit_sync(&mut app, db.clone());
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 
     // 5. Implement "last write wins" strategy:
@@ -184,7 +184,7 @@ fn test_conflict_strategy_last_write_wins() {
     app.update();
 
     // 6. Second commit should succeed
-    commit_sync(&mut app).expect("Second commit failed");
+    commit_sync(&mut app, db.clone()).expect("Second commit failed");
 
     // 7. Verify final state in DB has both changes
     let (final_doc, _) = run_async(db.fetch_document(&key))
@@ -210,7 +210,7 @@ fn test_conflict_strategy_last_write_wins() {
 fn test_conflict_strategy_three_way_merge() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. "Base" state: Commit an entity with Health and Position.
     let base_health = Health { value: 100 };
@@ -220,7 +220,7 @@ fn test_conflict_strategy_three_way_merge() {
         .spawn((base_health.clone(), base_position.clone()))
         .id();
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     let guid = app.world().get::<Guid>(entity_id).unwrap();
     let key = guid.id().to_string();
@@ -253,7 +253,7 @@ fn test_conflict_strategy_three_way_merge() {
     app.update();
 
     // 4. Attempt to commit Session 2's change, expecting a conflict.
-    let result = commit_sync(&mut app);
+    let result = commit_sync(&mut app, db.clone());
     assert!(matches!(result, Err(PersistenceError::Conflict { .. })));
 
     // 5. Conflict Resolution: Perform a three-way merge.
@@ -285,7 +285,7 @@ fn test_conflict_strategy_three_way_merge() {
     app.update();
 
     // 6. Commit the merged result.
-    commit_sync(&mut app).expect("Merged commit failed");
+    commit_sync(&mut app, db.clone()).expect("Merged commit failed");
 
     // 7. Assert that the final document has both the new Health and new Position.
     let (final_doc, _) = run_async(db.fetch_document(&key)).unwrap().unwrap();

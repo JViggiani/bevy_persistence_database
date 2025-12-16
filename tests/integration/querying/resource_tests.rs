@@ -9,17 +9,17 @@ use bevy_persistence_database_derive::db_matrix_test;
 fn test_load_resources_alongside_entities() {
     let (db, _container) = setup();
     let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.add_plugins(PersistencePlugins::new(db.clone()));
 
     // GIVEN a committed GameSettings resource
     let settings = GameSettings { difficulty: 0.42, map_name: "mystic".into() };
     app1.insert_resource(settings.clone());
     app1.update();
-    commit_sync(&mut app1).expect("Initial commit failed");
+    commit_sync(&mut app1, db.clone()).expect("Initial commit failed");
 
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn sys(mut pq: PersistentQuery<&Guid>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, sys);
     app2.update();

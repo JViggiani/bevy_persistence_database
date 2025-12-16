@@ -36,7 +36,6 @@ pub use plugins::{
     persistence_plugin::PersistenceSystemSet,
 };
 pub use query::{PersistentQuery, PersistenceQueryCache, CachePolicy};
-
 pub use resources::{PersistenceSession, commit, commit_sync};
 pub use persist::Persist;
 

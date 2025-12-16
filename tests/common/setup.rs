@@ -296,7 +296,11 @@ pub fn run_async<F: std::future::Future>(fut: F) -> F::Output {
 
 // Convenience to build an App with plugin + config
 pub fn make_app(db: Arc<dyn DatabaseConnection>, batch_size: usize) -> App {
-    let config = PersistencePluginConfig { batching_enabled: true, commit_batch_size: batch_size, thread_count: 4 };
+    let config = PersistencePluginConfig {
+        batching_enabled: true,
+        commit_batch_size: batch_size,
+        thread_count: 4,
+    };
     let plugin = PersistencePluginCore::new(db.clone()).with_config(config);
     let mut app = App::new();
     app.add_plugins(plugin);

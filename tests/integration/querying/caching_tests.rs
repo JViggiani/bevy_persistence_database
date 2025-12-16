@@ -28,16 +28,16 @@ fn test_force_refresh_system(mut query: PersistentQuery<&Health>) {
 fn test_persistent_query_caching() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Create some test data
     app.world_mut().spawn(Health { value: 100 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // 2. Create a new app that will use the PersistentQuery with cache tracking
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     
     // Wrap the real DB so we can count execute_documents() calls
     let query_count = Arc::new(AtomicUsize::new(0));
@@ -116,14 +116,14 @@ fn test_entity_not_overwritten_on_second_query_without_refresh() {
     // GIVEN an entity persisted with Health { value: 100 }
     let (db, _container) = setup();
     let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.add_plugins(PersistencePlugins::new(db.clone()));
     let _e = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit_sync(&mut app1).expect("commit failed");
+    commit_sync(&mut app1, db.clone()).expect("commit failed");
 
     // WHEN we load it into a fresh world via systems
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.insert_resource(TestState::default());
 
     // 1) Load and capture GUID
@@ -161,14 +161,14 @@ fn test_force_refresh_overwrites() {
     // GIVEN an entity persisted with Health { value: 100 }
     let (db, _container) = setup();
     let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins(db.clone()));
+    app1.add_plugins(PersistencePlugins::new(db.clone()));
     let _e = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit_sync(&mut app1).expect("commit failed");
+    commit_sync(&mut app1, db.clone()).expect("commit failed");
 
     // Load into app2 via system, then mutate locally
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
