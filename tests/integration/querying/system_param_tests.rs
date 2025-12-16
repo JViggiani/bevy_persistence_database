@@ -20,7 +20,7 @@ fn test_persistent_query_system_param() {
     let (db, _container) = setup();
 
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Create some test data
     let entity_high_health = app
@@ -41,7 +41,7 @@ fn test_persistent_query_system_param() {
 
     app.update();
     // Commit synchronously using the plugin runtime
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // Get the GUIDs for verification
     let high_health_guid = app.world().get::<Guid>(entity_high_health).unwrap().id().to_string();
@@ -49,7 +49,7 @@ fn test_persistent_query_system_param() {
 
     // 2. Create a new app that will use the PersistentQuery
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     
     // Add system that uses the PersistentQuery
     app2.add_systems(bevy::prelude::Update, test_persistent_query_system);
@@ -80,18 +80,18 @@ fn test_persistent_query_system_param() {
 fn test_persistent_query_with_filter() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Create some test data
     app.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 }));
     app.world_mut().spawn((Health { value: 50 }, Position { x: 5.0, y: 5.0 }));
     app.world_mut().spawn((Health { value: 100 }, Position { x: 15.0, y: 15.0 }));
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // 2. Create a new app that will use the PersistentQuery with filter
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     
     // Define a system that will test the filtered query
     fn filtered_query_system(mut query: PersistentQuery<(&Health, &Position)>) {

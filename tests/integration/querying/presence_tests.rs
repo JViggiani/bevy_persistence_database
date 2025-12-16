@@ -15,15 +15,15 @@ fn test_presence_without_filter() {
 
     // GIVEN: one entity with Creature, one with only Health
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Creature { is_screaming: false });
     app.world_mut().spawn(Health { value: 42 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: run a system that loads entities WITHOUT Creature
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_without_creature);
     app2.update();
 
@@ -51,15 +51,15 @@ fn test_type_driven_presence_filters() {
 
     // GIVEN: one entity with Creature+Health, one with only Health
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
     app.world_mut().spawn(Health { value: 2 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: run a system that uses type-level With/Without in F
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_type_driven_presence);
     app2.update();
 
@@ -88,16 +88,16 @@ fn test_type_driven_or_presence_filters() {
 
     // GIVEN: one with Health, one with Creature, one with neither
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 10 });
     app.world_mut().spawn(Creature { is_screaming: false });
     app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: run a system that uses OR(With<Health>, With<Creature>) in F
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_type_driven_or_presence);
     app2.update();
 
@@ -125,16 +125,16 @@ fn test_nested_tuple_presence_and() {
     let (db, _container) = setup();
     // GIVEN: H+P, H+C, P-only
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }));
     app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
     app.world_mut().spawn(Position { x: 1.0, y: 1.0 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_nested_tuple_presence);
     app2.update();
 
@@ -173,17 +173,17 @@ fn test_and_or_mix_with_without_filters() {
 
     // GIVEN: H+C, H+P, H+C+PlayerName, H-only
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
     app.world_mut().spawn((Health { value: 2 }, Position { x: 0.0, y: 0.0 }));
     app.world_mut().spawn((Health { value: 3 }, Creature { is_screaming: true }, PlayerName { name: "X".into() }));
     app.world_mut().spawn(Health { value: 4 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_and_or_mix_with_without);
     app2.update();
 
@@ -207,15 +207,15 @@ fn test_optional_q_with_without_exclusion() {
 
     // GIVEN: H-only, H+Creature
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 1 });
     app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN: Q asks for Option<&Creature> but F excludes Creature
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_optional_q_with_without);
     app2.update();
 
@@ -242,17 +242,17 @@ fn test_or_presence_three_arms() {
 
     // GIVEN: Health-only, Creature-only, PlayerName-only, Position-only
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 1 });
     app.world_mut().spawn(Creature { is_screaming: true });
     app.world_mut().spawn(PlayerName { name: "P".into() });
     app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     app2.add_systems(bevy::prelude::Update, system_or_three_arms);
     app2.update();
 
@@ -275,7 +275,7 @@ fn test_presence_expression_complex_and_or_not() {
     // E6: P only -> no
     // E7: H+P+PlayerName -> match
     let mut app_seed = App::new();
-    app_seed.add_plugins(PersistencePlugins(db.clone()));
+    app_seed.add_plugins(PersistencePlugins::new(db.clone()));
     app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 })); // E1
     app_seed.world_mut().spawn(PlayerName { name: "pn".into() }); // E2
     app_seed.world_mut().spawn(Health { value: 2 }); // E3
@@ -284,11 +284,11 @@ fn test_presence_expression_complex_and_or_not() {
     app_seed.world_mut().spawn(Position { x: 2.0, y: 2.0 }); // E6
     app_seed.world_mut().spawn((Health { value: 4 }, Position { x: 3.0, y: 3.0 }, PlayerName { name: "both".into() })); // E7
     app_seed.update();
-    commit_sync(&mut app_seed).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
 
     // App under test: presence-only complex expression
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     fn sys(
         mut pq: PersistentQuery<

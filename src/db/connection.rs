@@ -49,13 +49,6 @@ impl fmt::Display for PersistenceError {
 
 impl std::error::Error for PersistenceError {}
 
-// For backward compatibility
-impl From<String> for PersistenceError {
-    fn from(msg: String) -> Self {
-        PersistenceError::General(msg)
-    }
-}
-
 impl PersistenceError {
     /// Creates a new general error.
     pub fn new(msg: impl Into<String>) -> Self {

@@ -18,16 +18,16 @@ fn test_query_lens_join_filtered_world_only() {
 
     // Seed: E1 = H+P+Name, E2 = H+P, E3 = Name
     let mut app_seed = App::new();
-    app_seed.add_plugins(PersistencePlugins(db.clone()));
+    app_seed.add_plugins(PersistencePlugins::new(db.clone()));
     app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }, PlayerName { name: "alice".into() }));
     app_seed.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 }));
     app_seed.world_mut().spawn(PlayerName { name: "bob".into() });
     app_seed.update();
-    commit_sync(&mut app_seed).unwrap();
+    commit_sync(&mut app_seed, db.clone()).unwrap();
 
     // App under test
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     #[derive(Resource, Default)]
     struct JoinState { joined_count: usize }
@@ -73,16 +73,16 @@ fn test_join_between_two_persistent_queries_loaded_inline() {
     // E2: H+P (no PlayerName)      -> should NOT be loaded by smart join
     // E3: PlayerName only          -> should NOT be loaded by smart join
     let mut app_seed = App::new();
-    app_seed.add_plugins(PersistencePlugins(db.clone()));
+    app_seed.add_plugins(PersistencePlugins::new(db.clone()));
     app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }, PlayerName { name: "alice".into() })); // E1
     app_seed.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 })); // E2
     app_seed.world_mut().spawn(PlayerName { name: "bob".into() }); // E3
     app_seed.update();
-    commit_sync(&mut app_seed).unwrap();
+    commit_sync(&mut app_seed, db.clone()).unwrap();
 
     // App under test
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     #[derive(Resource, Default)]
     struct JoinState {

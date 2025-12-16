@@ -69,12 +69,8 @@ pub struct RegisteredPersistTypes(pub HashSet<TypeId>);
 pub struct TriggerCommit {
     /// An optional ID to correlate this trigger with a `CommitCompleted` event.
     pub correlation_id: Option<u64>,
-}
-
-impl Default for TriggerCommit {
-    fn default() -> Self {
-        Self { correlation_id: None }
-    }
+    /// Connection to use directly for this commit.
+    pub target_connection: Arc<dyn DatabaseConnection>,
 }
 
 /// A state machine resource to track the commit lifecycle.
@@ -84,6 +80,11 @@ pub enum CommitStatus {
     Idle,
     InProgress,
     InProgressAndDirty,
+}
+
+#[derive(Clone)]
+enum PersistenceBackend {
+    Static(Arc<dyn DatabaseConnection>),
 }
 
 #[derive(Resource)]
@@ -101,6 +102,7 @@ fn handle_commit_trigger(world: &mut World) {
     // Use a temporary scope to manage borrows.
     let mut should_commit = false;
     let mut correlation_id = None;
+    let mut requested_connection: Option<Arc<dyn DatabaseConnection>> = None;
 
     world.resource_scope(|world, mut events: Mut<Events<TriggerCommit>>| {
         let mut status = world.resource_mut::<CommitStatus>();
@@ -108,6 +110,7 @@ fn handle_commit_trigger(world: &mut World) {
             // Drain all events. We only care that at least one was sent.
             // The correlation ID of the first one is taken, others are ignored for now.
             let first_trigger = events.drain().next().unwrap();
+            requested_connection = Some(first_trigger.target_connection.clone());
 
             match *status {
                 CommitStatus::Idle => {
@@ -131,6 +134,15 @@ fn handle_commit_trigger(world: &mut World) {
         return;
     }
 
+    let connection = if let Some(conn) = requested_connection {
+        conn
+    } else {
+        let err = PersistenceError::new("TriggerCommit missing target_connection");
+        world.send_event(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+        bevy::log::error!(%err, "failed to select database connection before commit");
+        return;
+    };
+
     let plugin_config = world.resource::<PersistencePluginConfig>().clone();
 
     // 1) isolate dirty sets from the session
@@ -151,6 +163,7 @@ fn handle_commit_trigger(world: &mut World) {
         &despawned_entities,
         &dirty_resources,
         plugin_config.thread_count,
+        connection.document_key_field(),
     ) {
         Ok(data) if data.operations.is_empty() => {
             // nothing to do → send completion and restore dirty sets
@@ -177,7 +190,7 @@ fn handle_commit_trigger(world: &mut World) {
     *world.resource_mut::<CommitStatus>() = CommitStatus::InProgress;
     let runtime = world.resource::<TokioRuntime>().0.clone();
     let thread_pool = IoTaskPool::get();
-    let db = world.resource::<PersistenceSession>().db.clone();
+    let db = connection.clone();
 
     let all_operations = commit_data.operations;
     let new_entities = commit_data.new_entities;
@@ -303,12 +316,13 @@ fn handle_commit_trigger(world: &mut World) {
             let batch_db = db.clone();
             let batch_runtime = runtime.clone();
             let batch_new_entities = batch_new_entities.get(i).cloned().unwrap_or_default();
+            let db_for_task = batch_db.clone();
             
             // Task spawning - the block_on is necessary for the Tokio runtime
             let task = thread_pool.spawn(async move {
                 batch_runtime
                     .block_on(async {
-                        batch_db
+                        db_for_task
                             .execute_transaction(batch_ops)
                             .await
                             .map(|keys| (keys, batch_new_entities))
@@ -320,14 +334,17 @@ fn handle_commit_trigger(world: &mut World) {
                 dirty_entities: batch_entities_set,
                 despawned_entities: if i == 0 { despawned_entities.clone() } else { HashSet::new() },
                 dirty_resources: resource_sets[i].clone(),
+                connection: batch_db.clone(),
             };
             
             world.spawn((CommitTask(task), TriggerID(correlation_id), meta));
         }
     } else {
+        let db_for_task = db.clone();
         let task = thread_pool.spawn(async move {
             runtime.block_on(async {
-                db.execute_transaction(all_operations)
+                db_for_task
+                    .execute_transaction(all_operations)
                     .await
                     .map(|keys| (keys, new_entities))
             })
@@ -340,6 +357,7 @@ fn handle_commit_trigger(world: &mut World) {
                 dirty_entities,
                 despawned_entities,
                 dirty_resources,
+                connection: db.clone(),
             },
         ));
     }
@@ -355,6 +373,7 @@ struct CommitMeta {
     dirty_entities: HashSet<Entity>,
     despawned_entities: HashSet<Entity>,
     dirty_resources: HashSet<TypeId>,
+    connection: Arc<dyn DatabaseConnection>,
 }
 
 /// A system that polls the running commit task and updates the state machine upon completion.
@@ -377,6 +396,7 @@ fn handle_commit_completed(
             let cid = trigger_id.0;
             let mut is_final_batch = true;
             let mut should_send_result = true;
+            let mut commit_connection: Option<Arc<dyn DatabaseConnection>> = None;
 
             // Set had_error if any batch has an error
             if result.is_err() {
@@ -415,6 +435,7 @@ fn handle_commit_completed(
             }
 
             if let Some(mut meta) = meta_opt {
+                commit_connection = Some(meta.connection.clone());
                 // Process metadata regardless of batch position
                 let event_res = match &result {
                     Ok((new_keys, new_entities)) => {
@@ -486,7 +507,12 @@ fn handle_commit_completed(
                 
                 // Only trigger next commit if we determined we needed to
                 if should_trigger_next {
-                    triggers.write(TriggerCommit::default());
+                    if let Some(conn) = commit_connection.clone() {
+                    triggers.write(TriggerCommit {
+                        correlation_id: None,
+                        target_connection: conn,
+                    });
+                    }
                 }
             }
         }
@@ -560,7 +586,7 @@ impl Default for PersistencePluginConfig {
 
 /// A Bevy `Plugin` that sets up `bevy_persistence_database`.
 pub struct PersistencePluginCore {
-    db: Arc<dyn DatabaseConnection>,
+    backend: PersistenceBackend,
     config: PersistencePluginConfig,
 }
 
@@ -568,7 +594,7 @@ impl PersistencePluginCore {
     /// Creates a new `PersistencePluginCore` with the given database connection.
     pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
         Self {
-            db,
+            backend: PersistenceBackend::Static(db),
             config: PersistencePluginConfig::default(),
         }
     }
@@ -606,11 +632,15 @@ impl Plugin for PersistencePluginCore {
         // Initialize the global IO task pool so IoTaskPool::get() won't panic
         IoTaskPool::get_or_init(|| TaskPool::new());
 
-        let session = PersistenceSession::new(self.db.clone());
+        let db_conn = match &self.backend {
+            PersistenceBackend::Static(db) => db.clone(),
+        };
+
+        let session = PersistenceSession::new();
         app.insert_resource(session);
         app.insert_resource(self.config.clone());
         // Add the database connection as a resource
-        app.insert_resource(DatabaseConnectionResource(self.db.clone()));
+        app.insert_resource(DatabaseConnectionResource(db_conn.clone()));
         app.init_resource::<RegisteredPersistTypes>();
         app.add_event::<TriggerCommit>();
         app.add_event::<CommitCompleted>();
@@ -697,7 +727,24 @@ impl Plugin for PersistencePluginCore {
 /// A "bundle" plugin for standard Bevy apps. This is the recommended way to
 /// use the plugin.
 #[derive(Clone)]
-pub struct PersistencePlugins(pub Arc<dyn DatabaseConnection>);
+pub struct PersistencePlugins {
+    backend: PersistenceBackend,
+    config: PersistencePluginConfig,
+}
+
+impl PersistencePlugins {
+    pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
+        Self {
+            backend: PersistenceBackend::Static(db),
+            config: PersistencePluginConfig::default(),
+        }
+    }
+
+    pub fn with_config(mut self, config: PersistencePluginConfig) -> Self {
+        self.config = config;
+        self
+    }
+}
 
 // Conditionally add Bevy's LogPlugin only if no global subscriber is set and the plugin
 // hasn't already been added to this App. This avoids "already set" errors but still
@@ -718,18 +765,23 @@ impl Plugin for MaybeAddLogPlugin {
 
 impl PluginGroup for PersistencePlugins {
     fn build(self) -> PluginGroupBuilder {
+        let core = PersistencePluginCore::new(match self.backend {
+            PersistenceBackend::Static(db) => db,
+        })
+        .with_config(self.config.clone());
+
         MinimalPlugins
             .build()
             // Only initialize logging if nothing else has already set a global subscriber
             .add(MaybeAddLogPlugin)
-            .add(PersistencePluginCore::new(self.0.clone()))
+            .add(core)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Persist;
+    use crate::{Persist, PersistenceSession};
     use serde::{Serialize, Deserialize};
     
     // Define a test component that implements Persist
@@ -750,8 +802,7 @@ mod tests {
         let mut app = App::new();
         
         // Create a mock session and insert it as a resource
-        let mock_db = crate::db::MockDatabaseConnection::new();
-        let session = PersistenceSession::new(Arc::new(mock_db));
+        let session = PersistenceSession::new();
         app.insert_resource(session);
         
         // Add our component tracking system

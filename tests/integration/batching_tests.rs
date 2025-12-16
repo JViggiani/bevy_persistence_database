@@ -23,7 +23,7 @@ fn test_successful_batch_commit_of_new_entities() {
     app.update();
 
     // commit
-    let res = commit_sync(&mut app);
+    let res = commit_sync(&mut app, db.clone());
     assert!(res.is_ok());
 
     // all entities got a Guid
@@ -34,7 +34,7 @@ fn test_successful_batch_commit_of_new_entities() {
 
     // loading back from DB
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
@@ -52,7 +52,7 @@ fn test_batch_commit_with_updates_and_deletes() {
         .map(|i| app.world_mut().spawn(Health { value: i }).id())
         .collect();
     app.update();
-    commit_sync(&mut app).unwrap();
+    commit_sync(&mut app, db.clone()).unwrap();
 
     // update first two, delete last two
     app.world_mut().get_mut::<Health>(ids[0]).unwrap().value = 100;
@@ -61,12 +61,12 @@ fn test_batch_commit_with_updates_and_deletes() {
     app.world_mut().entity_mut(ids[4]).despawn();
     app.update();
 
-    let res = commit_sync(&mut app);
+    let res = commit_sync(&mut app, db.clone());
     assert!(res.is_ok());
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 
     let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins(db.clone()));
+    app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
@@ -86,7 +86,7 @@ fn test_batch_commit_failure_propagates() {
         .map(|i| app.world_mut().spawn(Health { value: i }).id())
         .collect();
     app.update();
-    commit_sync(&mut app).unwrap();
+    commit_sync(&mut app, db.clone()).unwrap();
 
     // induce conflict on the third entity
     let guid = app.world().get::<Guid>(ids[2]).unwrap().id().to_string();
@@ -108,7 +108,7 @@ fn test_batch_commit_failure_propagates() {
     }
     app.update();
 
-    let res = commit_sync(&mut app);
+    let res = commit_sync(&mut app, db.clone());
     assert!(matches!(res, Err(PersistenceError::Conflict{ key }) if key == guid));
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 }
@@ -117,6 +117,7 @@ fn test_batch_commit_failure_propagates() {
 fn test_concurrent_batch_execution() {
     // Create a mock database that introduces a delay for each batch
     let mut db = MockDatabaseConnection::new();
+    db.expect_document_key_field().return_const("_key");
     let batch_count = 5;
     let batch_delay = Duration::from_millis(50);
 
@@ -152,7 +153,7 @@ fn test_concurrent_batch_execution() {
 
     // Measure time for the commit operation
     let start_time = Instant::now();
-    let res = commit_sync(&mut app);
+    let res = commit_sync(&mut app, db_arc.clone());
     let elapsed = start_time.elapsed();
 
     assert!(res.is_ok());
@@ -181,6 +182,7 @@ fn test_concurrent_batch_execution() {
 fn test_atomic_multi_batch_commit() {
     // Create a mock database that will succeed for the first N-1 batches but fail on the last one
     let mut db = MockDatabaseConnection::new();
+    db.expect_document_key_field().return_const("_key");
     let batch_count = 3;
     let batch_to_fail = 2; // Zero-indexed, so this is the third batch
     
@@ -223,7 +225,7 @@ fn test_atomic_multi_batch_commit() {
     app.update();
     
     // Attempt the commit operation
-    let result = commit_sync(&mut app);
+    let result = commit_sync(&mut app, db_arc.clone());
     
     // The entire operation should fail due to the failure in one batch
     assert!(result.is_err());
@@ -256,6 +258,7 @@ fn test_batches_respect_config_max_ops() {
     // Mock DB: ensure we get exactly expected_batches transactions and that
     // each batch contains <= batch_size operations.
     let mut db = MockDatabaseConnection::new();
+    db.expect_document_key_field().return_const("_key");
     db.expect_execute_transaction()
         .times(expected_batches)
         .returning(move |ops| {
@@ -275,7 +278,8 @@ fn test_batches_respect_config_max_ops() {
         commit_batch_size: batch_size,
         thread_count: 4,
     };
-    let plugin = PersistencePluginCore::new(Arc::new(db)).with_config(config);
+    let conn = Arc::new(db);
+    let plugin = PersistencePluginCore::new(conn.clone()).with_config(config);
     let mut app = App::new();
     app.add_plugins(plugin);
 
@@ -286,6 +290,6 @@ fn test_batches_respect_config_max_ops() {
     app.update();
 
     // Commit: mock assertions will validate batch sizing and call count
-    let res = commit_sync(&mut app);
+    let res = commit_sync(&mut app, conn);
     assert!(res.is_ok(), "Commit should succeed with mocked DB");
 }

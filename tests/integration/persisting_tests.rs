@@ -11,7 +11,7 @@ fn test_create_new_entity() {
     let (db, _container) = setup();
 
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     let health_val = Health { value: 100 };
     let pos_val = Position { x: 1.0, y: 2.0 };
@@ -20,7 +20,7 @@ fn test_create_new_entity() {
 
     app.update(); // Run the schedule to trigger change detection
 
-    commit_sync(&mut app).expect("Commit failed during test execution");
+    commit_sync(&mut app, db.clone()).expect("Commit failed during test execution");
 
     // 4. Verify the results
     // The entity should now have a Guid component assigned by the library.
@@ -50,7 +50,7 @@ fn test_create_new_entity() {
 fn test_create_new_resource() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Create a session, add a resource, and commit it
     let settings = GameSettings {
@@ -61,7 +61,7 @@ fn test_create_new_resource() {
 
     app.update(); // Run the schedule to trigger change detection
 
-    commit_sync(&mut app).expect("Commit failed during test execution");
+    commit_sync(&mut app, db.clone()).expect("Commit failed during test execution");
 
     // 2. Verify the resource was saved correctly by fetching it directly
     let resource_name = GameSettings::name();
@@ -80,12 +80,12 @@ fn test_create_new_resource() {
 fn test_update_existing_entity() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. GIVEN a committed entity with a Health component of value 100
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // Get the Guid to use for direct DB verification later
     let guid = app
@@ -113,7 +113,7 @@ fn test_update_existing_entity() {
     app.update(); // This will mark the component as Changed
 
     // 3. AND the app is committed again
-    commit_sync(&mut app).expect("Second commit failed");
+    commit_sync(&mut app, db.clone()).expect("Second commit failed");
 
     // 4. THEN the Health data in the database for that entity's Guid reflects the new value of 50.
     let health_json_after = run_async(db.fetch_component(&guid, Health::name()))
@@ -133,7 +133,7 @@ fn test_update_existing_entity() {
 fn test_update_existing_resource() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. GIVEN a committed GameSettings resource
     let initial_settings = GameSettings {
@@ -142,7 +142,7 @@ fn test_update_existing_resource() {
     };
     app.insert_resource(initial_settings);
     app.update(); // Run schedule to trigger change detection
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // 2. WHEN the GameSettings resource is modified in the app
     let mut settings = app.world_mut().resource_mut::<GameSettings>();
@@ -152,7 +152,7 @@ fn test_update_existing_resource() {
     app.update(); // Run schedule to trigger change detection on the resource
 
     // 3. AND the app is committed again
-    commit_sync(&mut app).expect("Second commit failed");
+    commit_sync(&mut app, db.clone()).expect("Second commit failed");
 
     // 4. THEN the GameSettings data in the database reflects the new values.
     let resource_name = GameSettings::name();
@@ -171,14 +171,14 @@ fn test_update_existing_resource() {
 fn test_delete_persisted_entity() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. Spawn and commit an entity.
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
 
     app.update();
 
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // 2. Verify it exists in the database.
     let guid = app
@@ -195,7 +195,7 @@ fn test_delete_persisted_entity() {
     // 3. Despawn the entity and commit again.
     app.world_mut().entity_mut(entity_id).despawn();
     app.update(); // This runs the despawn command and our auto-despawn-tracking system
-    commit_sync(&mut app).expect("Delete commit failed");
+    commit_sync(&mut app, db.clone()).expect("Delete commit failed");
 
     // 4. Verify it's gone from the database.
     let component_after_delete = run_async(db.fetch_component(&guid, Health::name()))
@@ -211,15 +211,15 @@ fn test_delete_persisted_entity() {
 fn test_commit_with_no_changes() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // GIVEN a committed app in a synchronized state with the database
     app.world_mut().spawn(Health { value: 100 });
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     // WHEN the app is committed again with no changes made to any entities or resources
-    commit_sync(&mut app).expect("Second commit with no changes failed");
+    commit_sync(&mut app, db.clone()).expect("Second commit with no changes failed");
 
     // THEN the commit operation succeeds without error
     // AND no database write operations are performed (this is handled by an early return in the commit function)
@@ -231,12 +231,12 @@ fn test_commit_with_no_changes() {
 fn test_add_new_component_to_existing_entity() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1. GIVEN a committed entity with only a Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    commit_sync(&mut app).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
 
     let guid = app
         .world()
@@ -261,7 +261,7 @@ fn test_add_new_component_to_existing_entity() {
     app.update(); // This will mark the entity as dirty due to the added component
 
     // 3. AND the app is committed again
-    commit_sync(&mut app).expect("Second commit failed");
+    commit_sync(&mut app, db.clone()).expect("Second commit failed");
 
     // 4. THEN the document in the database is updated to include the new Position data
     //    while retaining the existing Health data.
@@ -292,7 +292,7 @@ fn test_commit_entity_with_non_persisted_component() {
     // GIVEN a new Bevy app with the PersistencePluginCore
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // WHEN an entity is spawned with a mix of persisted and non-persisted components
     let entity_id = app
@@ -303,7 +303,7 @@ fn test_commit_entity_with_non_persisted_component() {
     app.update();
 
     // AND the app is committed
-    commit_sync(&mut app).expect("Commit failed");
+    commit_sync(&mut app, db.clone()).expect("Commit failed");
 
     // THEN a document is created, but it only contains the persisted component's data.
     let guid = app
@@ -347,7 +347,7 @@ fn test_commit_entity_with_non_persisted_component() {
 fn test_persist_component_with_empty_vec() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // WHEN an entity is spawned with a component that contains an empty `Vec`
     let inventory = Inventory { items: vec![] };
@@ -356,7 +356,7 @@ fn test_persist_component_with_empty_vec() {
     app.update();
 
     // AND the app is committed
-    commit_sync(&mut app).expect("Commit failed");
+    commit_sync(&mut app, db.clone()).expect("Commit failed");
 
     // THEN the commit succeeds and the data can be fetched and correctly deserialized
     // back into a component with an empty `Vec`.
@@ -383,7 +383,7 @@ fn test_persist_component_with_empty_vec() {
 fn test_persist_component_with_option_none() {
     let (db, _container) = setup();
     let mut app = App::new();
-    app.add_plugins(PersistencePlugins(db.clone()));
+    app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // WHEN an entity is spawned with a component that has an `Option<T>` field set to `None`
     let optional_data = OptionalData { data: None };
@@ -392,7 +392,7 @@ fn test_persist_component_with_option_none() {
     app.update();
 
     // AND the app is committed
-    commit_sync(&mut app).expect("Commit failed");
+    commit_sync(&mut app, db.clone()).expect("Commit failed");
 
     // THEN the commit succeeds and the data can be fetched and correctly deserialized.
     let guid = app
