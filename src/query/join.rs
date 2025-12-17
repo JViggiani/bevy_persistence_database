@@ -10,8 +10,8 @@ use crate::query::persistence_query_system_param::PersistentQuery;
 
 impl<'w, 's, Q, F> PersistentQuery<'w, 's, Q, F>
 where
-    Q: QueryData<ReadOnly = Q> + 'static + QueryDataToComponents,
-    F: QueryFilter + 'static + ToPresenceSpec + FilterSupported,
+    Q: QueryData<ReadOnly = Q> + QueryDataToComponents,
+    F: QueryFilter + ToPresenceSpec + FilterSupported,
 {
     /// Smart join between two PersistentQuery params:
     /// - Builds a combined presence/value spec (intersection) and performs a single DB load.
@@ -22,8 +22,8 @@ where
         other: &'a mut PersistentQuery<'w2, 's2, Q2, F2>,
     ) -> QueryLens<'a, NewD, NewF>
     where
-        Q2: QueryData<ReadOnly = Q2> + 'static + QueryDataToComponents,
-        F2: QueryFilter + 'static + ToPresenceSpec + FilterSupported,
+        Q2: QueryData<ReadOnly = Q2> + QueryDataToComponents,
+        F2: QueryFilter + ToPresenceSpec + FilterSupported,
         NewD: bevy::ecs::query::QueryData,
         NewF: bevy::ecs::query::QueryFilter,
     {

@@ -10,7 +10,7 @@ use crate::query::persistence_query_system_param::PersistentQuery;
 use crate::query::tls_config::{take_pagination_config};
 use rayon::prelude::*;
 
-impl<'w, 's, Q: QueryData<ReadOnly = Q> + 'static, F: QueryFilter + 'static>
+impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
     PersistentQuery<'w, 's, Q, F>
 {
     #[inline]

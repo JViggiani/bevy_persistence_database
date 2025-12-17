@@ -55,8 +55,8 @@ pub enum PersistenceSystemSet {
     Commit,
 }
 
-/// An event fired when a background commit task is complete.
-#[derive(Event)]
+/// Message emitted when a background commit task is complete.
+#[derive(Message)]
 pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<Entity>, pub Option<u64>);
 
 /// A resource used to track which `Persist` types have been registered with an `App`.
@@ -64,8 +64,8 @@ pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<En
 #[derive(Resource, Default)]
 pub struct RegisteredPersistTypes(pub HashSet<TypeId>);
 
-/// An event that users fire to trigger a commit.
-#[derive(Event, Clone)]
+/// Message that users send to trigger a commit.
+#[derive(Message, Clone)]
 pub struct TriggerCommit {
     /// An optional ID to correlate this trigger with a `CommitCompleted` event.
     pub correlation_id: Option<u64>,
@@ -104,7 +104,7 @@ fn handle_commit_trigger(world: &mut World) {
     let mut correlation_id = None;
     let mut requested_connection: Option<Arc<dyn DatabaseConnection>> = None;
 
-    world.resource_scope(|world, mut events: Mut<Events<TriggerCommit>>| {
+    world.resource_scope(|world, mut events: Mut<Messages<TriggerCommit>>| {
         let mut status = world.resource_mut::<CommitStatus>();
         if !events.is_empty() {
             // Drain all events. We only care that at least one was sent.
@@ -138,7 +138,7 @@ fn handle_commit_trigger(world: &mut World) {
         conn
     } else {
         let err = PersistenceError::new("TriggerCommit missing target_connection");
-        world.send_event(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+        world.write_message(CommitCompleted(Err(err.clone()), vec![], correlation_id));
         bevy::log::error!(%err, "failed to select database connection before commit");
         return;
     };
@@ -167,7 +167,7 @@ fn handle_commit_trigger(world: &mut World) {
     ) {
         Ok(data) if data.operations.is_empty() => {
             // nothing to do → send completion and restore dirty sets
-            world.send_event(CommitCompleted(Ok(vec![]), vec![], correlation_id));
+            world.write_message(CommitCompleted(Ok(vec![]), vec![], correlation_id));
             let mut session = world.resource_mut::<PersistenceSession>();
             session.dirty_entities.extend(dirty_entities);
             session.despawned_entities.extend(despawned_entities);
@@ -177,7 +177,7 @@ fn handle_commit_trigger(world: &mut World) {
         Ok(data) => data,
         Err(e) => {
             // prepare failed → send error and restore dirty sets
-            world.send_event(CommitCompleted(Err(e.clone()), vec![], correlation_id));
+            world.write_message(CommitCompleted(Err(e.clone()), vec![], correlation_id));
             let mut session = world.resource_mut::<PersistenceSession>();
             session.dirty_entities.extend(dirty_entities);
             session.despawned_entities.extend(despawned_entities);
@@ -382,8 +382,8 @@ fn handle_commit_completed(
     mut query: Query<(Entity, &mut CommitTask, &TriggerID, Option<&mut CommitMeta>)>,
     mut session: ResMut<PersistenceSession>,
     mut status: ResMut<CommitStatus>,
-    mut completed: EventWriter<CommitCompleted>,
-    mut triggers: EventWriter<TriggerCommit>,
+    mut completed: MessageWriter<CommitCompleted>,
+    mut triggers: MessageWriter<TriggerCommit>,
     mut trackers: Query<(Entity, &MultiBatchCommitTracker)>,
 ) {
     // Keep track of entities to despawn
@@ -610,7 +610,7 @@ impl PersistencePluginCore {
 pub(crate) struct CommitEventListeners(pub(crate) HashMap<u64, oneshot::Sender<Result<(), PersistenceError>>>);
 
 fn commit_event_listener(
-    mut events: EventReader<CommitCompleted>,
+    mut events: MessageReader<CommitCompleted>,
     mut listeners: ResMut<CommitEventListeners>,
 ) {
     for event in events.read() {
@@ -642,8 +642,8 @@ impl Plugin for PersistencePluginCore {
         // Add the database connection as a resource
         app.insert_resource(DatabaseConnectionResource(db_conn.clone()));
         app.init_resource::<RegisteredPersistTypes>();
-        app.add_event::<TriggerCommit>();
-        app.add_event::<CommitCompleted>();
+        app.add_message::<TriggerCommit>();
+        app.add_message::<CommitCompleted>();
         app.init_resource::<CommitStatus>();
         app.init_resource::<CommitEventListeners>();
 
@@ -710,16 +710,18 @@ impl Plugin for PersistencePluginCore {
         app.add_systems(
             PostUpdate,
             (
-                (
-                    apply_deferred_world_ops,
-                    publish_immediate_world_ptr,
-                    auto_despawn_tracking_system,
-                    handle_commit_trigger,
-                    commit_event_listener,
-                )
-                    .in_set(PersistenceSystemSet::PreCommit),
-                handle_commit_completed.in_set(PersistenceSystemSet::Commit),
-            ),
+                apply_deferred_world_ops,
+                publish_immediate_world_ptr,
+                auto_despawn_tracking_system,
+                handle_commit_trigger,
+                commit_event_listener,
+            )
+                .in_set(PersistenceSystemSet::PreCommit),
+        );
+
+        app.add_systems(
+            PostUpdate,
+            handle_commit_completed.in_set(PersistenceSystemSet::Commit),
         );
     }
 }

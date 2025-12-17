@@ -1,4 +1,4 @@
-use bevy::prelude::{App, Events, IntoScheduleConfigs};
+use bevy::prelude::{App, Messages, IntoScheduleConfigs};
 use bevy_persistence_database::{
     CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
     TriggerCommit,
@@ -24,17 +24,17 @@ fn test_trigger_commit_clears_event_queue() {
 
     // GIVEN multiple TriggerCommit events are sent
     let trigger = TriggerCommit { correlation_id: None, target_connection: db.clone() };
-    app.world_mut().send_event(trigger.clone());
-    app.world_mut().send_event(trigger);
+    app.world_mut().write_message(trigger.clone());
+    app.world_mut().write_message(trigger);
 
     // WHEN the app updates
-    let events_before_update = app.world().resource::<Events<TriggerCommit>>();
+    let events_before_update = app.world().resource::<Messages<TriggerCommit>>();
     assert_eq!(events_before_update.len(), 2);
 
     app.update();
 
     // THEN the event queue is cleared
-    let events_after_update = app.world().resource::<Events<TriggerCommit>>();
+    let events_after_update = app.world().resource::<Messages<TriggerCommit>>();
     assert_eq!(events_after_update.len(), 0);
 }
 
@@ -49,14 +49,14 @@ fn test_event_triggers_commit_and_persists_data() {
     app.update(); // Run change detection
 
     // WHEN a TriggerCommit event is sent
-    app.world_mut().send_event(TriggerCommit { correlation_id: None, target_connection: db.clone() });
+    app.world_mut().write_message(TriggerCommit { correlation_id: None, target_connection: db.clone() });
 
     // AND we manually drive the app loop until the commit is complete
     loop {
         app.update();
         if !app
             .world()
-            .resource::<Events<CommitCompleted>>()
+            .resource::<Messages<CommitCompleted>>()
             .is_empty()
         {
             break;
@@ -65,7 +65,7 @@ fn test_event_triggers_commit_and_persists_data() {
     }
 
     // THEN the commit should have completed successfully
-    let mut events = app.world_mut().resource_mut::<Events<CommitCompleted>>();
+    let mut events = app.world_mut().resource_mut::<Messages<CommitCompleted>>();
     assert_eq!(events.len(), 1);
     let event = events.drain().next().unwrap();
     assert!(event.0.is_ok());
@@ -87,14 +87,14 @@ fn test_queued_commit_persists_all_changes() {
     // GIVEN an initial entity is created and a commit is triggered
     let entity_a = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    app.world_mut().send_event(TriggerCommit { correlation_id: None, target_connection: db.clone() });
+    app.world_mut().write_message(TriggerCommit { correlation_id: None, target_connection: db.clone() });
     app.update(); // Start the first commit
 
     // WHEN another entity is created and a second commit is triggered
     // before the first one has completed
     let entity_b = app.world_mut().spawn(Position { x: 50.0, y: 50.0 }).id();
     app.update();
-    app.world_mut().send_event(TriggerCommit { correlation_id: None, target_connection: db.clone() });
+    app.world_mut().write_message(TriggerCommit { correlation_id: None, target_connection: db.clone() });
     app.update(); // This should queue the second commit
 
     // THEN the status should be InProgressAndDirty
@@ -104,7 +104,7 @@ fn test_queued_commit_persists_all_changes() {
     let mut completed_count = 0;
     for _ in 0..20 { // Loop with a timeout
         app.update();
-        let mut events = app.world_mut().resource_mut::<Events<CommitCompleted>>();
+        let mut events = app.world_mut().resource_mut::<Messages<CommitCompleted>>();
         if !events.is_empty() {
             completed_count += events.len();
             events.clear();

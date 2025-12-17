@@ -406,8 +406,8 @@ pub async fn commit(
         .0
         .insert(correlation_id, tx);
 
-    // Send the event to trigger the commit.
-    app.world_mut().send_event(TriggerCommit {
+    // Send the message to trigger the commit.
+    app.world_mut().write_message(TriggerCommit {
         correlation_id: Some(correlation_id),
         target_connection: connection,
     });
