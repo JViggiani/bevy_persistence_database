@@ -9,8 +9,6 @@ use crate::db::connection::DatabaseConnectionResource;
 use crate::versioning::version_manager::VersionKey;
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
-use bevy::tasks::{IoTaskPool, TaskPool, Task};
-use futures_lite::future;
 use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
@@ -36,7 +34,7 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
 
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
-struct CommitTask(Task<Result<(Vec<String>, Vec<Entity>), PersistenceError>>);
+struct CommitTask(Option<tokio::sync::oneshot::Receiver<Result<(Vec<String>, Vec<Entity>), PersistenceError>>>);
 
 /// A component that tracks the state of a multi-batch commit operation.
 #[derive(Component)]
@@ -189,7 +187,6 @@ fn handle_commit_trigger(world: &mut World) {
     // 3) spawn the async task(s)
     *world.resource_mut::<CommitStatus>() = CommitStatus::InProgress;
     let runtime = world.resource::<TokioRuntime>().0.clone();
-    let thread_pool = IoTaskPool::get();
     let db = connection.clone();
 
     let all_operations = commit_data.operations;
@@ -290,6 +287,7 @@ fn handle_commit_trigger(world: &mut World) {
 
         if let Some(cid) = correlation_id {
             if let Some(listener) = world.resource_mut::<CommitEventListeners>().0.remove(&cid) {
+                bevy::log::debug!("registered multi-batch tracker for correlation_id={cid} batches={}", num_batches);
                 world.spawn(MultiBatchCommitTracker {
                     correlation_id: cid,
                     remaining_batches: Arc::new(AtomicUsize::new(num_batches)),
@@ -317,16 +315,16 @@ fn handle_commit_trigger(world: &mut World) {
             let batch_runtime = runtime.clone();
             let batch_new_entities = batch_new_entities.get(i).cloned().unwrap_or_default();
             let db_for_task = batch_db.clone();
-            
-            // Task spawning - the block_on is necessary for the Tokio runtime
-            let task = thread_pool.spawn(async move {
-                batch_runtime
-                    .block_on(async {
-                        db_for_task
-                            .execute_transaction(batch_ops)
-                            .await
-                            .map(|keys| (keys, batch_new_entities))
-                    })
+
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            batch_runtime.spawn(async move {
+                bevy::log::trace!("commit batch task started (batched)");
+                let res = db_for_task
+                    .execute_transaction(batch_ops)
+                    .await
+                    .map(|keys| (keys, batch_new_entities));
+                bevy::log::trace!("commit batch runtime task completed send");
+                let _ = tx.send(res);
             });
             
             // Each batch gets its own subset of entities and resources
@@ -337,21 +335,25 @@ fn handle_commit_trigger(world: &mut World) {
                 connection: batch_db.clone(),
             };
             
-            world.spawn((CommitTask(task), TriggerID(correlation_id), meta));
+            world.spawn((CommitTask(Some(rx)), TriggerID(correlation_id), meta));
         }
     } else {
         let db_for_task = db.clone();
-        let task = thread_pool.spawn(async move {
-            runtime.block_on(async {
-                db_for_task
-                    .execute_transaction(all_operations)
-                    .await
-                    .map(|keys| (keys, new_entities))
-            })
+        let runtime_for_task = runtime.clone();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        runtime_for_task.spawn(async move {
+            bevy::log::trace!("commit task started (single batch)");
+            let res = db_for_task
+                .execute_transaction(all_operations)
+                .await
+                .map(|keys| (keys, new_entities));
+            bevy::log::trace!("commit runtime task completed send");
+            let _ = tx.send(res);
         });
 
         world.spawn((
-            CommitTask(task),
+            CommitTask(Some(rx)),
             TriggerID(correlation_id),
             CommitMeta {
                 dirty_entities,
@@ -386,17 +388,31 @@ fn handle_commit_completed(
     mut triggers: MessageWriter<TriggerCommit>,
     mut trackers: Query<(Entity, &MultiBatchCommitTracker)>,
 ) {
+    static PENDING_LOG_COUNT: AtomicUsize = AtomicUsize::new(0);
     // Keep track of entities to despawn
     let mut to_despawn = Vec::new();
     // Track if any batch had an error - errors should force status to Idle
     let mut had_error = false;
     
     for (ent, mut task, trigger_id, meta_opt) in &mut query {
-        if let Some(result) = future::block_on(future::poll_once(&mut task.0)) {
+        if let Some(mut receiver) = task.0.take() {
+            let result: Result<(Vec<String>, Vec<Entity>), PersistenceError> = match receiver.try_recv() {
+                Ok(res) => res,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Put the receiver back if not finished
+                    task.0 = Some(receiver);
+                    continue;
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    bevy::log::error!("commit task channel closed before result");
+                    Err(PersistenceError::new("Commit task cancelled before completion"))
+                }
+            };
             let cid = trigger_id.0;
             let mut is_final_batch = true;
             let mut should_send_result = true;
             let mut commit_connection: Option<Arc<dyn DatabaseConnection>> = None;
+            let mut tracker_found = false;
 
             // Set had_error if any batch has an error
             if result.is_err() {
@@ -408,6 +424,7 @@ fn handle_commit_completed(
                     .iter_mut()
                     .find(|(_, t)| t.correlation_id == correlation_id)
                 {
+                    tracker_found = true;
                     let remaining = tracker
                         .remaining_batches
                         .fetch_sub(1, Ordering::SeqCst)
@@ -432,6 +449,18 @@ fn handle_commit_completed(
                         should_send_result = false;
                     }
                 }
+            }
+
+            if result.is_err() {
+                bevy::log::error!(
+                    "commit batch completed with error (cid={:?} tracker_found={} final_batch={})",
+                    cid, tracker_found, is_final_batch
+                );
+            } else {
+                bevy::log::trace!(
+                    "commit batch completed ok (cid={:?} tracker_found={} final_batch={})",
+                    cid, tracker_found, is_final_batch
+                );
             }
 
             if let Some(mut meta) = meta_opt {
@@ -485,6 +514,7 @@ fn handle_commit_completed(
                 
                 // Only send completion event for the final batch or errors
                 if should_send_result && (is_final_batch || result.is_err()) {
+                    bevy::log::debug!("emitting CommitCompleted for cid={:?} final_batch={} err={}", cid, is_final_batch, result.is_err());
                     completed.write(CommitCompleted(event_res, vec![], cid));
                 }
             } else if let Err(e) = &result {
@@ -515,6 +545,8 @@ fn handle_commit_completed(
                     }
                 }
             }
+        } else if PENDING_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 5 {
+            bevy::log::debug!("commit task still pending (cid={:?})", trigger_id.0);
         }
     }
     
@@ -629,9 +661,6 @@ fn commit_event_listener(
 
 impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
-        // Initialize the global IO task pool so IoTaskPool::get() won't panic
-        IoTaskPool::get_or_init(|| TaskPool::new());
-
         let db_conn = match &self.backend {
             PersistenceBackend::Static(db) => db.clone(),
         };

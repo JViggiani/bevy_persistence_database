@@ -75,26 +75,13 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
 
         // Insert components - optimized for common case
         if !comps.is_empty() {
-            // Process most common components first with direct lookup
-            let mut component_values: Vec<(&str, serde_json::Value)> = Vec::with_capacity(comps.len());
-            
             for &comp_name in comps {
                 if let Some(val) = doc.get(comp_name) {
-                    component_values.push((comp_name, val.clone()));
-                }
-            }
-            
-            // Sort alphabetically instead of by frequency since component_presence 
-            // isn't a frequency counter but a different type
-            component_values.sort_by_key(|(name, _)| *name);
-            
-            for (comp_name, val) in component_values {
-                if let Some(deser) = session.component_deserializers.get(comp_name) {
-                    if let Err(e) = deser(world, entity, val) {
-                        bevy::log::error!("Failed to deserialize component {}: {}", comp_name, e);
+                    if let Some(deser) = session.component_deserializers.get(comp_name) {
+                        if let Err(e) = deser(world, entity, val.clone()) {
+                            bevy::log::error!("Failed to deserialize component {}: {}", comp_name, e);
+                        }
                     }
-                    
-                    // No need to update component_presence counter
                 }
             }
         } else {
@@ -134,35 +121,34 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                 
             chunks.into_par_iter().for_each(|chunk| {
                 // Create a single operation that processes a chunk of documents
-                let docs_clone = chunk.clone();
                 let comps = explicit_components.clone();
                 let allow = allow_overwrite;
                 let key_field = key_field.to_string();
                 
                 self.ops.push(Box::new(move |world: &mut World| {
-                    bevy::log::trace!("PQ::process_documents/op: applying deferred chunk of {} documents", docs_clone.len());
+                    bevy::log::trace!("PQ::process_documents/op: applying deferred chunk of {} documents", chunk.len());
                     world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                        for doc in &docs_clone {
+                        for doc in &chunk {
                             Self::apply_one_document(world, &mut session, doc, &comps, allow, &key_field);
                         }
                     });
                 }));
             });
         } else {
-            // Original processing for smaller sets
-            for doc in documents {
-                let doc_clone = doc.clone();
-                let comps = explicit_components.clone();
-                let allow = allow_overwrite;
-                let key_field = key_field.to_string();
+            // Batch the entire small set in a single scope to avoid per-doc locking
+            let docs = documents;
+            let comps = explicit_components.clone();
+            let allow = allow_overwrite;
+            let key_field = key_field.to_string();
 
-                self.ops.push(Box::new(move |world: &mut World| {
-                    bevy::log::trace!("PQ::process_documents/op: applying deferred document");
-                    world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                        Self::apply_one_document(world, &mut session, &doc_clone, &comps, allow, &key_field);
-                    });
-                }));
-            }
+            self.ops.push(Box::new(move |world: &mut World| {
+                bevy::log::trace!("PQ::process_documents/op: applying deferred batch of {} documents", docs.len());
+                world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                    for doc in &docs {
+                        Self::apply_one_document(world, &mut session, doc, &comps, allow, &key_field);
+                    }
+                });
+            }));
         }
     }
 
@@ -251,11 +237,21 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                             let world: &mut World = ptr_res.as_world_mut();
 
                             let key_field = self.db.0.document_key_field();
-                            for doc in documents {
-                                world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                                    Self::apply_one_document(world, &mut session, &doc, &comps_to_deser, allow_overwrite, key_field);
-                                });
-                            }
+                            // Apply all documents in a single scope to minimize world locking overhead.
+                            world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                                for doc in &documents {
+                                    Self::apply_one_document(world, &mut session, doc, &comps_to_deser, allow_overwrite, key_field);
+                                }
+
+                                // Fetch resources once alongside the entity loads.
+                                let rt = world
+                                    .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
+                                    .0
+                                    .clone();
+                                let db = self.db.0.clone();
+                                bevy::log::trace!("PQ::immediate_apply: fetching resources");
+                                rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                            });
 
                             bevy::log::trace!("PQ::immediate_apply: world.flush()");
                             world.flush();
@@ -275,16 +271,6 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                             };
                             bevy::log::trace!("PQ::immediate_apply: fresh_qstate_iter_count={}", lhs_cnt);
 
-                            // Fetch resources immediately
-                            world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                                let rt = world
-                                    .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
-                                    .0
-                                    .clone();
-                                let db = self.db.0.clone();
-                                bevy::log::trace!("PQ::immediate_apply: fetching resources");
-                                rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
-                            });
                         } else {
                             bevy::log::trace!("PQ::execute_combined_load: deferring {} docs", documents.len());
                             self.process_documents(documents, &comps_to_deser, allow_overwrite);
