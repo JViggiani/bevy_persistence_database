@@ -4,11 +4,12 @@
 //! as a resource and automatically adding systems for change detection.
 
 use crate::registration::COMPONENT_REGISTRY;
-use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist, TransactionOperation, Collection};
+use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist, TransactionOperation};
 use crate::db::connection::DatabaseConnectionResource;
 use crate::versioning::version_manager::VersionKey;
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
+use bevy::prelude::TaskPoolPlugin;
 use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
@@ -22,6 +23,12 @@ use tokio::sync::oneshot;
 use crate::query::deferred_ops::DeferredWorldOperations;
 use crate::query::immediate_world_ptr::ImmediateWorldPtr;
 use crate::query::PersistenceQueryCache;
+
+fn ensure_task_pools(app: &mut App) {
+    if !app.is_plugin_added::<TaskPoolPlugin>() {
+        app.add_plugins(TaskPoolPlugin::default());
+    }
+}
 
 static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
     Arc::new(
@@ -69,6 +76,8 @@ pub struct TriggerCommit {
     pub correlation_id: Option<u64>,
     /// Connection to use directly for this commit.
     pub target_connection: Arc<dyn DatabaseConnection>,
+    /// Store to write into for this commit.
+    pub store: String,
 }
 
 /// A state machine resource to track the commit lifecycle.
@@ -101,6 +110,7 @@ fn handle_commit_trigger(world: &mut World) {
     let mut should_commit = false;
     let mut correlation_id = None;
     let mut requested_connection: Option<Arc<dyn DatabaseConnection>> = None;
+    let mut requested_store: Option<String> = None;
 
     world.resource_scope(|world, mut events: Mut<Messages<TriggerCommit>>| {
         let mut status = world.resource_mut::<CommitStatus>();
@@ -109,6 +119,7 @@ fn handle_commit_trigger(world: &mut World) {
             // The correlation ID of the first one is taken, others are ignored for now.
             let first_trigger = events.drain().next().unwrap();
             requested_connection = Some(first_trigger.target_connection.clone());
+            requested_store = Some(first_trigger.store.clone());
 
             match *status {
                 CommitStatus::Idle => {
@@ -141,6 +152,21 @@ fn handle_commit_trigger(world: &mut World) {
         return;
     };
 
+    let store = if let Some(store) = requested_store {
+        if store.is_empty() {
+            let err = PersistenceError::new("TriggerCommit store must be non-empty");
+            world.write_message(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+            bevy::log::error!(%err, "invalid store for commit");
+            return;
+        }
+        store
+    } else {
+        let err = PersistenceError::new("TriggerCommit missing store");
+        world.write_message(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+        bevy::log::error!(%err, "failed to select store before commit");
+        return;
+    };
+
     let plugin_config = world.resource::<PersistencePluginConfig>().clone();
 
     // 1) isolate dirty sets from the session
@@ -162,6 +188,7 @@ fn handle_commit_trigger(world: &mut World) {
         &dirty_resources,
         plugin_config.thread_count,
         connection.document_key_field(),
+        &store,
     ) {
         Ok(data) if data.operations.is_empty() => {
             // nothing to do → send completion and restore dirty sets
@@ -205,19 +232,19 @@ fn handle_commit_trigger(world: &mut World) {
         // Categorize operations
         for op in all_operations {
             match &op {
-                TransactionOperation::UpdateDocument { collection: Collection::Entities, key, .. } => {
+                TransactionOperation::UpdateDocument { kind: crate::db::connection::DocumentKind::Entity, key, .. } => {
                     // Find entity for this key
                     if let Some(entity) = session.entity_keys.iter().find(|(_, k)| *k == key).map(|(e, _)| *e) {
                         entity_ops.entry(entity).or_default().push(op);
                     }
                 },
-                TransactionOperation::DeleteDocument { collection: Collection::Entities, key, .. } => {
+                TransactionOperation::DeleteDocument { kind: crate::db::connection::DocumentKind::Entity, key, .. } => {
                     // Find entity for this key
                     if let Some(entity) = session.entity_keys.iter().find(|(_, k)| *k == key).map(|(e, _)| *e) {
                         entity_ops.entry(entity).or_default().push(op);
                     }
                 },
-                TransactionOperation::CreateDocument { collection: Collection::Entities, .. } => {
+                TransactionOperation::CreateDocument { kind: crate::db::connection::DocumentKind::Entity, .. } => {
                     // New entities get their operation paired with the entity index
                     if let Some(entity) = new_entities.get(new_entity_idx) {
                         new_entity_ops.push((op, *entity));
@@ -333,6 +360,7 @@ fn handle_commit_trigger(world: &mut World) {
                 despawned_entities: if i == 0 { despawned_entities.clone() } else { HashSet::new() },
                 dirty_resources: resource_sets[i].clone(),
                 connection: batch_db.clone(),
+                    store: store.clone(),
             };
             
             world.spawn((CommitTask(Some(rx)), TriggerID(correlation_id), meta));
@@ -360,6 +388,7 @@ fn handle_commit_trigger(world: &mut World) {
                 despawned_entities,
                 dirty_resources,
                 connection: db.clone(),
+                store: store.clone(),
             },
         ));
     }
@@ -376,6 +405,7 @@ struct CommitMeta {
     despawned_entities: HashSet<Entity>,
     dirty_resources: HashSet<TypeId>,
     connection: Arc<dyn DatabaseConnection>,
+    store: String,
 }
 
 /// A system that polls the running commit task and updates the state machine upon completion.
@@ -412,6 +442,7 @@ fn handle_commit_completed(
             let mut is_final_batch = true;
             let mut should_send_result = true;
             let mut commit_connection: Option<Arc<dyn DatabaseConnection>> = None;
+            let mut commit_store: Option<String> = None;
             let mut tracker_found = false;
 
             // Set had_error if any batch has an error
@@ -451,10 +482,10 @@ fn handle_commit_completed(
                 }
             }
 
-            if result.is_err() {
+            if let Err(err) = &result {
                 bevy::log::error!(
-                    "commit batch completed with error (cid={:?} tracker_found={} final_batch={})",
-                    cid, tracker_found, is_final_batch
+                    "commit batch completed with error (cid={:?} tracker_found={} final_batch={} err={})",
+                    cid, tracker_found, is_final_batch, err
                 );
             } else {
                 bevy::log::trace!(
@@ -465,6 +496,7 @@ fn handle_commit_completed(
 
             if let Some(mut meta) = meta_opt {
                 commit_connection = Some(meta.connection.clone());
+                commit_store = Some(meta.store.clone());
                 // Process metadata regardless of batch position
                 let event_res = match &result {
                     Ok((new_keys, new_entities)) => {
@@ -537,10 +569,11 @@ fn handle_commit_completed(
                 
                 // Only trigger next commit if we determined we needed to
                 if should_trigger_next {
-                    if let Some(conn) = commit_connection.clone() {
+                    if let (Some(conn), Some(store)) = (commit_connection.clone(), commit_store.clone()) {
                     triggers.write(TriggerCommit {
                         correlation_id: None,
                         target_connection: conn,
+                        store,
                     });
                     }
                 }
@@ -604,6 +637,7 @@ pub struct PersistencePluginConfig {
     pub batching_enabled: bool,
     pub commit_batch_size: usize,
     pub thread_count: usize,
+    pub default_store: String,
 }
 
 impl Default for PersistencePluginConfig {
@@ -612,6 +646,7 @@ impl Default for PersistencePluginConfig {
             batching_enabled: true,
             commit_batch_size: 1000,
             thread_count: 4, // default to 4 threads
+            default_store: "default_store".to_string(),
         }
     }
 }
@@ -661,6 +696,8 @@ fn commit_event_listener(
 
 impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
+        ensure_task_pools(app);
+
         let db_conn = match &self.backend {
             PersistenceBackend::Static(db) => db.clone(),
         };
@@ -794,6 +831,15 @@ impl Plugin for MaybeAddLogPlugin {
     }
 }
 
+#[derive(Clone)]
+struct PersistenceGuards;
+
+impl Plugin for PersistenceGuards {
+    fn build(&self, app: &mut App) {
+        ensure_task_pools(app);
+    }
+}
+
 impl PluginGroup for PersistencePlugins {
     fn build(self) -> PluginGroupBuilder {
         let core = PersistencePluginCore::new(match self.backend {
@@ -801,8 +847,8 @@ impl PluginGroup for PersistencePlugins {
         })
         .with_config(self.config.clone());
 
-        MinimalPlugins
-            .build()
+        PluginGroupBuilder::start::<Self>()
+            .add(PersistenceGuards)
             // Only initialize logging if nothing else has already set a global subscriber
             .add(MaybeAddLogPlugin)
             .add(core)

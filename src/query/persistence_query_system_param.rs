@@ -5,7 +5,7 @@ use bevy::ecs::query::{QueryData, QueryFilter, QueryState};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::{Entity, Query, Res, World};
 
-use crate::plugins::persistence_plugin::TokioRuntime;
+use crate::plugins::persistence_plugin::{PersistencePluginConfig, TokioRuntime};
 use crate::query::filter_expression::FilterExpression;
 use crate::{DatabaseConnectionResource};
 
@@ -18,6 +18,7 @@ use crate::query::query_data_to_components::QueryDataToComponents;
 use crate::query::tls_config::{
     set_filter, take_filter, set_cache_policy, take_cache_policy,
     drain_additional_components, drain_without_components, set_pagination_size,
+    set_store, take_store,
 };
 
 
@@ -36,6 +37,8 @@ pub struct PersistentQueryParam<'w, 's, Q: QueryData + 'static, F: QueryFilter +
     pub(crate) ops: Res<'w, DeferredWorldOperations>,
     /// Optional: immediate world access for in-system materialization
     pub(crate) world_ptr: Option<Res<'w, ImmediateWorldPtr>>,
+    /// Plugin configuration for defaults such as store
+    pub(crate) config: Res<'w, PersistencePluginConfig>,
 }
 
 /// Convenient alias mirroring Bevy's `Query<'w, 's, ...>` shape so lifetime
@@ -63,6 +66,7 @@ where
         let mut without_names: Vec<&'static str> = drain_without_components();
         let tls_filter_expression: Option<FilterExpression> = take_filter();
         let cache_policy: CachePolicy = take_cache_policy();
+        let store = take_store().unwrap_or_else(|| self.config.default_store.clone());
 
         // 1) Type-driven component extraction from Q (fetch targets, not presence gates)
         Q::push_names(&mut fetch_names);
@@ -106,6 +110,7 @@ where
             combined_expr,
             &[], // no extra salt
             false, // don't force full docs for plain ensure_loaded
+            store,
         );
 
         self
@@ -126,6 +131,12 @@ where
     /// Force a refresh from the database, bypassing the cache.
     pub fn force_refresh(self) -> Self {
         set_cache_policy(CachePolicy::ForceRefresh);
+        self
+    }
+
+    /// Select the store to query against for the next load.
+    pub fn store(self, store: impl Into<String>) -> Self {
+        set_store(store);
         self
     }
 

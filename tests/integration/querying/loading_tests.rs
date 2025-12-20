@@ -16,7 +16,7 @@ fn test_load_specific_entities_into_new_session() {
     let _entity_to_load = app1.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 })).id();
     let _entity_to_ignore = app1.world_mut().spawn(Health { value: 99 }).id();
     app1.update();
-    commit_sync(&mut app1, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app1, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // Session 2: load (Health AND Position) with Health > 100
     let mut app2 = App::new();
@@ -47,7 +47,7 @@ fn test_load_into_world_with_existing_entities() {
     app1.add_plugins(PersistencePlugins::new(db.clone()));
     let a = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit_sync(&mut app1, db.clone()).expect("Commit for app1 failed");
+    commit_sync(&mut app1, db.clone(), TEST_STORE).expect("Commit for app1 failed");
     let key_a = app1.world().get::<Guid>(a).unwrap().id().to_string();
 
     // AND a fresh app2 with entity B already committed
@@ -55,7 +55,7 @@ fn test_load_into_world_with_existing_entities() {
     app2.add_plugins(PersistencePlugins::new(db.clone()));
     let _b = app2.world_mut().spawn(Position { x: 1.0, y: 1.0 }).id();
     app2.update();
-    commit_sync(&mut app2, db.clone()).expect("Commit for app2 failed");
+    commit_sync(&mut app2, db.clone(), TEST_STORE).expect("Commit for app2 failed");
 
     // WHEN we query for A and load it into app2 via a system
     fn load_a(
@@ -90,7 +90,7 @@ fn test_fetch_ids_only() {
     app.world_mut().spawn((Health { value: 200 }, Position { x: 10.0, y: 20.0 }));
     app.world_mut().spawn(Position { x: 5.0, y: 5.0 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // Store Guids to verify them later
     let health_entities: Vec<String> = app.world_mut()
@@ -150,7 +150,7 @@ fn test_duplicate_q_entries_are_deduped_and_work() {
     app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 99 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: Q requests &Health and Option<&Health> (duplicate)
     let mut app2 = App::new();
@@ -181,7 +181,7 @@ fn test_optional_component_in_q_is_fetched_if_present() {
     app.world_mut().spawn(Health { value: 1 });
     app.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 2.0 }));
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: run a system with Q = (&Health, Option<&Position>)
     let mut app2 = App::new();
@@ -214,7 +214,7 @@ fn test_no_presence_loads_all_docs_requested_by_optional_q() {
     app.world_mut().spawn(Health { value: 10 });
     app.world_mut().spawn(Position { x: 3.0, y: 4.0 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: Q has only Option<&Health> and Option<&Position>, no F presence filters
     let mut app2 = App::new();

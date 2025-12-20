@@ -77,6 +77,8 @@ where
             (None, None) => None,
         };
         let tls_expr = take_filter();
+        let store = crate::query::tls_config::take_store()
+            .unwrap_or_else(|| self.config.default_store.clone());
         let combined_expr = match (presence_expr, tls_expr) {
             (Some(a), Some(b)) => Some(a.and(b)),
             (Some(a), None) => Some(a),
@@ -102,6 +104,7 @@ where
             combined_expr.clone(),
             &[std::any::type_name::<Q2>()],
             true,
+            store.clone(),
         );
 
         // Warm-up using fresh QueryStates so counts reflect immediate inserts this tick.

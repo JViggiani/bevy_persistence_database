@@ -44,6 +44,7 @@ impl Drop for GlobalContainerState {
 
 static GLOBAL: OnceLock<GlobalContainerState> = OnceLock::new();
 static DB_COUNTER: AtomicUsize = AtomicUsize::new(0);
+pub const TEST_STORE: &str = "default_store";
 
 // Start Arango
 async fn start_container() -> (ContainerAsync<GenericImage>, String, String) {
@@ -300,9 +301,11 @@ pub fn make_app(db: Arc<dyn DatabaseConnection>, batch_size: usize) -> App {
         batching_enabled: true,
         commit_batch_size: batch_size,
         thread_count: 4,
+        default_store: TEST_STORE.to_string(),
     };
     let plugin = PersistencePluginCore::new(db.clone()).with_config(config);
     let mut app = App::new();
+    app.add_plugins(bevy::MinimalPlugins);
     app.add_plugins(plugin);
     app
 }

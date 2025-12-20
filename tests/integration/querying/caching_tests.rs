@@ -33,7 +33,7 @@ fn test_persistent_query_caching() {
     // 1. Create some test data
     app.world_mut().spawn(Health { value: 100 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // 2. Create a new app that will use the PersistentQuery with cache tracking
     let mut app2 = App::new();
@@ -119,7 +119,7 @@ fn test_entity_not_overwritten_on_second_query_without_refresh() {
     app1.add_plugins(PersistencePlugins::new(db.clone()));
     let _e = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit_sync(&mut app1, db.clone()).expect("commit failed");
+    commit_sync(&mut app1, db.clone(), TEST_STORE).expect("commit failed");
 
     // WHEN we load it into a fresh world via systems
     let mut app2 = App::new();
@@ -164,7 +164,7 @@ fn test_force_refresh_overwrites() {
     app1.add_plugins(PersistencePlugins::new(db.clone()));
     let _e = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
-    commit_sync(&mut app1, db.clone()).expect("commit failed");
+    commit_sync(&mut app1, db.clone(), TEST_STORE).expect("commit failed");
 
     // Load into app2 via system, then mutate locally
     let mut app2 = App::new();

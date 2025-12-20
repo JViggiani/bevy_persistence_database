@@ -23,10 +23,10 @@ fn commit_uses_provided_connection() {
     let entity = app.world_mut().spawn(RoutedComp { value: 1 }).id();
     app.update();
 
-    commit_sync(&mut app, db.clone()).expect("commit should succeed with provided connection");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("commit should succeed with provided connection");
 
     let guid = app.world().get::<Guid>(entity).expect("Guid should be attached after commit");
-    let stored = run_async(db.fetch_component(guid.id(), RoutedComp::name()))
+    let stored = run_async(db.fetch_component(TEST_STORE, guid.id(), RoutedComp::name()))
         .expect("fetch should succeed")
         .expect("component should exist in database");
     let fetched: RoutedComp = serde_json::from_value(stored).expect("deserialize RoutedComp");
@@ -44,29 +44,29 @@ fn commits_can_switch_connections_between_calls() {
 
     let e1 = app.world_mut().spawn(RoutedComp { value: 1 }).id();
     app.update();
-    commit_sync(&mut app, db_a.clone()).expect("first commit should succeed on db_a");
+    commit_sync(&mut app, db_a.clone(), TEST_STORE).expect("first commit should succeed on db_a");
 
     let guid1 = app.world().get::<Guid>(e1).expect("guid for first entity").id().to_string();
-    let stored_a = run_async(db_a.fetch_component(&guid1, RoutedComp::name()))
+    let stored_a = run_async(db_a.fetch_component(TEST_STORE, &guid1, RoutedComp::name()))
         .expect("fetch from db_a should succeed")
         .expect("entity should exist in db_a");
     let fetched_a: RoutedComp = serde_json::from_value(stored_a).expect("deserialize from db_a");
     assert_eq!(fetched_a.value, 1);
-    let missing_in_b = run_async(db_b.fetch_component(&guid1, RoutedComp::name()))
+    let missing_in_b = run_async(db_b.fetch_component(TEST_STORE, &guid1, RoutedComp::name()))
         .expect("fetch from db_b should succeed");
     assert!(missing_in_b.is_none(), "first commit should not write to db_b");
 
     let e2 = app.world_mut().spawn(RoutedComp { value: 2 }).id();
     app.update();
-    commit_sync(&mut app, db_b.clone()).expect("second commit should succeed on db_b");
+    commit_sync(&mut app, db_b.clone(), TEST_STORE).expect("second commit should succeed on db_b");
 
     let guid2 = app.world().get::<Guid>(e2).expect("guid for second entity").id().to_string();
-    let stored_b = run_async(db_b.fetch_component(&guid2, RoutedComp::name()))
+    let stored_b = run_async(db_b.fetch_component(TEST_STORE, &guid2, RoutedComp::name()))
         .expect("fetch from db_b should succeed")
         .expect("second entity should exist in db_b");
     let fetched_b: RoutedComp = serde_json::from_value(stored_b).expect("deserialize from db_b");
     assert_eq!(fetched_b.value, 2);
-    let missing_in_a = run_async(db_a.fetch_component(&guid2, RoutedComp::name()))
+    let missing_in_a = run_async(db_a.fetch_component(TEST_STORE, &guid2, RoutedComp::name()))
         .expect("fetch from db_a should succeed");
     assert!(missing_in_a.is_none(), "second commit should not write to db_a");
 }
@@ -88,7 +88,7 @@ fn commit_failure_propagates_error_and_resets_status() {
     app.world_mut().spawn(RoutedComp { value: 9 });
     app.update();
 
-    let res = commit_sync(&mut app, db.clone());
+    let res = commit_sync(&mut app, db.clone(), TEST_STORE);
     assert!(res.is_err(), "commit should surface backend error");
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle, "status should return to Idle after failure");
 }

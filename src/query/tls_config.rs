@@ -8,6 +8,7 @@ thread_local! {
     static PQ_CACHE_POLICY: std::cell::RefCell<CachePolicy> = const { std::cell::RefCell::new(CachePolicy::UseCache) };
     static PQ_WITHOUT_COMPONENTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
     static PAGINATION_SIZE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static PQ_STORE: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 // Filter helpers
@@ -44,6 +45,15 @@ pub fn push_without_component(name: &'static str) {
 }
 pub fn drain_without_components() -> Vec<&'static str> {
     PQ_WITHOUT_COMPONENTS.with(|w| w.borrow_mut().drain(..).collect())
+}
+
+// Store helpers
+pub fn set_store(store: impl Into<String>) {
+    PQ_STORE.with(|s| *s.borrow_mut() = Some(store.into()));
+}
+
+pub fn take_store() -> Option<String> {
+    PQ_STORE.with(|s| s.borrow_mut().take())
 }
 
 /// Set the pagination size for the next query

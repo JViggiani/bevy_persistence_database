@@ -161,7 +161,12 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
         value_filters: Option<FilterExpression>,
         hash_salts: &[&'static str],
         force_full_docs: bool,
+        store: String,
     ) {
+        if store.is_empty() {
+            bevy::log::error!("PQ::execute_combined_load: store is required");
+            return;
+        }
         // Compute cache hash
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         std::any::type_name::<Q>().hash(&mut hasher);
@@ -202,6 +207,8 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
 
         if should_query_db {
             let spec = PersistenceQuerySpecification {
+                store: store.clone(),
+                kind: crate::db::connection::DocumentKind::Entity,
                 presence_with: presence_with.clone(),
                 presence_without: presence_without.clone(),
                 fetch_only: fetch_only.clone(),
@@ -250,7 +257,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                                     .clone();
                                 let db = self.db.0.clone();
                                 bevy::log::trace!("PQ::immediate_apply: fetching resources");
-                                rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                                rt.block_on(session.fetch_and_insert_resources(&*db, &store, world)).ok();
                             });
 
                             bevy::log::trace!("PQ::immediate_apply: world.flush()");
@@ -285,7 +292,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                                         .clone();
                                     bevy::log::trace!("PQ::execute_combined_load: fetching resources");
                                     // Use db directly rather than dereferencing it
-                                    rt.block_on(session.fetch_and_insert_resources(&*db, world)).ok();
+                                    rt.block_on(session.fetch_and_insert_resources(&*db, &store, world)).ok();
                                 });
                             }));
                         }

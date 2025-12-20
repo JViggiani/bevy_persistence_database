@@ -19,7 +19,7 @@ fn test_value_filters_equality_operator() {
     app.world_mut().spawn(PlayerName { name: "Alice".into() });
     app.world_mut().spawn(PlayerName { name: "Bob".into() });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // Health == 100
     let mut app2 = App::new();
@@ -70,7 +70,7 @@ fn test_value_filters_relational_operators() {
     app.world_mut().spawn(Health { value: 100 });
     app.world_mut().spawn(Health { value: 101 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // gt(100) -> 1
     let mut app2 = App::new();
@@ -122,7 +122,7 @@ fn test_value_filters_logical_combinations() {
     app.world_mut().spawn((Health { value: 50 }, Position { x: 50.0, y: 0.0 }));
     app.world_mut().spawn((Health { value: 50 }, Position { x: 150.0, y: 0.0 }));
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins::new(db.clone()));
@@ -162,7 +162,7 @@ fn test_presence_value_combination_and_or() {
     app_seed.world_mut().spawn(PlayerName { name: "p".into() }); // present via OR, but filtered out by value predicate
     app_seed.world_mut().spawn(Health { value: 80 }); // Health present but under threshold
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test: load using presence OR + value filter
     let mut app = App::new();

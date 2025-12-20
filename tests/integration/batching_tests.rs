@@ -1,12 +1,12 @@
 use bevy::prelude::*;
 use bevy_persistence_database::{
-    commit_sync, CommitStatus, PersistenceError, Guid,
+    commit_sync, CommitStatus, PersistenceError, Guid, DocumentKind,
     persistence_plugin::PersistencePlugins, MockDatabaseConnection, PersistencePluginCore,
-    persistence_plugin::PersistencePluginConfig, Collection, TransactionOperation,
+    persistence_plugin::PersistencePluginConfig, TransactionOperation,
 };
 use bevy_persistence_database::PersistentQuery;
 use bevy::prelude::With;
-use crate::common::{make_app, run_async, Health};
+use crate::common::{make_app, run_async, Health, TEST_STORE};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use bevy_persistence_database_derive::db_matrix_test;
@@ -23,7 +23,7 @@ fn test_successful_batch_commit_of_new_entities() {
     app.update();
 
     // commit
-    let res = commit_sync(&mut app, db.clone());
+    let res = commit_sync(&mut app, db.clone(), TEST_STORE);
     assert!(res.is_ok());
 
     // all entities got a Guid
@@ -34,6 +34,7 @@ fn test_successful_batch_commit_of_new_entities() {
 
     // loading back from DB
     let mut app2 = App::new();
+    app2.add_plugins(MinimalPlugins);
     app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
@@ -52,7 +53,7 @@ fn test_batch_commit_with_updates_and_deletes() {
         .map(|i| app.world_mut().spawn(Health { value: i }).id())
         .collect();
     app.update();
-    commit_sync(&mut app, db.clone()).unwrap();
+    commit_sync(&mut app, db.clone(), TEST_STORE).unwrap();
 
     // update first two, delete last two
     app.world_mut().get_mut::<Health>(ids[0]).unwrap().value = 100;
@@ -61,11 +62,12 @@ fn test_batch_commit_with_updates_and_deletes() {
     app.world_mut().entity_mut(ids[4]).despawn();
     app.update();
 
-    let res = commit_sync(&mut app, db.clone());
+    let res = commit_sync(&mut app, db.clone(), TEST_STORE);
     assert!(res.is_ok());
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 
     let mut app2 = App::new();
+    app2.add_plugins(MinimalPlugins);
     app2.add_plugins(PersistencePlugins::new(db.clone()));
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
     app2.add_systems(bevy::prelude::Update, load);
@@ -86,16 +88,17 @@ fn test_batch_commit_failure_propagates() {
         .map(|i| app.world_mut().spawn(Health { value: i }).id())
         .collect();
     app.update();
-    commit_sync(&mut app, db.clone()).unwrap();
+    commit_sync(&mut app, db.clone(), TEST_STORE).unwrap();
 
     // induce conflict on the third entity
     let guid = app.world().get::<Guid>(ids[2]).unwrap().id().to_string();
-    let (_doc, ver) = run_async(db.fetch_document(&guid)).unwrap().unwrap();
+    let (_doc, ver) = run_async(db.fetch_document(TEST_STORE, &guid)).unwrap().unwrap();
     // bump version directly
     let bad = serde_json::json!({"_key": guid,"bevy_persistence_version":ver+1});
     run_async(db.execute_transaction(vec![
         TransactionOperation::UpdateDocument {
-            collection: Collection::Entities,
+            store: TEST_STORE.to_string(),
+            kind: DocumentKind::Entity,
             key: guid.clone(),
             expected_current_version: ver,
             patch: bad.clone(),
@@ -108,7 +111,7 @@ fn test_batch_commit_failure_propagates() {
     }
     app.update();
 
-    let res = commit_sync(&mut app, db.clone());
+    let res = commit_sync(&mut app, db.clone(), TEST_STORE);
     assert!(matches!(res, Err(PersistenceError::Conflict{ key }) if key == guid));
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 }
@@ -140,6 +143,7 @@ fn test_concurrent_batch_execution() {
         batching_enabled: true,
         commit_batch_size: batch_size,
         thread_count: 4,
+        default_store: TEST_STORE.to_string(),
     };
     let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config.clone());
     let mut app = App::new();
@@ -153,7 +157,7 @@ fn test_concurrent_batch_execution() {
 
     // Measure time for the commit operation
     let start_time = Instant::now();
-    let res = commit_sync(&mut app, db_arc.clone());
+    let res = commit_sync(&mut app, db_arc.clone(), TEST_STORE);
     let elapsed = start_time.elapsed();
 
     assert!(res.is_ok());
@@ -212,6 +216,7 @@ fn test_atomic_multi_batch_commit() {
         batching_enabled: true,
         commit_batch_size: 3,
         thread_count: 2,
+        default_store: TEST_STORE.to_string(),
     };
     let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config);
     let mut app = App::new();
@@ -225,7 +230,7 @@ fn test_atomic_multi_batch_commit() {
     app.update();
     
     // Attempt the commit operation
-    let result = commit_sync(&mut app, db_arc.clone());
+    let result = commit_sync(&mut app, db_arc.clone(), TEST_STORE);
     
     // The entire operation should fail due to the failure in one batch
     assert!(result.is_err());
@@ -277,6 +282,7 @@ fn test_batches_respect_config_max_ops() {
         batching_enabled: true,
         commit_batch_size: batch_size,
         thread_count: 4,
+        default_store: TEST_STORE.to_string(),
     };
     let conn = Arc::new(db);
     let plugin = PersistencePluginCore::new(conn.clone()).with_config(config);
@@ -290,6 +296,6 @@ fn test_batches_respect_config_max_ops() {
     app.update();
 
     // Commit: mock assertions will validate batch sizing and call count
-    let res = commit_sync(&mut app, conn);
+    let res = commit_sync(&mut app, conn, TEST_STORE);
     assert!(res.is_ok(), "Commit should succeed with mocked DB");
 }

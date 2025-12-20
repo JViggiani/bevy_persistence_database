@@ -3,7 +3,7 @@
 
 use crate::db::connection::{
     DatabaseConnection, PersistenceError, TransactionOperation,
-    BEVY_PERSISTENCE_VERSION_FIELD, Collection,
+    BEVY_PERSISTENCE_VERSION_FIELD, DocumentKind, BEVY_TYPE_FIELD,
 };
 use crate::plugins::TriggerCommit;
 use crate::versioning::version_manager::{VersionKey, VersionManager};
@@ -169,12 +169,13 @@ impl PersistenceSession {
     pub async fn fetch_and_insert_document(
         &mut self,
         db: &(dyn DatabaseConnection + 'static),
+        store: &str,
         world: &mut World,
         key: &str,
         entity: Entity,
         component_names: &[&'static str],
     ) -> Result<(), PersistenceError> {
-        if let Some((doc, version)) = db.fetch_document(key).await? {
+        if let Some((doc, version)) = db.fetch_document(store, key).await? {
             // Cache the version
             self.version_manager
                 .set_version(VersionKey::Entity(key.to_string()), version);
@@ -196,10 +197,11 @@ impl PersistenceSession {
     pub async fn fetch_and_insert_resources(
         &mut self,
         db: &(dyn DatabaseConnection + 'static),
+        store: &str,
         world: &mut World,
     ) -> Result<(), PersistenceError> {
         for (res_name, deser) in self.resource_deserializers.iter() {
-            if let Some((val, version)) = db.fetch_resource(res_name).await? {
+            if let Some((val, version)) = db.fetch_resource(store, res_name).await? {
                 // Cache the version based on the resource's TypeId using the map.
                 if let Some(type_id) = self.resource_name_to_type_id.get(res_name) {
                     self.version_manager
@@ -216,13 +218,14 @@ impl PersistenceSession {
     pub async fn fetch_and_insert_components(
         &self,
         db: &(dyn DatabaseConnection + 'static),
+        store: &str,
         world: &mut World,
         key: &str,
         entity: Entity,
         component_names: &[&'static str],
     ) -> Result<(), PersistenceError> {
         for &comp_name in component_names {
-            if let Some(val) = db.fetch_component(key, comp_name).await? {
+            if let Some(val) = db.fetch_component(store, key, comp_name).await? {
                 if let Some(deser) = self.component_deserializers.get(comp_name) {
                     deser(world, entity, val)?;
                 }
@@ -241,7 +244,11 @@ impl PersistenceSession {
         dirty_resources: &HashSet<TypeId>,
         thread_count: usize,
         key_field: &str,
+        store: &str,
     ) -> Result<CommitData, PersistenceError> {
+        if store.is_empty() {
+            return Err(PersistenceError::new("store must be provided for commit"));
+        }
         let mut operations = Vec::new();
         let mut newly_created_entities = Vec::new();
 
@@ -254,7 +261,8 @@ impl PersistenceSession {
                     .get_version(&version_key)
                     .ok_or_else(|| PersistenceError::new("Missing version for deletion"))?;
                 operations.push(TransactionOperation::DeleteDocument {
-                    collection: Collection::Entities,
+                    store: store.to_string(),
+                    kind: crate::db::connection::DocumentKind::Entity,
                     key: key.clone(),
                     expected_current_version: current_version,
                 });
@@ -295,9 +303,14 @@ impl PersistenceSession {
                             BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                             serde_json::json!(next_version),
                         );
+                        data_map.insert(
+                            BEVY_TYPE_FIELD.to_string(),
+                            serde_json::json!(DocumentKind::Entity.as_str()),
+                        );
                         Ok(Some((
                             TransactionOperation::UpdateDocument {
-                                collection: Collection::Entities,
+                                store: store.to_string(),
+                                kind: DocumentKind::Entity,
                                 key: key.clone(),
                                 expected_current_version: current_version,
                                 patch: Value::Object(data_map),
@@ -310,10 +323,15 @@ impl PersistenceSession {
                             BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                             serde_json::json!(1u64),
                         );
+                        data_map.insert(
+                            BEVY_TYPE_FIELD.to_string(),
+                            serde_json::json!(DocumentKind::Entity.as_str()),
+                        );
                         let document = Value::Object(data_map);
                         Ok(Some((
                             TransactionOperation::CreateDocument {
-                                collection: Collection::Entities,
+                                store: store.to_string(),
+                                kind: DocumentKind::Entity,
                                 data: document,
                             },
                             Some(entity),
@@ -349,9 +367,14 @@ impl PersistenceSession {
                                         BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
                                         serde_json::json!(next_version),
                                     );
+                                    obj.insert(
+                                        BEVY_TYPE_FIELD.to_string(),
+                                        serde_json::json!(DocumentKind::Resource.as_str()),
+                                    );
                                 }
                                 resource_ops.push(TransactionOperation::UpdateDocument {
-                                    collection: Collection::Resources,
+                                    store: store.to_string(),
+                                    kind: DocumentKind::Resource,
                                     key: name,
                                     expected_current_version: current_version,
                                     patch: value,
@@ -365,9 +388,14 @@ impl PersistenceSession {
                                     );
                                     // Use backend-specific key field instead of hardcoding "_key"
                                     obj.insert(key_field.to_string(), Value::String(name.clone()));
+                                    obj.insert(
+                                        BEVY_TYPE_FIELD.to_string(),
+                                        serde_json::json!(DocumentKind::Resource.as_str()),
+                                    );
                                 }
                                 resource_ops.push(TransactionOperation::CreateDocument {
-                                    collection: Collection::Resources,
+                                    store: store.to_string(),
+                                    kind: DocumentKind::Resource,
                                     data: value,
                                 });
                             }
@@ -396,7 +424,12 @@ impl PersistenceSession {
 pub async fn commit(
     app: &mut App,
     connection: Arc<dyn DatabaseConnection>,
+    store: impl Into<String>,
 ) -> Result<(), PersistenceError> {
+    let store = store.into();
+    if store.is_empty() {
+        return Err(PersistenceError::new("commit store must be provided"));
+    }
     let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
     let (tx, mut rx) = oneshot::channel();
 
@@ -410,6 +443,7 @@ pub async fn commit(
     app.world_mut().write_message(TriggerCommit {
         correlation_id: Some(correlation_id),
         target_connection: connection,
+        store: store.clone(),
     });
 
     // The timeout is applied to the entire commit-and-wait process.
@@ -446,9 +480,10 @@ pub async fn commit(
 pub fn commit_sync(
     app: &mut App,
     connection: Arc<dyn DatabaseConnection>,
+    store: impl Into<String>,
 ) -> Result<(), PersistenceError> {
     let rt = { app.world().resource::<TokioRuntime>().0.clone() };
-    rt.block_on(commit(app, connection))
+    rt.block_on(commit(app, connection, store))
 }
 
 #[cfg(test)]

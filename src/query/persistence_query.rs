@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
+use crate::db::connection::DocumentKind;
 use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use crate::query::filter_expression::FilterExpression;
 use crate::versioning::version_manager::VersionKey;
@@ -11,6 +12,7 @@ use bevy::prelude::{Component, World};
 /// Query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
     db: Arc<dyn DatabaseConnection>,
+    store: String,
     pub component_names: Vec<&'static str>,
     filter_expr: Option<FilterExpression>,
 
@@ -26,15 +28,22 @@ pub struct PersistenceQuery {
 
 impl PersistenceQuery {
     /// Start a new query backed by a shared database connection.
-    pub fn new(db: Arc<dyn DatabaseConnection>) -> Self {
+    pub fn new(db: Arc<dyn DatabaseConnection>, store: impl Into<String>) -> Self {
         Self {
             db,
+            store: store.into(),
             component_names: Vec::new(),
             filter_expr: None,
             without_component_names: Vec::new(),
             fetch_only_component_names: Vec::new(),
             force_full_docs: false,
         }
+    }
+
+    /// Override the store to query against.
+    pub fn store(mut self, store: impl Into<String>) -> Self {
+        self.store = store.into();
+        self
     }
 
     /// Request loading component `T`.
@@ -110,6 +119,8 @@ impl PersistenceQuery {
         let force_full_docs = self.force_full_docs;
 
         let spec = PersistenceQuerySpecification {
+            store: self.store.clone(),
+            kind: DocumentKind::Entity,
             presence_with: presence_with.clone(),
             presence_without: presence_without.clone(),
             fetch_only: fetch_only.clone(),
@@ -201,7 +212,7 @@ impl PersistenceQuery {
              }
          }
 
-         session.fetch_and_insert_resources(&*self.db, world)
+         session.fetch_and_insert_resources(&*self.db, &self.store, world)
              .await
              .expect("resource deserialization failed");
 
@@ -215,6 +226,7 @@ impl Clone for PersistenceQuery {
     fn clone(&self) -> Self {
         Self {
             db: self.db.clone(),
+            store: self.store.clone(),
             component_names: self.component_names.clone(),
             filter_expr: self.filter_expr.clone(),
             without_component_names: self.without_component_names.clone(),
@@ -254,12 +266,15 @@ mod tests {
     use crate::{Persist, persistence_plugin::PersistencePluginCore};
     use bevy_persistence_database_derive::persist;
     use bevy::prelude::App;
+    use bevy::MinimalPlugins;
     use serde_json::json;
     use std::sync::Arc;
     use futures::executor::block_on;
 
     #[persist(component)]
     struct Comp1;
+
+    const TEST_STORE: &str = "test_store";
 
     // Dummy components for skeleton tests
     #[persist(component)]
@@ -270,7 +285,7 @@ mod tests {
     #[test]
     fn build_spec_with_dsl() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let q = PersistenceQuery::new(db.clone())
+        let q = PersistenceQuery::new(db.clone(), TEST_STORE)
             .with::<A>()
             .filter(
                 A::value().gt(10)
@@ -292,7 +307,7 @@ mod tests {
         let db = Arc::new(MockDatabaseConnection::new());
 
         // Start with a filter, then OR another
-        let q = PersistenceQuery::new(db.clone())
+        let q = PersistenceQuery::new(db.clone(), TEST_STORE)
             .filter(A::value().gt(10))
             .or(B::name().eq("foo"));
 
@@ -325,18 +340,19 @@ mod tests {
         // Due to test pollution from other modules, other resource types might be registered.
         // We must expect `fetch_resource` to be called, and we can just return `None`.
         mock_db.expect_fetch_resource()
-            .returning(|_| Box::pin(async { Ok(None) }));
+            .returning(|_, _| Box::pin(async { Ok(None) }));
 
         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
 
         // build app + session
         let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
         app.add_plugins(PersistencePluginCore::new(db.clone()));
         let mut session = app.world_mut().resource_mut::<PersistenceSession>();
         session.register_component::<Health>();
         session.register_component::<Position>();
 
-        let query = PersistenceQuery::new(db)
+        let query = PersistenceQuery::new(db, TEST_STORE)
             .with::<Health>()
             .with::<Position>();
 
@@ -347,7 +363,7 @@ mod tests {
     #[test]
     fn build_spec_empty_filters() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let query = PersistenceQuery::new(db).for_component::<Comp1>();
+        let query = PersistenceQuery::new(db, TEST_STORE).for_component::<Comp1>();
         let spec = query.build_spec();
         
         assert!(!spec.presence_with.is_empty());
@@ -369,7 +385,7 @@ mod tests {
                 Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
             });
         let db = Arc::new(mock_db);
-        let query = PersistenceQuery::new(db);
+        let query = PersistenceQuery::new(db, TEST_STORE);
         block_on(query.fetch_ids());
     }
 
@@ -382,10 +398,10 @@ mod tests {
     #[test]
     fn build_spec_single_and_multi() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let spec_single = PersistenceQuery::new(db.clone()).with::<H>().build_spec();
+        let spec_single = PersistenceQuery::new(db.clone(), TEST_STORE).with::<H>().build_spec();
         assert!(spec_single.presence_with.contains(&H::name()));
 
-        let spec_multi = PersistenceQuery::new(db)
+        let spec_multi = PersistenceQuery::new(db, TEST_STORE)
             .with::<H>()
             .with::<P>()
             .build_spec();

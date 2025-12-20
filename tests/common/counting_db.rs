@@ -1,5 +1,5 @@
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-use bevy_persistence_database::{DatabaseConnection, PersistenceError, TransactionOperation};
+use bevy_persistence_database::{DatabaseConnection, PersistenceError, TransactionOperation, DocumentKind};
 use bevy_persistence_database::query::persistence_query_specification::PersistenceQuerySpecification;
 use futures::future::BoxFuture;
 use serde_json::Value;
@@ -53,32 +53,31 @@ impl DatabaseConnection for CountingDbConnection {
 
     fn fetch_document(
         &self,
+        store: &str,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        self.inner.fetch_document(entity_key)
+        self.inner.fetch_document(store, entity_key)
     }
 
     fn fetch_component(
         &self,
+        store: &str,
         entity_key: &str,
         comp_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
-        self.inner.fetch_component(entity_key, comp_name)
+        self.inner.fetch_component(store, entity_key, comp_name)
     }
 
     fn fetch_resource(
         &self,
+        store: &str,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        self.inner.fetch_resource(resource_name)
+        self.inner.fetch_resource(store, resource_name)
     }
 
-    fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        self.inner.clear_entities()
-    }
-
-    fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        self.inner.clear_resources()
+    fn clear_store(&self, store: &str, kind: DocumentKind) -> BoxFuture<'static, Result<(), PersistenceError>> {
+        self.inner.clear_store(store, kind)
     }
 
     fn count_documents(

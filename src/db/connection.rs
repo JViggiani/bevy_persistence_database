@@ -11,20 +11,21 @@ use crate::query::persistence_query_specification::PersistenceQuerySpecification
 /// The field name used for optimistic locking version tracking.
 pub const BEVY_PERSISTENCE_VERSION_FIELD: &str = "bevy_persistence_version";
 
-/// An enum representing the collections used by this library.
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-pub enum Collection {
-    /// The collection where all Bevy entities are stored as documents.
-    Entities,
-    /// The special document key for storing Bevy resources.
-    Resources,
+/// Field indicating whether a document represents an entity or a resource.
+pub const BEVY_TYPE_FIELD: &str = "bevy_type";
+
+/// Logical discriminator for persisted documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum DocumentKind {
+    Entity,
+    Resource,
 }
 
-impl std::fmt::Display for Collection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl DocumentKind {
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Collection::Entities => write!(f, "entities"),
-            Collection::Resources => write!(f, "resources"),
+            DocumentKind::Entity => "entity",
+            DocumentKind::Resource => "resource",
         }
     }
 }
@@ -60,20 +61,34 @@ impl PersistenceError {
 #[derive(serde::Serialize, Debug, Clone)]
 pub enum TransactionOperation {
     CreateDocument {
-        collection: Collection,
+        store: String,
+        kind: DocumentKind,
         data: Value,
     },
     UpdateDocument {
-        collection: Collection,
+        store: String,
+        kind: DocumentKind,
         key: String,
         expected_current_version: u64,
         patch: Value,
     },
     DeleteDocument {
-        collection: Collection,
+        store: String,
+        kind: DocumentKind,
         key: String,
         expected_current_version: u64,
     },
+}
+
+impl TransactionOperation {
+    /// Accessor for the store targeted by this operation.
+    pub fn store(&self) -> &str {
+        match self {
+            TransactionOperation::CreateDocument { store, .. }
+            | TransactionOperation::UpdateDocument { store, .. }
+            | TransactionOperation::DeleteDocument { store, .. } => store,
+        }
+    }
 }
 
 /// Abstracts database operations via async returns but remains object-safe.
@@ -111,23 +126,24 @@ pub trait DatabaseConnection: Send + Sync + std::fmt::Debug {
 
     fn fetch_document(
         &self,
+        store: &str,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>>;
 
     fn fetch_component(
         &self,
+        store: &str,
         entity_key: &str,
         comp_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>>;
 
     fn fetch_resource(
         &self,
+        store: &str,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>>;
 
-    fn clear_entities(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
-
-    fn clear_resources(&self) -> BoxFuture<'static, Result<(), PersistenceError>>;
+    fn clear_store(&self, store: &str, kind: DocumentKind) -> BoxFuture<'static, Result<(), PersistenceError>>;
 
     /// Count documents matching a specification without fetching them
     fn count_documents(

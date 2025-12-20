@@ -15,7 +15,7 @@ fn test_load_resources_alongside_entities() {
     let settings = GameSettings { difficulty: 0.42, map_name: "mystic".into() };
     app1.insert_resource(settings.clone());
     app1.update();
-    commit_sync(&mut app1, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app1, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN any query is fetched into a new app
     let mut app2 = App::new();

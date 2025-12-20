@@ -19,7 +19,7 @@ fn test_presence_without_filter() {
     app.world_mut().spawn(Creature { is_screaming: false });
     app.world_mut().spawn(Health { value: 42 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: run a system that loads entities WITHOUT Creature
     let mut app2 = App::new();
@@ -55,7 +55,7 @@ fn test_type_driven_presence_filters() {
     app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
     app.world_mut().spawn(Health { value: 2 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: run a system that uses type-level With/Without in F
     let mut app2 = App::new();
@@ -93,7 +93,7 @@ fn test_type_driven_or_presence_filters() {
     app.world_mut().spawn(Creature { is_screaming: false });
     app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: run a system that uses OR(With<Health>, With<Creature>) in F
     let mut app2 = App::new();
@@ -130,7 +130,7 @@ fn test_nested_tuple_presence_and() {
     app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
     app.world_mut().spawn(Position { x: 1.0, y: 1.0 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN
     let mut app2 = App::new();
@@ -179,7 +179,7 @@ fn test_and_or_mix_with_without_filters() {
     app.world_mut().spawn((Health { value: 3 }, Creature { is_screaming: true }, PlayerName { name: "X".into() }));
     app.world_mut().spawn(Health { value: 4 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN
     let mut app2 = App::new();
@@ -211,7 +211,7 @@ fn test_optional_q_with_without_exclusion() {
     app.world_mut().spawn(Health { value: 1 });
     app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN: Q asks for Option<&Creature> but F excludes Creature
     let mut app2 = App::new();
@@ -248,7 +248,7 @@ fn test_or_presence_three_arms() {
     app.world_mut().spawn(PlayerName { name: "P".into() });
     app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
     app.update();
-    commit_sync(&mut app, db.clone()).expect("Initial commit failed");
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN
     let mut app2 = App::new();
@@ -284,7 +284,7 @@ fn test_presence_expression_complex_and_or_not() {
     app_seed.world_mut().spawn(Position { x: 2.0, y: 2.0 }); // E6
     app_seed.world_mut().spawn((Health { value: 4 }, Position { x: 3.0, y: 3.0 }, PlayerName { name: "both".into() })); // E7
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test: presence-only complex expression
     let mut app = App::new();

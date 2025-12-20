@@ -32,6 +32,7 @@ fn test_persist_many_entities() {
         batching_enabled: true,
         commit_batch_size: 1000,
         thread_count,
+        default_store: TEST_STORE.to_string(),
     };
     app.add_plugins(PersistencePluginCore::new(db.clone()).with_config(config));
     
@@ -42,7 +43,7 @@ fn test_persist_many_entities() {
     app.update();
     // --- prepare & commit phase ---
     let start_commit = Instant::now();
-    let res = commit_sync(&mut app, db.clone());
+    let res = commit_sync(&mut app, db.clone(), TEST_STORE);
     let duration_commit = start_commit.elapsed();
     res.expect("Bulk commit failed");
     

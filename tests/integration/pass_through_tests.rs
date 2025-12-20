@@ -12,10 +12,11 @@ fn test_ensure_loaded_then_pass_through() {
 
     // Seed DB with one entity having Health+Position.
     let mut app_seed = App::new();
+    app_seed.add_plugins(MinimalPlugins);
     app_seed.add_plugins(PersistencePlugins::new(real_db.clone()));
     app_seed.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 }));
     app_seed.update();
-    commit_sync(&mut app_seed, real_db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, real_db.clone(), TEST_STORE).expect("seed commit failed");
 
     // Wrap the db with a counting adapter
     let counter = Arc::new(AtomicUsize::new(0));
@@ -23,6 +24,7 @@ fn test_ensure_loaded_then_pass_through() {
 
     // App under test
     let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
     app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // 1) Update system: explicitly load once; call twice to validate cache later.
@@ -57,10 +59,11 @@ fn test_cache_prevents_duplicate_loads_in_same_frame() {
 
     // Seed DB
     let mut app_seed = App::new();
+    app_seed.add_plugins(MinimalPlugins);
     app_seed.add_plugins(PersistencePlugins::new(real_db.clone()));
     app_seed.world_mut().spawn(Health { value: 42 });
     app_seed.update();
-    commit_sync(&mut app_seed, real_db.clone()).unwrap();
+    commit_sync(&mut app_seed, real_db.clone(), TEST_STORE).unwrap();
 
     // Wrap DB to count execute_documents calls
     let counter = Arc::new(AtomicUsize::new(0));
@@ -68,6 +71,7 @@ fn test_cache_prevents_duplicate_loads_in_same_frame() {
 
     // App under test
     let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
     app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // Single system issuing two identical loads in the same frame
@@ -90,13 +94,15 @@ fn test_deref_forwards_bevy_query_methods() {
 
     // Seed one entity
     let mut app_seed = App::new();
+    app_seed.add_plugins(MinimalPlugins);
     app_seed.add_plugins(PersistencePlugins::new(db_real.clone()));
     let e = app_seed.world_mut().spawn((Health { value: 5 }, Position { x: 1.0, y: 2.0 })).id();
     app_seed.update();
-    commit_sync(&mut app_seed, db_real.clone()).unwrap();
+    commit_sync(&mut app_seed, db_real.clone(), TEST_STORE).unwrap();
 
     // App under test
     let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
     app.add_plugins(PersistencePlugins::new(db_real.clone()));
 
     // Frame 1: load
@@ -141,7 +147,7 @@ fn test_immediate_pass_through() {
     app_seed.world_mut().spawn(Health { value: 10 });
     app_seed.world_mut().spawn(Health { value: 20 });
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test
     let mut app = App::new();
@@ -203,7 +209,7 @@ fn test_query_contains_method() {
     let entity = app_seed.world_mut().spawn(Health { value: 42 }).id();
     // Don't try to access Guid immediately - it gets added during commit
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // Now we can safely get the Guid (after commit)
     let _guid = app_seed.world().get::<Guid>(entity).unwrap().id().to_string();
@@ -269,7 +275,7 @@ fn test_query_get_method() {
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
     let _entity = app_seed.world_mut().spawn(Health { value: 42 }).id();
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // WHEN we load it into a new app
     let mut app = App::new();
@@ -332,7 +338,7 @@ fn test_query_get_mut_method() {
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
     let _entity = app_seed.world_mut().spawn(Health { value: 42 }).id();
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // WHEN we load it into a new app
     let mut app = App::new();
@@ -396,7 +402,7 @@ fn test_query_get_many_method() {
     app_seed.world_mut().spawn(Health { value: 10 });
     app_seed.world_mut().spawn(Health { value: 20 });
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // WHEN we load them into a new app
     let mut app = App::new();
@@ -462,7 +468,7 @@ fn test_query_single_method() {
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
     app_seed.world_mut().spawn((Health { value: 50 }, PlayerName { name: "player".into() }));
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // WHEN we load it into a new app with a filter for PlayerName
     let mut app = App::new();
@@ -516,7 +522,7 @@ fn test_query_iter_combinations_method() {
     app_seed.world_mut().spawn(Health { value: 20 });
     app_seed.world_mut().spawn(Health { value: 30 });
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).expect("seed commit failed");
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // WHEN we load them into a new app
     let mut app = App::new();

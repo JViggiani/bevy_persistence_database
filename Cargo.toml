@@ -1,6 +1,6 @@
 [package]
 name = "bevy_persistence_database"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 description = "A persistence and database integration solution for the Bevy game engine"
 license-file = "LICENSE"

@@ -20,7 +20,7 @@ fn test_query_lens_transmutation_world_only() {
     app_seed.world_mut().spawn(Health { value: 20 }); // excluded
     app_seed.world_mut().spawn(Position { x: 9.0, y: 9.0 }); // excluded
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).unwrap();
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
     // App under test
     let mut app = App::new();
@@ -67,7 +67,7 @@ fn test_query_lens_transmutation_calls_fn() {
     app_seed.world_mut().spawn((Health { value: 7 }, Position { x: 0.0, y: 0.0 }));
     app_seed.world_mut().spawn((Health { value: 8 }, Position { x: 1.0, y: 1.0 }));
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).unwrap();
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
     // App under test
     let mut app = App::new();

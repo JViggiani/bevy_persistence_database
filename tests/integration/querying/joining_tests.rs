@@ -23,7 +23,7 @@ fn test_query_lens_join_filtered_world_only() {
     app_seed.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 }));
     app_seed.world_mut().spawn(PlayerName { name: "bob".into() });
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).unwrap();
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
     // App under test
     let mut app = App::new();
@@ -78,7 +78,7 @@ fn test_join_between_two_persistent_queries_loaded_inline() {
     app_seed.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 })); // E2
     app_seed.world_mut().spawn(PlayerName { name: "bob".into() }); // E3
     app_seed.update();
-    commit_sync(&mut app_seed, db.clone()).unwrap();
+    commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
     // App under test
     let mut app = App::new();

@@ -20,10 +20,11 @@ pub use plugins::persistence_plugin;
 pub use components::Guid;
 pub use db::{
     DatabaseConnection,
-    Collection,
+    DocumentKind,
     PersistenceError,
     TransactionOperation,
     BEVY_PERSISTENCE_VERSION_FIELD,
+    BEVY_TYPE_FIELD,
 };
 #[cfg(feature = "arango")]
 pub use db::ArangoDbConnection;

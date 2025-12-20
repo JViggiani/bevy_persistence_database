@@ -1,6 +1,6 @@
 //! Shared utilities for database connection implementations
 
-use crate::db::connection::{Collection, PersistenceError, TransactionOperation};
+use crate::db::connection::{DocumentKind, PersistenceError, TransactionOperation};
 use serde_json::Value;
 
 /// Groups transaction operations by type and collection
@@ -26,40 +26,42 @@ impl GroupedOperations {
 
         for op in operations {
             match op {
-                TransactionOperation::CreateDocument { collection, data } => {
-                    match collection {
-                        Collection::Entities => result.entity_creates.push(data),
-                        Collection::Resources => result.resource_creates.push(data),
+                TransactionOperation::CreateDocument { kind, data, .. } => {
+                    match kind {
+                        DocumentKind::Entity => result.entity_creates.push(data),
+                        DocumentKind::Resource => result.resource_creates.push(data),
                     }
                 }
                 TransactionOperation::UpdateDocument {
-                    collection,
+                    kind,
                     key,
                     expected_current_version,
                     patch,
+                    ..
                 } => {
                     let obj = serde_json::json!({
                         key_field: key,
                         "expected": expected_current_version,
                         "patch": patch
                     });
-                    match collection {
-                        Collection::Entities => result.entity_updates.push(obj),
-                        Collection::Resources => result.resource_updates.push(obj),
+                    match kind {
+                        DocumentKind::Entity => result.entity_updates.push(obj),
+                        DocumentKind::Resource => result.resource_updates.push(obj),
                     }
                 }
                 TransactionOperation::DeleteDocument {
-                    collection,
+                    kind,
                     key,
                     expected_current_version,
+                    ..
                 } => {
                     let obj = serde_json::json!({
                         key_field: key,
                         "expected": expected_current_version,
                     });
-                    match collection {
-                        Collection::Entities => result.entity_deletes.push(obj),
-                        Collection::Resources => result.resource_deletes.push(obj),
+                    match kind {
+                        DocumentKind::Entity => result.entity_deletes.push(obj),
+                        DocumentKind::Resource => result.resource_deletes.push(obj),
                     }
                 }
             }
