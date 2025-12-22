@@ -8,8 +8,8 @@ pub mod components;
 pub mod db;
 pub mod plugins;
 pub mod query;
-pub mod resources;
 pub mod registration;
+pub mod resources;
 pub mod versioning;
 
 mod persist;
@@ -18,27 +18,23 @@ mod persist;
 pub use plugins::persistence_plugin;
 
 pub use components::Guid;
-pub use db::{
-    DatabaseConnection,
-    DocumentKind,
-    PersistenceError,
-    TransactionOperation,
-    BEVY_PERSISTENCE_VERSION_FIELD,
-    BEVY_TYPE_FIELD,
-};
 #[cfg(feature = "arango")]
 pub use db::ArangoDbConnection;
+pub use db::MockDatabaseConnection;
 #[cfg(feature = "postgres")]
 pub use db::PostgresDbConnection;
 pub use db::connection::DatabaseConnectionResource;
-pub use db::MockDatabaseConnection;
+pub use db::{
+    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
+    PersistenceError, TransactionOperation,
+};
+pub use persist::Persist;
 pub use plugins::{
-    CommitStatus, PersistencePluginCore, TriggerCommit, CommitCompleted,
+    CommitCompleted, CommitStatus, PersistencePluginCore, TriggerCommit,
     persistence_plugin::PersistenceSystemSet,
 };
-pub use query::{PersistentQuery, PersistenceQueryCache, CachePolicy};
+pub use query::{CachePolicy, PersistenceQueryCache, PersistentQuery};
 pub use resources::{PersistenceSession, commit, commit_sync};
-pub use persist::Persist;
 
 pub use versioning::VersionManager;
 
@@ -48,21 +44,16 @@ pub use once_cell;
 
 // Convenient prelude for users
 pub mod prelude {
-    pub use bevy::prelude::Component;
     pub use crate::{
-        persist,
-        Persist,
-        Guid,
-        PersistenceSession,
-        DatabaseConnection,
-        PersistenceError,
-        plugins::{PersistencePlugins, PersistencePluginCore, TriggerCommit},
-        query::{PersistentQuery, FilterExpression},
+        DatabaseConnection, Guid, Persist, PersistenceError, PersistenceSession, persist,
+        plugins::{PersistencePluginCore, PersistencePlugins, TriggerCommit},
+        query::{FilterExpression, PersistentQuery},
     };
-    
+    pub use bevy::prelude::Component;
+
     #[cfg(feature = "arango")]
     pub use crate::ArangoDbConnection;
-    
+
     #[cfg(feature = "postgres")]
     pub use crate::PostgresDbConnection;
 }

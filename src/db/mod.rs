@@ -1,17 +1,13 @@
-pub mod connection;
-mod shared;
 #[cfg(feature = "arango")]
 mod arango_connection;
+pub mod connection;
 #[cfg(feature = "postgres")]
 mod postgres_connection;
+mod shared;
 
 pub use connection::{
-	DatabaseConnection,
-	PersistenceError,
-	TransactionOperation,
-	DocumentKind,
-	BEVY_PERSISTENCE_VERSION_FIELD,
-	BEVY_TYPE_FIELD,
+    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
+    PersistenceError, TransactionOperation,
 };
 
 #[cfg(feature = "arango")]

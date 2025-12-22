@@ -1,6 +1,6 @@
-use bevy::prelude::{Or, With, Without};
 use crate::Persist;
 use crate::query::filter_expression::{BinaryOperator, FilterExpression};
+use bevy::prelude::{Or, With, Without};
 
 #[derive(Default, Clone)]
 pub struct PresenceSpec {
@@ -10,9 +10,15 @@ pub struct PresenceSpec {
 }
 
 impl PresenceSpec {
-    pub fn withs(&self) -> &[&'static str] { &self.withs }
-    pub fn withouts(&self) -> &[&'static str] { &self.withouts }
-    pub fn expr(&self) -> Option<&FilterExpression> { self.expr.as_ref() }
+    pub fn withs(&self) -> &[&'static str] {
+        &self.withs
+    }
+    pub fn withouts(&self) -> &[&'static str] {
+        &self.withouts
+    }
+    pub fn expr(&self) -> Option<&FilterExpression> {
+        self.expr.as_ref()
+    }
 
     pub(crate) fn merge_and(mut self, other: PresenceSpec) -> PresenceSpec {
         self.withs.extend(other.withs);
@@ -35,7 +41,10 @@ impl PresenceSpec {
                 lhs: Box::new(field),
                 rhs: Box::new(FilterExpression::Literal(serde_json::Value::Null)),
             };
-            acc = Some(match acc { Some(cur) => cur.and(e), None => e });
+            acc = Some(match acc {
+                Some(cur) => cur.and(e),
+                None => e,
+            });
         }
         for n in &self.withouts {
             let field = FilterExpression::field(*n, "");
@@ -44,7 +53,10 @@ impl PresenceSpec {
                 lhs: Box::new(field),
                 rhs: Box::new(FilterExpression::Literal(serde_json::Value::Null)),
             };
-            acc = Some(match acc { Some(cur) => cur.and(e), None => e });
+            acc = Some(match acc {
+                Some(cur) => cur.and(e),
+                None => e,
+            });
         }
         match (&acc, &self.expr) {
             (Some(a), Some(b)) => Some(a.clone().and(b.clone())),
@@ -71,29 +83,39 @@ macro_rules! impl_filter_supported_tuple {
     };
 }
 impl_filter_supported_tuple!(A);
-impl_filter_supported_tuple!(A,B);
-impl_filter_supported_tuple!(A,B,C);
-impl_filter_supported_tuple!(A,B,C,D);
-impl_filter_supported_tuple!(A,B,C,D,E);
-impl_filter_supported_tuple!(A,B,C,D,E,F);
-impl_filter_supported_tuple!(A,B,C,D,E,F,G);
-impl_filter_supported_tuple!(A,B,C,D,E,F,G,H);
+impl_filter_supported_tuple!(A, B);
+impl_filter_supported_tuple!(A, B, C);
+impl_filter_supported_tuple!(A, B, C, D);
+impl_filter_supported_tuple!(A, B, C, D, E);
+impl_filter_supported_tuple!(A, B, C, D, E, F);
+impl_filter_supported_tuple!(A, B, C, D, E, F, G);
+impl_filter_supported_tuple!(A, B, C, D, E, F, G, H);
 
 // Core trait: extract presence spec from F
 pub trait ToPresenceSpec {
     fn to_presence_spec() -> PresenceSpec;
 }
 impl ToPresenceSpec for () {
-    fn to_presence_spec() -> PresenceSpec { PresenceSpec::default() }
+    fn to_presence_spec() -> PresenceSpec {
+        PresenceSpec::default()
+    }
 }
 impl<T: bevy::prelude::Component + Persist> ToPresenceSpec for With<T> {
     fn to_presence_spec() -> PresenceSpec {
-        PresenceSpec { withs: vec![T::name()], withouts: vec![], expr: None }
+        PresenceSpec {
+            withs: vec![T::name()],
+            withouts: vec![],
+            expr: None,
+        }
     }
 }
 impl<T: bevy::prelude::Component + Persist> ToPresenceSpec for Without<T> {
     fn to_presence_spec() -> PresenceSpec {
-        PresenceSpec { withs: vec![], withouts: vec![T::name()], expr: None }
+        PresenceSpec {
+            withs: vec![],
+            withouts: vec![T::name()],
+            expr: None,
+        }
     }
 }
 
@@ -110,13 +132,13 @@ macro_rules! impl_to_presence_for_tuple {
     };
 }
 impl_to_presence_for_tuple!(A);
-impl_to_presence_for_tuple!(A,B);
-impl_to_presence_for_tuple!(A,B,C);
-impl_to_presence_for_tuple!(A,B,C,D);
-impl_to_presence_for_tuple!(A,B,C,D,E);
-impl_to_presence_for_tuple!(A,B,C,D,E,F);
-impl_to_presence_for_tuple!(A,B,C,D,E,F,G);
-impl_to_presence_for_tuple!(A,B,C,D,E,F,G,H);
+impl_to_presence_for_tuple!(A, B);
+impl_to_presence_for_tuple!(A, B, C);
+impl_to_presence_for_tuple!(A, B, C, D);
+impl_to_presence_for_tuple!(A, B, C, D, E);
+impl_to_presence_for_tuple!(A, B, C, D, E, F);
+impl_to_presence_for_tuple!(A, B, C, D, E, F, G);
+impl_to_presence_for_tuple!(A, B, C, D, E, F, G, H);
 
 // Or of a tuple: build an OR expression of each alternative's presence constraints
 macro_rules! impl_to_presence_for_or_tuple {
@@ -135,18 +157,21 @@ macro_rules! impl_to_presence_for_or_tuple {
         }
     };
 }
-impl_to_presence_for_or_tuple!(A,B);
-impl_to_presence_for_or_tuple!(A,B,C);
-impl_to_presence_for_or_tuple!(A,B,C,D);
-impl_to_presence_for_or_tuple!(A,B,C,D,E);
-impl_to_presence_for_or_tuple!(A,B,C,D,E,F);
-impl_to_presence_for_or_tuple!(A,B,C,D,E,F,G);
-impl_to_presence_for_or_tuple!(A,B,C,D,E,F,G,H);
+impl_to_presence_for_or_tuple!(A, B);
+impl_to_presence_for_or_tuple!(A, B, C);
+impl_to_presence_for_or_tuple!(A, B, C, D);
+impl_to_presence_for_or_tuple!(A, B, C, D, E);
+impl_to_presence_for_or_tuple!(A, B, C, D, E, F);
+impl_to_presence_for_or_tuple!(A, B, C, D, E, F, G);
+impl_to_presence_for_or_tuple!(A, B, C, D, E, F, G, H);
 
 // Helper: collect component names referenced by presence expressions (component object checks).
 pub fn collect_presence_components(expr: &FilterExpression, acc: &mut Vec<&'static str>) {
     match expr {
-        FilterExpression::Field { component_name, field_name } => {
+        FilterExpression::Field {
+            component_name,
+            field_name,
+        } => {
             if field_name.is_empty() && !acc.contains(component_name) {
                 acc.push(component_name);
             }

@@ -1,15 +1,15 @@
-use bevy::prelude::*;
-use bevy_persistence_database::{
-    commit_sync, CommitStatus, PersistenceError, Guid, DocumentKind,
-    persistence_plugin::PersistencePlugins, MockDatabaseConnection, PersistencePluginCore,
-    persistence_plugin::PersistencePluginConfig, TransactionOperation,
-};
-use bevy_persistence_database::PersistentQuery;
+use crate::common::{Health, TEST_STORE, make_app, run_async};
 use bevy::prelude::With;
-use crate::common::{make_app, run_async, Health, TEST_STORE};
+use bevy::prelude::*;
+use bevy_persistence_database::PersistentQuery;
+use bevy_persistence_database::{
+    CommitStatus, DocumentKind, Guid, MockDatabaseConnection, PersistenceError,
+    PersistencePluginCore, TransactionOperation, commit_sync,
+    persistence_plugin::PersistencePluginConfig, persistence_plugin::PersistencePlugins,
+};
+use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
 fn test_successful_batch_commit_of_new_entities() {
@@ -36,10 +36,16 @@ fn test_successful_batch_commit_of_new_entities() {
     let mut app2 = App::new();
     app2.add_plugins(MinimalPlugins);
     app2.add_plugins(PersistencePlugins::new(db.clone()));
-    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
+        let _ = pq.ensure_loaded();
+    }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
-    let loaded = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
+    let loaded = app2
+        .world_mut()
+        .query::<&Health>()
+        .iter(&app2.world())
+        .count();
     assert_eq!(loaded, 10);
 }
 
@@ -69,11 +75,18 @@ fn test_batch_commit_with_updates_and_deletes() {
     let mut app2 = App::new();
     app2.add_plugins(MinimalPlugins);
     app2.add_plugins(PersistencePlugins::new(db.clone()));
-    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
+        let _ = pq.ensure_loaded();
+    }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
     // expect 3 left
-    let vals: Vec<_> = app2.world_mut().query::<&Health>().iter(&app2.world()).map(|h| h.value).collect();
+    let vals: Vec<_> = app2
+        .world_mut()
+        .query::<&Health>()
+        .iter(&app2.world())
+        .map(|h| h.value)
+        .collect();
     assert_eq!(vals.len(), 3);
     assert!(vals.contains(&100) && vals.contains(&101) && vals.contains(&2));
 }
@@ -92,18 +105,21 @@ fn test_batch_commit_failure_propagates() {
 
     // induce conflict on the third entity
     let guid = app.world().get::<Guid>(ids[2]).unwrap().id().to_string();
-    let (_doc, ver) = run_async(db.fetch_document(TEST_STORE, &guid)).unwrap().unwrap();
+    let (_doc, ver) = run_async(db.fetch_document(TEST_STORE, &guid))
+        .unwrap()
+        .unwrap();
     // bump version directly
     let bad = serde_json::json!({"_key": guid,"bevy_persistence_version":ver+1});
-    run_async(db.execute_transaction(vec![
-        TransactionOperation::UpdateDocument {
+    run_async(
+        db.execute_transaction(vec![TransactionOperation::UpdateDocument {
             store: TEST_STORE.to_string(),
             kind: DocumentKind::Entity,
             key: guid.clone(),
             expected_current_version: ver,
             patch: bad.clone(),
-        }
-    ])).unwrap();
+        }]),
+    )
+    .unwrap();
 
     // modify all locally
     for id in &ids {
@@ -165,7 +181,10 @@ fn test_concurrent_batch_execution() {
     // Total time should be slightly more than one batch delay, but much less than all delays combined
     let total_sequential_delay = batch_delay * batch_count as u32;
     println!("Elapsed time for concurrent commit: {:?}", elapsed);
-    println!("Total sequential delay would be: {:?}", total_sequential_delay);
+    println!(
+        "Total sequential delay would be: {:?}",
+        total_sequential_delay
+    );
 
     assert!(
         elapsed < total_sequential_delay,
@@ -189,28 +208,28 @@ fn test_atomic_multi_batch_commit() {
     db.expect_document_key_field().return_const("_key");
     let batch_count = 3;
     let batch_to_fail = 2; // Zero-indexed, so this is the third batch
-    
+
     let mut call_count = 0;
     db.expect_execute_transaction()
         .times(batch_count)
         .returning(move |_| {
             let current_batch = call_count;
             call_count += 1;
-            
+
             Box::pin(async move {
                 // Sleep to simulate network latency
                 tokio::time::sleep(Duration::from_millis(20)).await;
-                
+
                 // Make the specified batch fail
                 if current_batch == batch_to_fail {
                     return Err(PersistenceError::new("Simulated failure in batch"));
                 }
-                
+
                 // Return empty keys for successful batches
                 Ok(vec![])
             })
         });
-    
+
     let db_arc = Arc::new(db);
     let config = PersistencePluginConfig {
         batching_enabled: true,
@@ -221,39 +240,42 @@ fn test_atomic_multi_batch_commit() {
     let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config);
     let mut app = App::new();
     app.add_plugins(plugin);
-    
+
     // Spawn enough entities to create multiple batches
     let entity_count = batch_count * 3; // use commit_batch_size = 3
     for i in 0..entity_count {
         app.world_mut().spawn(Health { value: i as i32 });
     }
     app.update();
-    
+
     // Attempt the commit operation
     let result = commit_sync(&mut app, db_arc.clone(), TEST_STORE);
-    
+
     // The entire operation should fail due to the failure in one batch
     assert!(result.is_err());
-    assert!(matches!(result, Err(PersistenceError::General(msg)) if msg.contains("Simulated failure")));
-    
+    assert!(
+        matches!(result, Err(PersistenceError::General(msg)) if msg.contains("Simulated failure"))
+    );
+
     // The status should be reset to Idle after a failure
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
-    
+
     // No entity should have a Guid since the commit failed atomically
     let world_ref = app.world_mut();
     let guid_count = world_ref.query::<&Guid>().iter(world_ref).count();
-    assert_eq!(guid_count, 0, "No entity should have a Guid after atomic failure");
+    assert_eq!(
+        guid_count, 0,
+        "No entity should have a Guid after atomic failure"
+    );
 }
 
 #[test]
 fn test_batches_respect_config_max_ops() {
-    use std::sync::Arc;
     use bevy_persistence_database::{
+        MockDatabaseConnection, PersistencePluginCore, commit_sync,
         persistence_plugin::PersistencePluginConfig,
-        PersistencePluginCore,
-        MockDatabaseConnection,
-        commit_sync,
     };
+    use std::sync::Arc;
 
     // Configure a non-trivial batch size and entity count
     let batch_size = 7usize;

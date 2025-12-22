@@ -1,9 +1,9 @@
-use bevy::prelude::App;
-use bevy_persistence_database::{
-    commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
-};
 use crate::common::*;
+use bevy::prelude::App;
 use bevy::prelude::With;
+use bevy_persistence_database::{
+    Guid, PersistentQuery, commit_sync, persistence_plugin::PersistencePlugins,
+};
 use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
@@ -13,7 +13,10 @@ fn test_load_specific_entities_into_new_session() {
     // Session 1: create data
     let mut app1 = App::new();
     app1.add_plugins(PersistencePlugins::new(db.clone()));
-    let _entity_to_load = app1.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 })).id();
+    let _entity_to_load = app1
+        .world_mut()
+        .spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 }))
+        .id();
     let _entity_to_ignore = app1.world_mut().spawn(Health { value: 99 }).id();
     app1.update();
     commit_sync(&mut app1, db.clone(), TEST_STORE).expect("Initial commit failed");
@@ -21,9 +24,7 @@ fn test_load_specific_entities_into_new_session() {
     // Session 2: load (Health AND Position) with Health > 100
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins::new(db.clone()));
-    fn sys(
-        pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>
-    ) {
+    fn sys(pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
         let _ = pq.filter(Health::value().gt(100)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, sys);
@@ -58,9 +59,7 @@ fn test_load_into_world_with_existing_entities() {
     commit_sync(&mut app2, db.clone(), TEST_STORE).expect("Commit for app2 failed");
 
     // WHEN we query for A and load it into app2 via a system
-    fn load_a(
-        pq: PersistentQuery<&Health>
-    ) {
+    fn load_a(pq: PersistentQuery<&Health>) {
         let _ = pq.filter(Health::value().eq(100)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, load_a);
@@ -68,8 +67,13 @@ fn test_load_into_world_with_existing_entities() {
 
     // THEN A is present with correct components and both A and B exist in app2
     // Find the entity with Health == 100 and verify Guid matches
-    let mut q_hp = app2.world_mut().query::<(bevy::prelude::Entity, &Health, &Guid)>();
-    let loaded: Vec<_> = q_hp.iter(&app2.world()).filter(|(_, h, _)| h.value == 100).collect();
+    let mut q_hp = app2
+        .world_mut()
+        .query::<(bevy::prelude::Entity, &Health, &Guid)>();
+    let loaded: Vec<_> = q_hp
+        .iter(&app2.world())
+        .filter(|(_, h, _)| h.value == 100)
+        .collect();
     assert_eq!(loaded.len(), 1);
     let (_e, _h, g) = loaded[0];
     assert_eq!(g.id(), key_a);
@@ -87,13 +91,15 @@ fn test_fetch_ids_only() {
     // Spawn entities with different components
     app.world_mut().spawn(Health { value: 100 });
     app.world_mut().spawn(Health { value: 50 });
-    app.world_mut().spawn((Health { value: 200 }, Position { x: 10.0, y: 20.0 }));
+    app.world_mut()
+        .spawn((Health { value: 200 }, Position { x: 10.0, y: 20.0 }));
     app.world_mut().spawn(Position { x: 5.0, y: 5.0 });
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // Store Guids to verify them later
-    let health_entities: Vec<String> = app.world_mut()
+    let health_entities: Vec<String> = app
+        .world_mut()
         .query::<(&Health, &Guid)>()
         .iter(&app.world())
         .map(|(_, guid)| guid.id().to_string())
@@ -103,21 +109,23 @@ fn test_fetch_ids_only() {
     // Use a system to load Health where value > 75, then collect keys from world
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins::new(db.clone()));
-    fn load_health_gt_75(
-        pq: PersistentQuery<&Health>
-    ) {
+    fn load_health_gt_75(pq: PersistentQuery<&Health>) {
         let _ = pq.filter(Health::value().gt(75)).ensure_loaded();
     }
     app2.add_systems(bevy::prelude::Update, load_health_gt_75);
     app2.update();
-    let keys: Vec<String> = app2.world_mut()
+    let keys: Vec<String> = app2
+        .world_mut()
         .query::<(&Health, &Guid)>()
         .iter(&app2.world())
         .map(|(_, g)| g.id().to_string())
         .collect();
     assert_eq!(keys.len(), 2);
     for key in &keys {
-        assert!(health_entities.contains(key), "Returned key not found in expected set");
+        assert!(
+            health_entities.contains(key),
+            "Returned key not found in expected set"
+        );
     }
 
     // Health AND Position: load via presence, then collect keys
@@ -128,7 +136,8 @@ fn test_fetch_ids_only() {
     }
     app3.add_systems(bevy::prelude::Update, load_h_and_p);
     app3.update();
-    let keys_with_position: Vec<String> = app3.world_mut()
+    let keys_with_position: Vec<String> = app3
+        .world_mut()
         .query::<(&Health, &Position, &Guid)>()
         .iter(&app3.world())
         .map(|(_, _, g)| g.id().to_string())
@@ -179,7 +188,8 @@ fn test_optional_component_in_q_is_fetched_if_present() {
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 1 });
-    app.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 2.0 }));
+    app.world_mut()
+        .spawn((Health { value: 2 }, Position { x: 1.0, y: 2.0 }));
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
@@ -192,15 +202,23 @@ fn test_optional_component_in_q_is_fetched_if_present() {
     // THEN: both entities with Health are loaded; Position is present for one
     let mut q_health = app2.world_mut().query::<&Health>();
     let health_count = q_health.iter(&app2.world()).count();
-    assert_eq!(health_count, 2, "Both Health-bearing entities should be loaded");
+    assert_eq!(
+        health_count, 2,
+        "Both Health-bearing entities should be loaded"
+    );
 
     let mut q_position = app2.world_mut().query::<&Position>();
     let position_count = q_position.iter(&app2.world()).count();
-    assert_eq!(position_count, 1, "Position should be loaded only where present");
+    assert_eq!(
+        position_count, 1,
+        "Position should be loaded only where present"
+    );
 }
 
 // System: No presence filters; optional fetch-only for two components
-fn system_no_presence_optional_fetch(mut pq: PersistentQuery<(Option<&Health>, Option<&Position>)>) {
+fn system_no_presence_optional_fetch(
+    mut pq: PersistentQuery<(Option<&Health>, Option<&Position>)>,
+) {
     let _ = pq.ensure_loaded();
 }
 

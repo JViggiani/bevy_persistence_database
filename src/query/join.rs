@@ -3,10 +3,10 @@ use bevy::ecs::system::QueryLens;
 use bevy::prelude::{Entity, World};
 
 use crate::query::cache::CachePolicy;
-use crate::query::presence_spec::{ToPresenceSpec, FilterSupported, collect_presence_components};
+use crate::query::persistence_query_system_param::PersistentQuery;
+use crate::query::presence_spec::{FilterSupported, ToPresenceSpec, collect_presence_components};
 use crate::query::query_data_to_components::QueryDataToComponents;
 use crate::query::tls_config::take_filter;
-use crate::query::persistence_query_system_param::PersistentQuery;
 
 impl<'w, 's, Q, F> PersistentQuery<'w, 's, Q, F>
 where
@@ -50,8 +50,12 @@ where
         presence_without.extend(p2.withouts().iter().copied());
 
         // Collect components referenced by presence expressions so we fetch them too
-        if let Some(expr) = p1.expr() { collect_presence_components(expr, &mut fetch_names); }
-        if let Some(expr) = p2.expr() { collect_presence_components(expr, &mut fetch_names); }
+        if let Some(expr) = p1.expr() {
+            collect_presence_components(expr, &mut fetch_names);
+        }
+        if let Some(expr) = p2.expr() {
+            collect_presence_components(expr, &mut fetch_names);
+        }
 
         // Ensure we gate presence by all components being joined (true intersection)
         presence_with.extend(fetch_names.iter().copied());
@@ -64,7 +68,10 @@ where
         }
 
         // Dedup lists
-        fn sort_dedup<T: Ord>(v: &mut Vec<T>) { v.sort_unstable(); v.dedup(); }
+        fn sort_dedup<T: Ord>(v: &mut Vec<T>) {
+            v.sort_unstable();
+            v.dedup();
+        }
         sort_dedup(&mut fetch_names);
         sort_dedup(&mut presence_with);
         sort_dedup(&mut presence_without);
@@ -88,7 +95,10 @@ where
 
         bevy::log::debug!(
             "PQ::join_filtered spec: presence_with={:?} presence_without={:?} fetch_only={:?} expr={:?}",
-            presence_with, presence_without, fetch_names, combined_expr
+            presence_with,
+            presence_without,
+            fetch_names,
+            combined_expr
         );
 
         // For joined inline loads, always bypass cache to ensure materialization happens now.
@@ -127,7 +137,9 @@ where
             };
             bevy::log::trace!(
                 "PQ::join_filtered warm-up: lhs_iter={} rhs_iter={} joined_preview={}",
-                lhs_cnt, rhs_cnt, joined_cnt
+                lhs_cnt,
+                rhs_cnt,
+                joined_cnt
             );
         }
 

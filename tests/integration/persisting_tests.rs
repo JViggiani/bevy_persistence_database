@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_persistence_database::{
-    commit_sync, Guid, Persist, plugins::PersistencePlugins, BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, CommitStatus,
+    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, CommitStatus, Guid, Persist, commit_sync,
+    plugins::PersistencePlugins,
 };
 
 use crate::common::*;
@@ -91,12 +92,7 @@ fn test_update_existing_entity() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // Get the Guid to use for direct DB verification later
-    let guid = app
-        .world()
-        .get::<Guid>(entity_id)
-        .unwrap()
-        .id()
-        .to_string();
+    let guid = app.world().get::<Guid>(entity_id).unwrap().id().to_string();
 
     // Verify initial state in DB
     let health_json_before = run_async(db.fetch_component(TEST_STORE, &guid, Health::name()))
@@ -107,10 +103,7 @@ fn test_update_existing_entity() {
     assert_eq!(fetched_health_before.value, 100);
 
     // 2. WHEN the entity's Health value is changed to 50
-    let mut health = app
-        .world_mut()
-        .get_mut::<Health>(entity_id)
-        .unwrap();
+    let mut health = app.world_mut().get_mut::<Health>(entity_id).unwrap();
     health.value = 50;
 
     app.update(); // This will mark the component as Changed
@@ -186,12 +179,7 @@ fn test_delete_persisted_entity() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // 2. Verify it exists in the database.
-    let guid = app
-        .world()
-        .get::<Guid>(entity_id)
-        .unwrap()
-        .id()
-        .to_string();
+    let guid = app.world().get::<Guid>(entity_id).unwrap().id().to_string();
     let component = run_async(db.fetch_component(TEST_STORE, &guid, Health::name()))
         .expect("Fetch should not fail")
         .expect("Component should exist after first commit");
@@ -243,12 +231,7 @@ fn test_add_new_component_to_existing_entity() {
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
-    let guid = app
-        .world()
-        .get::<Guid>(entity_id)
-        .unwrap()
-        .id()
-        .to_string();
+    let guid = app.world().get::<Guid>(entity_id).unwrap().id().to_string();
 
     // Verify initial state: Health exists, Position does not.
     let health_before = run_async(db.fetch_component(TEST_STORE, &guid, Health::name()))
@@ -259,8 +242,7 @@ fn test_add_new_component_to_existing_entity() {
     assert!(position_before.is_none());
 
     // 2. WHEN a Position component is added to that entity
-    app
-        .world_mut()
+    app.world_mut()
         .entity_mut(entity_id)
         .insert(Position { x: 10.0, y: 20.0 });
     app.update(); // This will mark the entity as dirty due to the added component
@@ -322,17 +304,13 @@ fn test_commit_entity_with_non_persisted_component() {
         .expect("Document fetch failed")
         .expect("Document should exist in the database");
 
-    let obj = doc
-        .as_object()
-        .expect("Document value is not an object");
+    let obj = doc.as_object().expect("Document value is not an object");
 
     // Filter out ArangoDB metadata fields and our version field before checking the component count.
     let component_fields: Vec<_> = obj
         .keys()
         .filter(|k| {
-            !k.starts_with('_')
-                && *k != BEVY_PERSISTENCE_VERSION_FIELD
-                && *k != BEVY_TYPE_FIELD
+            !k.starts_with('_') && *k != BEVY_PERSISTENCE_VERSION_FIELD && *k != BEVY_TYPE_FIELD
         })
         .collect();
 
@@ -420,5 +398,8 @@ fn test_persist_component_with_option_none() {
     let fetched_data: OptionalData =
         serde_json::from_value(data_json).expect("Failed to deserialize OptionalData component");
 
-    assert!(fetched_data.data.is_none(), "The fetched data should be None");
+    assert!(
+        fetched_data.data.is_none(),
+        "The fetched data should be None"
+    );
 }

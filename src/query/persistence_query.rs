@@ -1,13 +1,13 @@
 //! A manual builder for creating and executing database queries outside of Bevy systems.
 
-use std::sync::Arc;
-use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
 use crate::db::connection::DocumentKind;
-use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use crate::query::filter_expression::FilterExpression;
+use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use crate::versioning::version_manager::VersionKey;
+use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
 use bevy::prelude::{Component, World};
+use std::sync::Arc;
 
 /// Query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
@@ -21,7 +21,7 @@ pub struct PersistenceQuery {
 
     /// Components to fetch/deserialize without gating presence in backend
     pub(crate) fetch_only_component_names: Vec<&'static str>,
-    
+
     /// Whether to return full documents (internal use)
     force_full_docs: bool,
 }
@@ -125,12 +125,17 @@ impl PersistenceQuery {
             presence_without: presence_without.clone(),
             fetch_only: fetch_only.clone(),
             value_filters: value_filters.clone(),
-            return_full_docs: force_full_docs || (presence_with.is_empty() && presence_without.is_empty()),
+            return_full_docs: force_full_docs
+                || (presence_with.is_empty() && presence_without.is_empty()),
             pagination: None,
         };
         bevy::log::debug!(
             "[builder] build_spec full_docs={} presence_with={:?} without={:?} fetch_only={:?} filter={:?}",
-            force_full_docs, spec.presence_with, spec.presence_without, spec.fetch_only, spec.value_filters
+            force_full_docs,
+            spec.presence_with,
+            spec.presence_without,
+            spec.fetch_only,
+            spec.value_filters
         );
         spec
     }
@@ -138,87 +143,98 @@ impl PersistenceQuery {
     /// Run the query for keys only.
     pub async fn fetch_ids(&self) -> Vec<String> {
         let spec = self.build_spec();
-        self.db.execute_keys(&spec)
-            .await
-            .expect("query failed")
+        self.db.execute_keys(&spec).await.expect("query failed")
     }
 
     /// Load matching entities into the World.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
-         // remove the session resource
-         let mut session = world.remove_resource::<PersistenceSession>().unwrap();
+        // remove the session resource
+        let mut session = world.remove_resource::<PersistenceSession>().unwrap();
 
-         // fetch full documents in one go
-         let mut query_with_full_docs = self.clone();
-         query_with_full_docs.force_full_docs = true;
-         let spec = query_with_full_docs.build_spec();
-         
-         bevy::log::debug!("[builder] fetch_into issuing execute_documents");
-         let documents = self.db.execute_documents(&spec)
-             .await
-             .expect("Batch document fetch failed");
-         bevy::log::debug!("[builder] fetch_into: backend returned {} documents", documents.len());
+        // fetch full documents in one go
+        let mut query_with_full_docs = self.clone();
+        query_with_full_docs.force_full_docs = true;
+        let spec = query_with_full_docs.build_spec();
 
-         let mut result = Vec::with_capacity(documents.len());
-         if !documents.is_empty() {
-             // map existing GUIDs→entities (use bevy::utils::HashMap for perf)
-             let mut existing: bevy::platform::collections::HashMap<String, bevy::prelude::Entity> = bevy::platform::collections::HashMap::default();
-             for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
-                 existing.insert(guid.id().to_string(), e);
-             }
+        bevy::log::debug!("[builder] fetch_into issuing execute_documents");
+        let documents = self
+            .db
+            .execute_documents(&spec)
+            .await
+            .expect("Batch document fetch failed");
+        bevy::log::debug!(
+            "[builder] fetch_into: backend returned {} documents",
+            documents.len()
+        );
 
-             for doc in documents {
-                 let key_field = self.db.document_key_field();
-                 let key = doc[key_field].as_str().unwrap_or_default().to_string();
-                 if key.is_empty() {
-                     bevy::log::debug!("[builder] fetch_into: skipping doc missing key '{}'", key_field);
-                     continue;
-                 }
-                 let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap_or(1);
+        let mut result = Vec::with_capacity(documents.len());
+        if !documents.is_empty() {
+            // map existing GUIDs→entities (use bevy::utils::HashMap for perf)
+            let mut existing: bevy::platform::collections::HashMap<String, bevy::prelude::Entity> =
+                bevy::platform::collections::HashMap::default();
+            for (e, guid) in world.query::<(bevy::prelude::Entity, &Guid)>().iter(world) {
+                existing.insert(guid.id().to_string(), e);
+            }
 
-                 // Resolve entity (reuse if already present by Guid, otherwise spawn)
-                 let entity = if let Some(&e) = existing.get(&key) {
-                     e
-                 } else {
-                     let e = world.spawn(Guid::new(key.clone())).id();
-                     existing.insert(key.clone(), e);
-                     e
-                 };
+            for doc in documents {
+                let key_field = self.db.document_key_field();
+                let key = doc[key_field].as_str().unwrap_or_default().to_string();
+                if key.is_empty() {
+                    bevy::log::debug!(
+                        "[builder] fetch_into: skipping doc missing key '{}'",
+                        key_field
+                    );
+                    continue;
+                }
+                let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap_or(1);
 
-                 // Ensure the session knows about this entity<->key mapping for future operations
-                 session.entity_keys.insert(entity, key.clone());
+                // Resolve entity (reuse if already present by Guid, otherwise spawn)
+                let entity = if let Some(&e) = existing.get(&key) {
+                    e
+                } else {
+                    let e = world.spawn(Guid::new(key.clone())).id();
+                    existing.insert(key.clone(), e);
+                    e
+                };
 
-                 // Cache/refresh version for both new and existing entities
-                 session
-                     .version_manager
-                     .set_version(VersionKey::Entity(key.clone()), version);
+                // Ensure the session knows about this entity<->key mapping for future operations
+                session.entity_keys.insert(entity, key.clone());
 
-                 // Overwrite requested components on existing entities (manual builder policy)
-                 let mut to_deser = self.component_names.clone();
-                 to_deser.extend(self.fetch_only_component_names.iter().copied());
-                 to_deser.sort_unstable();
-                 to_deser.dedup();
-                 bevy::log::trace!("[builder] deserializing {:?} for key={}", to_deser, key);
-                 for &comp in &to_deser {
-                     if let Some(val) = doc.get(comp) {
-                         if let Some(deser) = session.component_deserializers.get(comp) {
-                             deser(world, entity, val.clone())
-                                 .expect("component deserialization failed");
-                         }
-                     }
-                 }
+                // Cache/refresh version for both new and existing entities
+                session
+                    .version_manager
+                    .set_version(VersionKey::Entity(key.clone()), version);
 
-                 result.push(entity);
-             }
-         }
+                // Overwrite requested components on existing entities (manual builder policy)
+                let mut to_deser = self.component_names.clone();
+                to_deser.extend(self.fetch_only_component_names.iter().copied());
+                to_deser.sort_unstable();
+                to_deser.dedup();
+                bevy::log::trace!("[builder] deserializing {:?} for key={}", to_deser, key);
+                for &comp in &to_deser {
+                    if let Some(val) = doc.get(comp) {
+                        if let Some(deser) = session.component_deserializers.get(comp) {
+                            deser(world, entity, val.clone())
+                                .expect("component deserialization failed");
+                        }
+                    }
+                }
 
-         session.fetch_and_insert_resources(&*self.db, &self.store, world)
-             .await
-             .expect("resource deserialization failed");
+                result.push(entity);
+            }
+        }
 
-         world.insert_resource(session);
-         bevy::log::debug!("[builder] fetch_into: inserted {} entities into world", result.len());
-         result
+        session
+            .fetch_and_insert_resources(&*self.db, &self.store, world)
+            .await
+            .expect("resource deserialization failed");
+
+        world.insert_resource(session);
+        bevy::log::debug!(
+            "[builder] fetch_into: inserted {} entities into world",
+            result.len()
+        );
+        result
     }
 }
 
@@ -264,12 +280,12 @@ mod tests {
     use super::*;
     use crate::db::connection::MockDatabaseConnection;
     use crate::{Persist, persistence_plugin::PersistencePluginCore};
-    use bevy_persistence_database_derive::persist;
-    use bevy::prelude::App;
     use bevy::MinimalPlugins;
+    use bevy::prelude::App;
+    use bevy_persistence_database_derive::persist;
+    use futures::executor::block_on;
     use serde_json::json;
     use std::sync::Arc;
-    use futures::executor::block_on;
 
     #[persist(component)]
     struct Comp1;
@@ -278,19 +294,20 @@ mod tests {
 
     // Dummy components for skeleton tests
     #[persist(component)]
-    struct A { value: i32 }
+    struct A {
+        value: i32,
+    }
     #[persist(component)]
-    struct B { name: String }
+    struct B {
+        name: String,
+    }
 
     #[test]
     fn build_spec_with_dsl() {
         let db = Arc::new(MockDatabaseConnection::new());
         let q = PersistenceQuery::new(db.clone(), TEST_STORE)
             .with::<A>()
-            .filter(
-                A::value().gt(10)
-                .and(B::name().eq("test"))
-            );
+            .filter(A::value().gt(10).and(B::name().eq("test")));
         let spec = q.build_spec();
 
         // Should require presence of both components by their Persist::name()
@@ -319,27 +336,33 @@ mod tests {
 
     // Real component types for fetch_into
     #[persist(component)]
-    struct Health { value: i32 }
+    struct Health {
+        value: i32,
+    }
     #[persist(component)]
-    struct Position { x: f32, y: f32 }
+    struct Position {
+        x: f32,
+        y: f32,
+    }
 
     #[tokio::test]
     async fn fetch_into_loads_new_entities() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_document_key_field().return_const("_key");
-        mock_db
-            .expect_execute_documents()
-            .returning(|spec| {
-                assert!(spec.return_full_docs, "execute_documents must be full-docs");
-                Box::pin(async { Ok(vec![
+        mock_db.expect_execute_documents().returning(|spec| {
+            assert!(spec.return_full_docs, "execute_documents must be full-docs");
+            Box::pin(async {
+                Ok(vec![
                     json!({"_key":"k1",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
                     json!({"_key":"k2",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
-                ]) })
-            });
+                ])
+            })
+        });
 
         // Due to test pollution from other modules, other resource types might be registered.
         // We must expect `fetch_resource` to be called, and we can just return `None`.
-        mock_db.expect_fetch_resource()
+        mock_db
+            .expect_fetch_resource()
             .returning(|_, _| Box::pin(async { Ok(None) }));
 
         let db = Arc::new(mock_db) as Arc<dyn DatabaseConnection>;
@@ -365,11 +388,11 @@ mod tests {
         let db = Arc::new(MockDatabaseConnection::new());
         let query = PersistenceQuery::new(db, TEST_STORE).for_component::<Comp1>();
         let spec = query.build_spec();
-        
+
         assert!(!spec.presence_with.is_empty());
         assert!(spec.presence_without.is_empty());
         assert!(!spec.return_full_docs);
-        
+
         // One component requested to fetch
         assert_eq!(spec.fetch_only.len(), 1);
         assert_eq!(spec.fetch_only[0], "Comp1");
@@ -379,11 +402,9 @@ mod tests {
     #[should_panic(expected = "query failed")]
     fn fetch_ids_panics_on_error() {
         let mut mock_db = MockDatabaseConnection::new();
-        mock_db
-            .expect_execute_keys()
-            .returning(|_spec| {
-                Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
-            });
+        mock_db.expect_execute_keys().returning(|_spec| {
+            Box::pin(async { Err(crate::PersistenceError::General("db error".into())) })
+        });
         let db = Arc::new(mock_db);
         let query = PersistenceQuery::new(db, TEST_STORE);
         block_on(query.fetch_ids());
@@ -398,7 +419,9 @@ mod tests {
     #[test]
     fn build_spec_single_and_multi() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let spec_single = PersistenceQuery::new(db.clone(), TEST_STORE).with::<H>().build_spec();
+        let spec_single = PersistenceQuery::new(db.clone(), TEST_STORE)
+            .with::<H>()
+            .build_spec();
         assert!(spec_single.presence_with.contains(&H::name()));
 
         let spec_multi = PersistenceQuery::new(db, TEST_STORE)

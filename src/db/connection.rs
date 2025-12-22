@@ -1,12 +1,12 @@
 //! Defines the abstract `DatabaseConnection` trait.
 
+use crate::query::persistence_query_specification::PersistenceQuerySpecification;
+use bevy::prelude::Resource;
 use futures::future::BoxFuture;
 use mockall::automock;
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
-use bevy::prelude::Resource;
-use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 
 /// The field name used for optimistic locking version tracking.
 pub const BEVY_PERSISTENCE_VERSION_FIELD: &str = "bevy_persistence_version";
@@ -143,7 +143,11 @@ pub trait DatabaseConnection: Send + Sync + std::fmt::Debug {
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>>;
 
-    fn clear_store(&self, store: &str, kind: DocumentKind) -> BoxFuture<'static, Result<(), PersistenceError>>;
+    fn clear_store(
+        &self,
+        store: &str,
+        kind: DocumentKind,
+    ) -> BoxFuture<'static, Result<(), PersistenceError>>;
 
     /// Count documents matching a specification without fetching them
     fn count_documents(

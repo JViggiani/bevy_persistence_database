@@ -5,8 +5,15 @@ use serde_json::Value;
 #[derive(Clone, Debug)]
 pub enum FilterExpression {
     Literal(Value),
-    Field { component_name: &'static str, field_name: &'static str },
-    BinaryOperator { op: BinaryOperator, lhs: Box<FilterExpression>, rhs: Box<FilterExpression> },
+    Field {
+        component_name: &'static str,
+        field_name: &'static str,
+    },
+    BinaryOperator {
+        op: BinaryOperator,
+        lhs: Box<FilterExpression>,
+        rhs: Box<FilterExpression>,
+    },
     DocumentKey,
 }
 
@@ -25,7 +32,10 @@ pub enum BinaryOperator {
 
 impl FilterExpression {
     pub fn field(component_name: &'static str, field_name: &'static str) -> Self {
-        FilterExpression::Field { component_name, field_name }
+        FilterExpression::Field {
+            component_name,
+            field_name,
+        }
     }
 
     pub fn and(self, other: FilterExpression) -> FilterExpression {
@@ -48,7 +58,9 @@ impl FilterExpression {
         FilterExpression::BinaryOperator {
             op: BinaryOperator::Eq,
             lhs: Box::new(self),
-            rhs: Box::new(FilterExpression::Literal(serde_json::to_value(value).unwrap())),
+            rhs: Box::new(FilterExpression::Literal(
+                serde_json::to_value(value).unwrap(),
+            )),
         }
     }
 
@@ -56,7 +68,9 @@ impl FilterExpression {
         FilterExpression::BinaryOperator {
             op: BinaryOperator::Gt,
             lhs: Box::new(self),
-            rhs: Box::new(FilterExpression::Literal(serde_json::to_value(value).unwrap())),
+            rhs: Box::new(FilterExpression::Literal(
+                serde_json::to_value(value).unwrap(),
+            )),
         }
     }
 
@@ -64,7 +78,9 @@ impl FilterExpression {
         FilterExpression::BinaryOperator {
             op: BinaryOperator::Gte,
             lhs: Box::new(self),
-            rhs: Box::new(FilterExpression::Literal(serde_json::to_value(value).unwrap())),
+            rhs: Box::new(FilterExpression::Literal(
+                serde_json::to_value(value).unwrap(),
+            )),
         }
     }
 
@@ -72,7 +88,9 @@ impl FilterExpression {
         FilterExpression::BinaryOperator {
             op: BinaryOperator::Lt,
             lhs: Box::new(self),
-            rhs: Box::new(FilterExpression::Literal(serde_json::to_value(value).unwrap())),
+            rhs: Box::new(FilterExpression::Literal(
+                serde_json::to_value(value).unwrap(),
+            )),
         }
     }
 
@@ -80,7 +98,9 @@ impl FilterExpression {
         FilterExpression::BinaryOperator {
             op: BinaryOperator::Lte,
             lhs: Box::new(self),
-            rhs: Box::new(FilterExpression::Literal(serde_json::to_value(value).unwrap())),
+            rhs: Box::new(FilterExpression::Literal(
+                serde_json::to_value(value).unwrap(),
+            )),
         }
     }
 
@@ -88,7 +108,9 @@ impl FilterExpression {
         FilterExpression::BinaryOperator {
             op: BinaryOperator::In,
             lhs: Box::new(self),
-            rhs: Box::new(FilterExpression::Literal(serde_json::to_value(value).unwrap())),
+            rhs: Box::new(FilterExpression::Literal(
+                serde_json::to_value(value).unwrap(),
+            )),
         }
     }
 }

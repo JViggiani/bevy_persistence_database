@@ -3,26 +3,28 @@
 //! This plugin simplifies the setup process by managing the `PersistenceSession`
 //! as a resource and automatically adding systems for change detection.
 
-use crate::registration::COMPONENT_REGISTRY;
-use crate::{PersistenceError, PersistenceSession, DatabaseConnection, Guid, Persist, TransactionOperation};
 use crate::db::connection::DatabaseConnectionResource;
+use crate::registration::COMPONENT_REGISTRY;
 use crate::versioning::version_manager::VersionKey;
+use crate::{
+    DatabaseConnection, Guid, Persist, PersistenceError, PersistenceSession, TransactionOperation,
+};
 use bevy::app::PluginGroupBuilder;
-use bevy::prelude::*;
 use bevy::prelude::TaskPoolPlugin;
+use bevy::prelude::*;
 use once_cell::sync::Lazy;
 use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
 };
 use tokio::runtime::Runtime;
 use tokio::sync::oneshot;
 
+use crate::query::PersistenceQueryCache;
 use crate::query::deferred_ops::DeferredWorldOperations;
 use crate::query::immediate_world_ptr::ImmediateWorldPtr;
-use crate::query::PersistenceQueryCache;
 
 fn ensure_task_pools(app: &mut App) {
     if !app.is_plugin_added::<TaskPoolPlugin>() {
@@ -41,7 +43,9 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
 
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
-struct CommitTask(Option<tokio::sync::oneshot::Receiver<Result<(Vec<String>, Vec<Entity>), PersistenceError>>>);
+struct CommitTask(
+    Option<tokio::sync::oneshot::Receiver<Result<(Vec<String>, Vec<Entity>), PersistenceError>>>,
+);
 
 /// A component that tracks the state of a multi-batch commit operation.
 #[derive(Component)]
@@ -54,7 +58,9 @@ struct MultiBatchCommitTracker {
 /// A `SystemSet` for grouping the core persistence systems into ordered phases.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PersistenceSystemSet {
-    /// Systems that run before the main commit logic, like change detection.
+    /// Systems that run first to apply deferred operations and detect changes.
+    ChangeDetection,
+    /// Systems that prepare commits after change detection has finished.
     PreCommit,
     /// The exclusive system that finalizes the commit.
     Commit,
@@ -62,7 +68,11 @@ pub enum PersistenceSystemSet {
 
 /// Message emitted when a background commit task is complete.
 #[derive(Message)]
-pub struct CommitCompleted(pub Result<Vec<String>, PersistenceError>, pub Vec<Entity>, pub Option<u64>);
+pub struct CommitCompleted(
+    pub Result<Vec<String>, PersistenceError>,
+    pub Vec<Entity>,
+    pub Option<u64>,
+);
 
 /// A resource used to track which `Persist` types have been registered with an `App`.
 /// This prevents duplicate systems from being added.
@@ -222,40 +232,61 @@ fn handle_commit_trigger(world: &mut World) {
     if plugin_config.batching_enabled && all_operations.len() > plugin_config.commit_batch_size {
         let batch_size = plugin_config.commit_batch_size;
         let session = world.resource::<PersistenceSession>();
-        
+
         // Group operations by entity
         let mut entity_ops: HashMap<Entity, Vec<TransactionOperation>> = HashMap::new();
         let mut new_entity_ops: Vec<(TransactionOperation, Entity)> = Vec::new();
         let mut resource_ops: Vec<TransactionOperation> = Vec::new();
         let mut new_entity_idx = 0;
-        
+
         // Categorize operations
         for op in all_operations {
             match &op {
-                TransactionOperation::UpdateDocument { kind: crate::db::connection::DocumentKind::Entity, key, .. } => {
+                TransactionOperation::UpdateDocument {
+                    kind: crate::db::connection::DocumentKind::Entity,
+                    key,
+                    ..
+                } => {
                     // Find entity for this key
-                    if let Some(entity) = session.entity_keys.iter().find(|(_, k)| *k == key).map(|(e, _)| *e) {
+                    if let Some(entity) = session
+                        .entity_keys
+                        .iter()
+                        .find(|(_, k)| *k == key)
+                        .map(|(e, _)| *e)
+                    {
                         entity_ops.entry(entity).or_default().push(op);
                     }
-                },
-                TransactionOperation::DeleteDocument { kind: crate::db::connection::DocumentKind::Entity, key, .. } => {
+                }
+                TransactionOperation::DeleteDocument {
+                    kind: crate::db::connection::DocumentKind::Entity,
+                    key,
+                    ..
+                } => {
                     // Find entity for this key
-                    if let Some(entity) = session.entity_keys.iter().find(|(_, k)| *k == key).map(|(e, _)| *e) {
+                    if let Some(entity) = session
+                        .entity_keys
+                        .iter()
+                        .find(|(_, k)| *k == key)
+                        .map(|(e, _)| *e)
+                    {
                         entity_ops.entry(entity).or_default().push(op);
                     }
-                },
-                TransactionOperation::CreateDocument { kind: crate::db::connection::DocumentKind::Entity, .. } => {
+                }
+                TransactionOperation::CreateDocument {
+                    kind: crate::db::connection::DocumentKind::Entity,
+                    ..
+                } => {
                     // New entities get their operation paired with the entity index
                     if let Some(entity) = new_entities.get(new_entity_idx) {
                         new_entity_ops.push((op, *entity));
                         new_entity_idx += 1;
                     }
-                },
+                }
                 // Resource operations go in their own group
                 _ => resource_ops.push(op),
             }
         }
-        
+
         // Create batches with balanced operations
         let mut batches: Vec<Vec<TransactionOperation>> = Vec::new();
         let mut batch_entities: Vec<HashSet<Entity>> = Vec::new();
@@ -263,7 +294,7 @@ fn handle_commit_trigger(world: &mut World) {
         let mut current_batch = Vec::new();
         let mut current_batch_entities = HashSet::new();
         let mut current_batch_new_entities = Vec::new();
-        
+
         // Add entity operations in batches
         for (entity, ops) in entity_ops {
             if current_batch.len() + ops.len() > batch_size && !current_batch.is_empty() {
@@ -272,12 +303,12 @@ fn handle_commit_trigger(world: &mut World) {
                 batch_entities.push(std::mem::take(&mut current_batch_entities));
                 batch_new_entities.push(std::mem::take(&mut current_batch_new_entities));
             }
-            
+
             // Add all operations for this entity to the current batch
             current_batch.extend(ops);
             current_batch_entities.insert(entity);
         }
-        
+
         // Add new entity operations in batches
         for (op, entity) in new_entity_ops {
             if current_batch.len() + 1 > batch_size && !current_batch.is_empty() {
@@ -286,11 +317,11 @@ fn handle_commit_trigger(world: &mut World) {
                 batch_entities.push(std::mem::take(&mut current_batch_entities));
                 batch_new_entities.push(std::mem::take(&mut current_batch_new_entities));
             }
-            
+
             current_batch.push(op);
             current_batch_new_entities.push(entity);
         }
-        
+
         // Add resource operations to the first batch, or create a new batch if needed
         if current_batch.len() + resource_ops.len() > batch_size && !current_batch.is_empty() {
             batches.push(std::mem::take(&mut current_batch));
@@ -298,14 +329,14 @@ fn handle_commit_trigger(world: &mut World) {
             batch_new_entities.push(std::mem::take(&mut current_batch_new_entities));
         }
         current_batch.extend(resource_ops);
-        
+
         // Push the final batch if not empty
         if !current_batch.is_empty() {
             batches.push(current_batch);
             batch_entities.push(current_batch_entities);
             batch_new_entities.push(current_batch_new_entities);
         }
-        
+
         let num_batches = batches.len();
         info!(
             "[handle_commit_trigger] Splitting commit into {} batches of size ~{}.",
@@ -314,7 +345,10 @@ fn handle_commit_trigger(world: &mut World) {
 
         if let Some(cid) = correlation_id {
             if let Some(listener) = world.resource_mut::<CommitEventListeners>().0.remove(&cid) {
-                bevy::log::debug!("registered multi-batch tracker for correlation_id={cid} batches={}", num_batches);
+                bevy::log::debug!(
+                    "registered multi-batch tracker for correlation_id={cid} batches={}",
+                    num_batches
+                );
                 world.spawn(MultiBatchCommitTracker {
                     correlation_id: cid,
                     remaining_batches: Arc::new(AtomicUsize::new(num_batches)),
@@ -329,7 +363,7 @@ fn handle_commit_trigger(world: &mut World) {
         for _ in 0..num_batches {
             resource_sets.push(HashSet::new());
         }
-        
+
         // Distribute resource types across batches
         for (i, res_type) in dirty_resources.iter().enumerate() {
             let batch_idx = i % num_batches;
@@ -337,7 +371,11 @@ fn handle_commit_trigger(world: &mut World) {
         }
 
         // Spawn a task for each batch
-        for (i, (batch_ops, batch_entities_set)) in batches.into_iter().zip(batch_entities.into_iter()).enumerate() {
+        for (i, (batch_ops, batch_entities_set)) in batches
+            .into_iter()
+            .zip(batch_entities.into_iter())
+            .enumerate()
+        {
             let batch_db = db.clone();
             let batch_runtime = runtime.clone();
             let batch_new_entities = batch_new_entities.get(i).cloned().unwrap_or_default();
@@ -353,16 +391,20 @@ fn handle_commit_trigger(world: &mut World) {
                 bevy::log::trace!("commit batch runtime task completed send");
                 let _ = tx.send(res);
             });
-            
+
             // Each batch gets its own subset of entities and resources
             let meta = CommitMeta {
                 dirty_entities: batch_entities_set,
-                despawned_entities: if i == 0 { despawned_entities.clone() } else { HashSet::new() },
+                despawned_entities: if i == 0 {
+                    despawned_entities.clone()
+                } else {
+                    HashSet::new()
+                },
                 dirty_resources: resource_sets[i].clone(),
                 connection: batch_db.clone(),
-                    store: store.clone(),
+                store: store.clone(),
             };
-            
+
             world.spawn((CommitTask(Some(rx)), TriggerID(correlation_id), meta));
         }
     } else {
@@ -423,21 +465,24 @@ fn handle_commit_completed(
     let mut to_despawn = Vec::new();
     // Track if any batch had an error - errors should force status to Idle
     let mut had_error = false;
-    
+
     for (ent, mut task, trigger_id, meta_opt) in &mut query {
         if let Some(mut receiver) = task.0.take() {
-            let result: Result<(Vec<String>, Vec<Entity>), PersistenceError> = match receiver.try_recv() {
-                Ok(res) => res,
-                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
-                    // Put the receiver back if not finished
-                    task.0 = Some(receiver);
-                    continue;
-                }
-                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    bevy::log::error!("commit task channel closed before result");
-                    Err(PersistenceError::new("Commit task cancelled before completion"))
-                }
-            };
+            let result: Result<(Vec<String>, Vec<Entity>), PersistenceError> =
+                match receiver.try_recv() {
+                    Ok(res) => res,
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                        // Put the receiver back if not finished
+                        task.0 = Some(receiver);
+                        continue;
+                    }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        bevy::log::error!("commit task channel closed before result");
+                        Err(PersistenceError::new(
+                            "Commit task cancelled before completion",
+                        ))
+                    }
+                };
             let cid = trigger_id.0;
             let mut is_final_batch = true;
             let mut should_send_result = true;
@@ -456,10 +501,7 @@ fn handle_commit_completed(
                     .find(|(_, t)| t.correlation_id == correlation_id)
                 {
                     tracker_found = true;
-                    let remaining = tracker
-                        .remaining_batches
-                        .fetch_sub(1, Ordering::SeqCst)
-                        - 1;
+                    let remaining = tracker.remaining_batches.fetch_sub(1, Ordering::SeqCst) - 1;
                     is_final_batch = remaining == 0;
 
                     // Only take and send on the channel if we have an error or it's the final batch
@@ -472,9 +514,11 @@ fn handle_commit_completed(
                                 let _ = sender.send(Ok(()));
                             }
                         }
-                        
+
                         // Schedule the tracker for removal
-                        commands.entity(tracker_entity).remove::<MultiBatchCommitTracker>();
+                        commands
+                            .entity(tracker_entity)
+                            .remove::<MultiBatchCommitTracker>();
                     } else {
                         // For intermediate successful batches, don't send a completion event
                         should_send_result = false;
@@ -485,12 +529,17 @@ fn handle_commit_completed(
             if let Err(err) = &result {
                 bevy::log::error!(
                     "commit batch completed with error (cid={:?} tracker_found={} final_batch={} err={})",
-                    cid, tracker_found, is_final_batch, err
+                    cid,
+                    tracker_found,
+                    is_final_batch,
+                    err
                 );
             } else {
                 bevy::log::trace!(
                     "commit batch completed ok (cid={:?} tracker_found={} final_batch={})",
-                    cid, tracker_found, is_final_batch
+                    cid,
+                    tracker_found,
+                    is_final_batch
                 );
             }
 
@@ -504,7 +553,9 @@ fn handle_commit_completed(
                         for (e, key) in new_entities.iter().zip(new_keys.iter()) {
                             commands.entity(*e).insert(Guid::new(key.clone()));
                             session.entity_keys.insert(*e, key.clone());
-                            session.version_manager.set_version(VersionKey::Entity(key.clone()), 1);
+                            session
+                                .version_manager
+                                .set_version(VersionKey::Entity(key.clone()), 1);
                         }
                         // bump resource versions
                         for tid in &meta.dirty_resources {
@@ -512,7 +563,7 @@ fn handle_commit_completed(
                             let nv = session.version_manager.get_version(&vk).unwrap_or(0) + 1;
                             session.version_manager.set_version(vk, nv);
                         }
-                        
+
                         // bump existing-entity versions
                         for &entity in meta.dirty_entities.iter() {
                             // Skip entities that were newly created in this commit
@@ -526,11 +577,13 @@ fn handle_commit_completed(
                                 }
                             }
                         }
-                        
+
                         // remove versions for deleted entities
                         for e in &meta.despawned_entities {
                             if let Some(key) = session.entity_keys.get(e).cloned() {
-                                session.version_manager.remove_version(&VersionKey::Entity(key));
+                                session
+                                    .version_manager
+                                    .remove_version(&VersionKey::Entity(key));
                             }
                         }
                         Ok(new_keys.clone())
@@ -538,15 +591,22 @@ fn handle_commit_completed(
                     Err(err) => {
                         // restore dirty sets on failure
                         session.dirty_entities.extend(meta.dirty_entities.drain());
-                        session.despawned_entities.extend(meta.despawned_entities.drain());
+                        session
+                            .despawned_entities
+                            .extend(meta.despawned_entities.drain());
                         session.dirty_resources.extend(meta.dirty_resources.drain());
                         Err(err.clone())
                     }
                 };
-                
+
                 // Only send completion event for the final batch or errors
                 if should_send_result && (is_final_batch || result.is_err()) {
-                    bevy::log::debug!("emitting CommitCompleted for cid={:?} final_batch={} err={}", cid, is_final_batch, result.is_err());
+                    bevy::log::debug!(
+                        "emitting CommitCompleted for cid={:?} final_batch={} err={}",
+                        cid,
+                        is_final_batch,
+                        result.is_err()
+                    );
                     completed.write(CommitCompleted(event_res, vec![], cid));
                 }
             } else if let Err(e) = &result {
@@ -556,25 +616,27 @@ fn handle_commit_completed(
                 }
             }
 
-            // Schedule this entity for despawn 
+            // Schedule this entity for despawn
             to_despawn.push(ent);
 
             // Update status if this is the final batch or there was an error
             if is_final_batch || had_error {
                 // Check if we need to trigger a chained commit
                 let should_trigger_next = !had_error && *status == CommitStatus::InProgressAndDirty;
-                
+
                 // Update status to Idle
                 *status = CommitStatus::Idle;
-                
+
                 // Only trigger next commit if we determined we needed to
                 if should_trigger_next {
-                    if let (Some(conn), Some(store)) = (commit_connection.clone(), commit_store.clone()) {
-                    triggers.write(TriggerCommit {
-                        correlation_id: None,
-                        target_connection: conn,
-                        store,
-                    });
+                    if let (Some(conn), Some(store)) =
+                        (commit_connection.clone(), commit_store.clone())
+                    {
+                        triggers.write(TriggerCommit {
+                            correlation_id: None,
+                            target_connection: conn,
+                            store,
+                        });
                     }
                 }
             }
@@ -582,12 +644,12 @@ fn handle_commit_completed(
             bevy::log::debug!("commit task still pending (cid={:?})", trigger_id.0);
         }
     }
-    
+
     // If we had any error, force status to Idle regardless of other batches
     if had_error {
         *status = CommitStatus::Idle;
     }
-    
+
     // Despawn all entities at once
     for entity in to_despawn {
         commands.entity(entity).despawn();
@@ -674,7 +736,9 @@ impl PersistencePluginCore {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct CommitEventListeners(pub(crate) HashMap<u64, oneshot::Sender<Result<(), PersistenceError>>>);
+pub(crate) struct CommitEventListeners(
+    pub(crate) HashMap<u64, oneshot::Sender<Result<(), PersistenceError>>>,
+);
 
 fn commit_event_listener(
     mut events: MessageReader<CommitCompleted>,
@@ -724,7 +788,10 @@ impl Plugin for PersistencePluginCore {
         // Insert an initial raw world pointer so it's available before any user systems run.
         {
             let ptr: *mut World = app.world_mut() as *mut World;
-            bevy::log::trace!("PersistencePluginCore: inserting initial ImmediateWorldPtr {:p}", ptr);
+            bevy::log::trace!(
+                "PersistencePluginCore: inserting initial ImmediateWorldPtr {:p}",
+                ptr
+            );
             if app.world().get_resource::<ImmediateWorldPtr>().is_none() {
                 app.insert_resource(ImmediateWorldPtr::new(ptr));
             } else {
@@ -750,6 +817,18 @@ impl Plugin for PersistencePluginCore {
         // Iterate over the registration functions from the global registry.
         // Using .iter() instead of .drain() prevents test pollution.
         let registry = COMPONENT_REGISTRY.lock().unwrap();
+        let registrations = registry.len();
+        if registrations == 0 {
+            bevy::log::warn!(
+                "No #[persist] registrations detected; components/resources will not be persisted"
+            );
+        } else {
+            bevy::log::debug!(
+                registrations,
+                "Applying #[persist] registrations"
+            );
+        }
+
         for reg_fn in registry.iter() {
             reg_fn(app);
         }
@@ -757,7 +836,12 @@ impl Plugin for PersistencePluginCore {
         // Configure the order of our system sets.
         app.configure_sets(
             PostUpdate,
-            (PersistenceSystemSet::PreCommit, PersistenceSystemSet::Commit).chain(),
+            (
+                PersistenceSystemSet::ChangeDetection,
+                PersistenceSystemSet::PreCommit,
+                PersistenceSystemSet::Commit,
+            )
+                .chain(),
         );
 
         // Apply queued world mutations (entity spawns, component inserts) in this frame.
@@ -779,10 +863,13 @@ impl Plugin for PersistencePluginCore {
                 apply_deferred_world_ops,
                 publish_immediate_world_ptr,
                 auto_despawn_tracking_system,
-                handle_commit_trigger,
-                commit_event_listener,
             )
-                .in_set(PersistenceSystemSet::PreCommit),
+                .in_set(PersistenceSystemSet::ChangeDetection),
+        );
+
+        app.add_systems(
+            PostUpdate,
+            (commit_event_listener, handle_commit_trigger).in_set(PersistenceSystemSet::PreCommit),
         );
 
         app.add_systems(
@@ -859,53 +946,53 @@ impl PluginGroup for PersistencePlugins {
 mod tests {
     use super::*;
     use crate::{Persist, PersistenceSession};
-    use serde::{Serialize, Deserialize};
-    
+    use serde::{Deserialize, Serialize};
+
     // Define a test component that implements Persist
     #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct TestHealth {
-        value: i32
+        value: i32,
     }
-    
+
     impl Persist for TestHealth {
         fn name() -> &'static str {
             "TestHealth"
         }
     }
-    
+
     #[test]
     fn test_read_only_access_doesnt_mark_dirty() {
         // Set up a minimal app with our system
         let mut app = App::new();
-        
+
         // Create a mock session and insert it as a resource
         let session = PersistenceSession::new();
         app.insert_resource(session);
-        
+
         // Add our component tracking system
         app.add_systems(Update, auto_dirty_tracking_entity_system::<TestHealth>);
-        
+
         // Create an entity with our test component
         let entity = app.world_mut().spawn(TestHealth { value: 100 }).id();
-        
+
         // First update will mark it as dirty because it was just added
         app.update();
-        
+
         // Clear the dirty entities for our test
         {
             let mut session = app.world_mut().resource_mut::<PersistenceSession>();
             session.dirty_entities.clear();
         }
-        
+
         // Read the component without modifying it
         {
             let health = app.world().get::<TestHealth>(entity).unwrap();
             assert_eq!(health.value, 100);
         }
-        
+
         // Update the app again - this should trigger the tracking system
         app.update();
-        
+
         // Verify the entity wasn't marked dirty after read-only access
         {
             let session = app.world().resource::<PersistenceSession>();
@@ -914,16 +1001,16 @@ mod tests {
                 "Entity was incorrectly marked dirty after read-only access"
             );
         }
-        
+
         // Now modify the component
         {
             let mut health = app.world_mut().get_mut::<TestHealth>(entity).unwrap();
             health.value = 200;
         }
-        
+
         // Update again - should mark as dirty
         app.update();
-        
+
         // Verify the entity was marked dirty after modification
         {
             let session = app.world().resource::<PersistenceSession>();

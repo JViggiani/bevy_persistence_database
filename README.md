@@ -28,8 +28,8 @@ Add the crate with the backends you need:
 
 ```toml
 [dependencies]
-bevy = { version = "0.16" }
-bevy_persistence_database = { version = "0.1", features = ["arango", "postgres"] }
+bevy = { version = "0.17", default-features = false, features = ["bevy_log"] }
+bevy_persistence_database = { version = "0.2.2", features = ["arango", "postgres"] }
 ```
 
 ## Backends and features
@@ -71,6 +71,7 @@ pub struct GameSettings { pub difficulty: f32, pub map_name: String }
 ```rust
 use bevy::prelude::*;
 use bevy_persistence_database::{PersistencePlugins, ArangoDbConnection};
+use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
 use std::sync::Arc;
 
 fn main() {
@@ -87,8 +88,12 @@ fn main() {
     let db = Arc::new(db) as Arc<dyn bevy_persistence_database::DatabaseConnection>;
 
     App::new()
-        .add_plugins(PersistencePlugins(db))
-        .run();
+      .add_plugins(PersistencePlugins::new(db).with_config(PersistencePluginConfig {
+        // Pick a default store name for commits/queries that don't override it.
+        default_store: "bevy_example".into(),
+        ..Default::default()
+      }))
+      .run();
 }
 ```
 
@@ -104,7 +109,9 @@ use bevy_persistence_database::{PersistenceQuery, Guid};
 fn sys(
     mut pq: PersistenceQuery<(&Health, Option<&Position>), (With<Health>, Without<Creature>, Or<(With<PlayerName>,)>)>
 ) {
-    let count = pq
+  let count = pq
+    // Optional: point this query at a specific store instead of the default
+    .store("bevy_example")
         .where(Health::value().gt(100))
         .ensure_loaded()
         .iter()
@@ -173,7 +180,11 @@ use bevy_persistence_database::TriggerCommit;
 
 fn manual_commit(mut events: EventWriter<TriggerCommit>) {
     // Send an event to trigger a commit
-    events.send(TriggerCommit::default());
+  events.send(TriggerCommit {
+    correlation_id: None,
+    target_connection: /* your Arc<dyn DatabaseConnection> */ db.clone(),
+    store: "bevy_example".into(),
+  });
 }
 ```
 
@@ -182,10 +193,10 @@ Or use the convenience functions:
 use bevy_persistence_database::{commit, commit_sync};
 
 // Async commit (non-blocking)
-commit(&mut world);
+commit(&mut app, db.clone(), "bevy_example");
 
 // Synchronous commit (blocks until complete)  
-commit_sync(&mut world);
+commit_sync(&mut app, db.clone(), "bevy_example");
 ```
 
 The commit system processes any TriggerCommit events each frame and clears the event queue after committing.
@@ -242,6 +253,7 @@ let config = PersistencePluginConfig {
     batching_enabled: true,
     commit_batch_size: 100,
     thread_count: 4,
+  default_store: "bevy_example".into(),
 };
 
 let plugin = PersistencePluginCore::new(db).with_config(config);

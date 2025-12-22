@@ -1,12 +1,15 @@
 use bevy::prelude::App;
 use bevy_persistence_database::PersistencePluginCore;
-use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
-use bevy_persistence_database::{ ArangoDbConnection, DatabaseConnection };
 #[cfg(feature = "postgres")]
 use bevy_persistence_database::PostgresDbConnection;
+use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
+use bevy_persistence_database::{ArangoDbConnection, DatabaseConnection};
 use std::sync::Arc;
-use std::sync::{OnceLock, atomic::{AtomicUsize, Ordering}, Mutex};
-use testcontainers::{core::WaitFor, runners::AsyncRunner, ContainerAsync, GenericImage, ImageExt};
+use std::sync::{
+    Mutex, OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
+use testcontainers::{ContainerAsync, GenericImage, ImageExt, core::WaitFor, runners::AsyncRunner};
 use tokio::runtime::Runtime;
 
 // Global test runtime
@@ -27,7 +30,10 @@ impl Drop for GlobalContainerState {
             .unwrap_or(false);
         if keep {
             if self.container.lock().unwrap().is_some() {
-                eprintln!("[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", self.base_url);
+                eprintln!(
+                    "[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}",
+                    self.base_url
+                );
             }
             return;
         }
@@ -62,16 +68,23 @@ async fn start_container() -> (ContainerAsync<GenericImage>, String, String) {
 
 fn ensure_global() -> &'static GlobalContainerState {
     GLOBAL.get_or_init(|| {
-        let rt = TEST_RT.get_or_init(|| {
-            Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to build test tokio runtime"),
-            )
-        }).clone();
+        let rt = TEST_RT
+            .get_or_init(|| {
+                Arc::new(
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build test tokio runtime"),
+                )
+            })
+            .clone();
         let (container, base_url, container_id) = rt.block_on(start_container());
-        GlobalContainerState { rt, container: Mutex::new(Some(container)), container_id, base_url }
+        GlobalContainerState {
+            rt,
+            container: Mutex::new(Some(container)),
+            container_id,
+            base_url,
+        }
     })
 }
 
@@ -99,7 +112,10 @@ fn teardown_container() {
             .unwrap_or(false);
         if keep {
             if state.container.lock().unwrap().is_some() {
-                eprintln!("[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}", state.base_url);
+                eprintln!(
+                    "[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving ArangoDB container running at {}",
+                    state.base_url
+                );
             }
             return;
         }
@@ -129,23 +145,42 @@ impl Drop for ContainerGuard {
 
 // Backend matrix
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TestBackend { Arango, Postgres }
+pub enum TestBackend {
+    Arango,
+    Postgres,
+}
 
 // Public: which backends to run (default to all compiled)
 pub fn configured_backends() -> Vec<TestBackend> {
     let raw = std::env::var("bevy_persistence_database_TEST_BACKENDS").unwrap_or_default();
     let mut out = Vec::new();
-    for token in raw.split(',').map(|s| s.trim().to_ascii_lowercase()).filter(|s| !s.is_empty()) {
+    for token in raw
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+    {
         match token.as_str() {
-            "arango" => { #[cfg(feature = "arango")] out.push(TestBackend::Arango); }
-            "postgres" => { #[cfg(feature = "postgres")] out.push(TestBackend::Postgres); }
+            "arango" => {
+                #[cfg(feature = "arango")]
+                out.push(TestBackend::Arango);
+            }
+            "postgres" => {
+                #[cfg(feature = "postgres")]
+                out.push(TestBackend::Postgres);
+            }
             _ => {}
         }
     }
     if out.is_empty() {
         // Default: run all compiled backends
-        #[cfg(feature = "arango")]   { out.push(TestBackend::Arango); }
-        #[cfg(feature = "postgres")] { out.push(TestBackend::Postgres); }
+        #[cfg(feature = "arango")]
+        {
+            out.push(TestBackend::Arango);
+        }
+        #[cfg(feature = "postgres")]
+        {
+            out.push(TestBackend::Postgres);
+        }
     }
     out
 }
@@ -168,7 +203,10 @@ impl Drop for PgGlobalContainerState {
             .unwrap_or(false);
         if keep {
             if self.container.lock().unwrap().is_some() {
-                eprintln!("[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}", self.host, self.port);
+                eprintln!(
+                    "[bevy_persistence_database tests] bevy_persistence_database_KEEP_CONTAINER=1 set; leaving Postgres container running at {}:{}",
+                    self.host, self.port
+                );
             }
             return;
         }
@@ -191,7 +229,10 @@ async fn start_postgres_container() -> (ContainerAsync<GenericImage>, String, u1
     let image = GenericImage::new("postgres", "16")
         .with_env_var("POSTGRES_PASSWORD", "password")
         .with_env_var("POSTGRES_USER", "postgres");
-    let container = image.start().await.expect("Failed to start Postgres container");
+    let container = image
+        .start()
+        .await
+        .expect("Failed to start Postgres container");
     let host_port = container.get_host_port_ipv4(5432).await.unwrap();
     let id = container.id().to_string();
     (container, "127.0.0.1".to_string(), host_port, id)
@@ -200,19 +241,27 @@ async fn start_postgres_container() -> (ContainerAsync<GenericImage>, String, u1
 #[cfg(feature = "postgres")]
 fn ensure_pg_global() -> &'static PgGlobalContainerState {
     PG_GLOBAL.get_or_init(|| {
-        let rt = TEST_RT.get_or_init(|| {
-            Arc::new(
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .expect("failed to build test tokio runtime"),
-            )
-        }).clone();
+        let rt = TEST_RT
+            .get_or_init(|| {
+                Arc::new(
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .expect("failed to build test tokio runtime"),
+                )
+            })
+            .clone();
         let (container, host, port, container_id) = rt.block_on(async {
             let (c, h, p, id) = start_postgres_container().await;
             (c, h, p, id)
         });
-        PgGlobalContainerState { rt, container: Mutex::new(Some(container)), container_id, host, port }
+        PgGlobalContainerState {
+            rt,
+            container: Mutex::new(Some(container)),
+            container_id,
+            host,
+            port,
+        }
     })
 }
 
@@ -227,7 +276,14 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
                     .await
                     .expect("Failed to create database");
             });
-            let db = state.rt.block_on(ArangoDbConnection::connect(&state.base_url, "root", "password", &db_name))
+            let db = state
+                .rt
+                .block_on(ArangoDbConnection::connect(
+                    &state.base_url,
+                    "root",
+                    "password",
+                    &db_name,
+                ))
                 .expect("Failed to connect to per-test database");
             (Arc::new(db), ContainerGuard { inner: None })
         }
@@ -241,9 +297,19 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
             let mut created = false;
             for _ in 0..30 {
                 match pg.rt.block_on(async {
-                    PostgresDbConnection::ensure_database(&pg.host, "postgres", "password", &db_name, Some(pg.port)).await
+                    PostgresDbConnection::ensure_database(
+                        &pg.host,
+                        "postgres",
+                        "password",
+                        &db_name,
+                        Some(pg.port),
+                    )
+                    .await
                 }) {
-                    Ok(_) => { created = true; break; }
+                    Ok(_) => {
+                        created = true;
+                        break;
+                    }
                     Err(e) => {
                         last_err = format!("{e:?}");
                         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -251,22 +317,39 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
                 }
             }
             if !created {
-                panic!("Failed to create Postgres database after retries: {}", last_err);
+                panic!(
+                    "Failed to create Postgres database after retries: {}",
+                    last_err
+                );
             }
 
             // Retry connect as well
             let mut last = String::new();
             let mut db_opt = None;
             for _ in 0..30 {
-                match pg.rt.block_on(PostgresDbConnection::connect(&pg.host, "postgres", "password", &db_name, Some(pg.port))) {
-                    Ok(conn) => { db_opt = Some(conn); break; }
+                match pg.rt.block_on(PostgresDbConnection::connect(
+                    &pg.host,
+                    "postgres",
+                    "password",
+                    &db_name,
+                    Some(pg.port),
+                )) {
+                    Ok(conn) => {
+                        db_opt = Some(conn);
+                        break;
+                    }
                     Err(e) => {
                         last = format!("{e:?}");
                         std::thread::sleep(std::time::Duration::from_millis(250));
                     }
                 }
             }
-            let db = db_opt.unwrap_or_else(|| panic!("Failed to connect to Postgres per-test database after retries: {}", last));
+            let db = db_opt.unwrap_or_else(|| {
+                panic!(
+                    "Failed to connect to Postgres per-test database after retries: {}",
+                    last
+                )
+            });
 
             (Arc::new(db), ContainerGuard { inner: None })
         }
@@ -278,20 +361,25 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
 // Backward-compatible default setup: first configured backend
 pub fn setup_sync() -> (Arc<dyn DatabaseConnection>, ContainerGuard) {
     let backends = configured_backends();
-    let backend = backends.first().copied().expect("No test backend configured or available");
+    let backend = backends
+        .first()
+        .copied()
+        .expect("No test backend configured or available");
     setup_backend(backend)
 }
 
 // Run an async future on shared test runtime
 pub fn run_async<F: std::future::Future>(fut: F) -> F::Output {
-    let rt = TEST_RT.get_or_init(|| {
-        Arc::new(
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .expect("failed to build test tokio runtime"),
-        )
-    }).clone();
+    let rt = TEST_RT
+        .get_or_init(|| {
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build test tokio runtime"),
+            )
+        })
+        .clone();
     rt.block_on(fut)
 }
 

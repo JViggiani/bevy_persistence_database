@@ -2,21 +2,21 @@
 //! Storage model: one table per store, keyed by id with bevy_type discriminator and jsonb payload.
 
 use crate::db::connection::{
-    DatabaseConnection, PersistenceError, TransactionOperation,
-    BEVY_PERSISTENCE_VERSION_FIELD, DocumentKind, BEVY_TYPE_FIELD,
+    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
+    PersistenceError, TransactionOperation,
 };
 use crate::db::shared::{GroupedOperations, OperationType, check_operation_success};
 use crate::query::filter_expression::{BinaryOperator, FilterExpression};
 use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use bevy::log::{debug, error, info};
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_postgres::{Client, Config, NoTls};
 use tokio_postgres::types::ToSql;
+use tokio_postgres::{Client, Config, NoTls};
 
 // Local constants to avoid magic strings
 const KEY_COL: &str = "id";
@@ -55,7 +55,8 @@ pub struct PostgresDbConnection {
 
 impl fmt::Debug for PostgresDbConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PostgresDbConnection").finish_non_exhaustive()
+        f.debug_struct("PostgresDbConnection")
+            .finish_non_exhaustive()
     }
 }
 
@@ -69,10 +70,7 @@ impl PostgresDbConnection {
     ) -> Result<(), PersistenceError> {
         // Connect to the default "postgres" database to create a new DB
         let mut cfg = Config::new();
-        cfg.host(host)
-            .user(user)
-            .password(pass)
-            .dbname("postgres");
+        cfg.host(host).user(user).password(pass).dbname("postgres");
         if let Some(p) = port {
             cfg.port(p);
         }
@@ -95,10 +93,7 @@ impl PostgresDbConnection {
                 // 42P04 is duplicate_database
                 if let Some(db_err) = e.code() {
                     if db_err.code() != "42P04" {
-                        return Err(PersistenceError::new(format!(
-                            "pg create db failed: {}",
-                            e
-                        )));
+                        return Err(PersistenceError::new(format!("pg create db failed: {}", e)));
                     }
                 }
             }
@@ -222,7 +217,11 @@ impl PostgresDbConnection {
                 format!("doc -> '{}' ->> '{}'", component, field)
             }
         }
-        fn translate_rec(expr: &FilterExpression, args: &mut Vec<SqlParam>, offset: usize) -> String {
+        fn translate_rec(
+            expr: &FilterExpression,
+            args: &mut Vec<SqlParam>,
+            offset: usize,
+        ) -> String {
             match expr {
                 FilterExpression::Literal(v) => {
                     let idx = offset + args.len() + 1;
@@ -237,7 +236,10 @@ impl PostgresDbConnection {
                     format!("${}", idx)
                 }
                 FilterExpression::DocumentKey => KEY_COL.to_string(),
-                FilterExpression::Field { component_name, field_name } => field_path(component_name, field_name),
+                FilterExpression::Field {
+                    component_name,
+                    field_name,
+                } => field_path(component_name, field_name),
                 FilterExpression::BinaryOperator { op, lhs, rhs } => {
                     let op_str = match op {
                         BinaryOperator::Eq => "=",
@@ -258,7 +260,11 @@ impl PostgresDbConnection {
                         }
                         BinaryOperator::Eq | BinaryOperator::Ne => {
                             // Presence optimization for component-only fields against NULL
-                            if let FilterExpression::Field { component_name, field_name } = &**lhs {
+                            if let FilterExpression::Field {
+                                component_name,
+                                field_name,
+                            } = &**lhs
+                            {
                                 if field_name.is_empty() {
                                     if let FilterExpression::Literal(Value::Null) = &**rhs {
                                         return if matches!(op, BinaryOperator::Eq) {
@@ -282,8 +288,9 @@ impl PostgresDbConnection {
                                 // determine RHS param type by peeking last pushed param index
                                 let before = args.len();
                                 let r = translate_rec(rhs, args, offset);
-                                let rhs_is_bool = matches!(args.get(before), Some(SqlParam::Bool(_)));
-                                let rhs_is_num  = matches!(args.get(before), Some(SqlParam::F64(_)));
+                                let rhs_is_bool =
+                                    matches!(args.get(before), Some(SqlParam::Bool(_)));
+                                let rhs_is_num = matches!(args.get(before), Some(SqlParam::F64(_)));
                                 if field_name.is_empty() {
                                     // component object equality unsupported -> false
                                     "(FALSE)".to_string()
@@ -292,7 +299,10 @@ impl PostgresDbConnection {
                                     format!("((({})::boolean) {} ({}::boolean))", l, op_str, r)
                                 } else if rhs_is_num {
                                     let l = translate_rec(lhs, &mut Vec::new(), offset);
-                                    format!("((({})::double precision) {} ({}::double precision))", l, op_str, r)
+                                    format!(
+                                        "((({})::double precision) {} ({}::double precision))",
+                                        l, op_str, r
+                                    )
                                 } else {
                                     let l = translate_rec(lhs, &mut Vec::new(), offset);
                                     format!("(({}) {} ({}::text))", l, op_str, r)
@@ -303,14 +313,20 @@ impl PostgresDbConnection {
                                 format!("({}) = ({}::text)", l, r)
                             }
                         }
-                        BinaryOperator::Gt | BinaryOperator::Gte | BinaryOperator::Lt | BinaryOperator::Lte => {
+                        BinaryOperator::Gt
+                        | BinaryOperator::Gte
+                        | BinaryOperator::Lt
+                        | BinaryOperator::Lte => {
                             // Force numeric compare where possible
                             let before = args.len();
                             let r = translate_rec(rhs, args, offset);
-                            let rhs_is_num  = matches!(args.get(before), Some(SqlParam::F64(_)));
+                            let rhs_is_num = matches!(args.get(before), Some(SqlParam::F64(_)));
                             let l = translate_rec(lhs, &mut Vec::new(), offset);
                             if rhs_is_num {
-                                format!("(({})::double precision {} ({}::double precision))", l, op_str, r)
+                                format!(
+                                    "(({})::double precision {} ({}::double precision))",
+                                    l, op_str, r
+                                )
                             } else {
                                 format!("(({})::text {} ({}::text))", l, op_str, r)
                             }
@@ -318,10 +334,18 @@ impl PostgresDbConnection {
                         BinaryOperator::In => {
                             // Expect RHS to be an array literal; infer type
                             let (is_key, left_path, left_is_field, left_field_name) = match &**lhs {
-                                FilterExpression::DocumentKey => (true, KEY_COL.to_string(), false, ""),
-                                FilterExpression::Field { component_name, field_name } => {
-                                    (false, field_path(component_name, field_name), true, *field_name)
+                                FilterExpression::DocumentKey => {
+                                    (true, KEY_COL.to_string(), false, "")
                                 }
+                                FilterExpression::Field {
+                                    component_name,
+                                    field_name,
+                                } => (
+                                    false,
+                                    field_path(component_name, field_name),
+                                    true,
+                                    *field_name,
+                                ),
                                 _ => (false, translate_rec(lhs, args, offset), false, ""),
                             };
 
@@ -333,11 +357,19 @@ impl PostgresDbConnection {
                             if let FilterExpression::Literal(Value::Array(items)) = &**rhs {
                                 // classify
                                 if items.iter().all(|v| v.is_string()) {
-                                    arr_text = Some(items.iter().map(|v| v.as_str().unwrap().to_string()).collect());
+                                    arr_text = Some(
+                                        items
+                                            .iter()
+                                            .map(|v| v.as_str().unwrap().to_string())
+                                            .collect(),
+                                    );
                                 } else if items.iter().all(|v| v.is_boolean()) {
-                                    arr_bool = Some(items.iter().map(|v| v.as_bool().unwrap()).collect());
+                                    arr_bool =
+                                        Some(items.iter().map(|v| v.as_bool().unwrap()).collect());
                                 } else if items.iter().all(|v| v.is_number()) {
-                                    arr_num = Some(items.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect());
+                                    arr_num = Some(
+                                        items.iter().map(|v| v.as_f64().unwrap_or(0.0)).collect(),
+                                    );
                                 } else {
                                     // fallback: coerce to strings
                                     arr_text = Some(items.iter().map(|v| v.to_string()).collect());
@@ -350,17 +382,26 @@ impl PostgresDbConnection {
                             // Push typed array param and build ANY(...) expression
                             if is_key {
                                 if let Some(v) = arr_text.take() {
-                                    let idx = { args.push(SqlParam::TextArray(v)); offset + args.len() };
+                                    let idx = {
+                                        args.push(SqlParam::TextArray(v));
+                                        offset + args.len()
+                                    };
                                     return format!("({} = ANY(${}::text[]))", KEY_COL, idx);
                                 }
                                 // keys are text; coerce others to text array
                                 let idx = if let Some(v) = arr_num.take() {
-                                    args.push(SqlParam::TextArray(v.into_iter().map(|n| n.to_string()).collect()));
+                                    args.push(SqlParam::TextArray(
+                                        v.into_iter().map(|n| n.to_string()).collect(),
+                                    ));
                                     offset + args.len()
                                 } else if let Some(v) = arr_bool.take() {
-                                    args.push(SqlParam::TextArray(v.into_iter().map(|b| b.to_string()).collect()));
+                                    args.push(SqlParam::TextArray(
+                                        v.into_iter().map(|b| b.to_string()).collect(),
+                                    ));
                                     offset + args.len()
-                                } else { offset + args.len() };
+                                } else {
+                                    offset + args.len()
+                                };
                                 return format!("({} = ANY(${}::text[]))", KEY_COL, idx);
                             }
 
@@ -371,13 +412,25 @@ impl PostgresDbConnection {
                             }
 
                             if let Some(v) = arr_num {
-                                let idx = { args.push(SqlParam::F64Array(v)); offset + args.len() };
-                                format!("(({})::double precision = ANY(${}::double precision[]))", left_path, idx)
+                                let idx = {
+                                    args.push(SqlParam::F64Array(v));
+                                    offset + args.len()
+                                };
+                                format!(
+                                    "(({})::double precision = ANY(${}::double precision[]))",
+                                    left_path, idx
+                                )
                             } else if let Some(v) = arr_bool {
-                                let idx = { args.push(SqlParam::BoolArray(v)); offset + args.len() };
+                                let idx = {
+                                    args.push(SqlParam::BoolArray(v));
+                                    offset + args.len()
+                                };
                                 format!("(({})::boolean = ANY(${}::boolean[]))", left_path, idx)
                             } else if let Some(v) = arr_text {
-                                let idx = { args.push(SqlParam::TextArray(v)); offset + args.len() };
+                                let idx = {
+                                    args.push(SqlParam::TextArray(v));
+                                    offset + args.len()
+                                };
                                 format!("(({}) = ANY(${}::text[]))", left_path, idx)
                             } else {
                                 "(FALSE)".to_string()
@@ -439,13 +492,24 @@ impl DatabaseConnection for PostgresDbConnection {
         let conn = self.clone();
         let store = spec.store.clone();
         let table = quote_ident(&store);
-        bevy::log::debug!("[pg] execute_keys: table={} params_len={}", table, params.len());
+        bevy::log::debug!(
+            "[pg] execute_keys: table={} params_len={}",
+            table,
+            params.len()
+        );
         async move {
             let table = conn.ensure_store_table(&store).await?;
-            let sql = format!("SELECT {k} FROM {t} WHERE {w}", k = KEY_COL, t = table, w = where_sql);
+            let sql = format!(
+                "SELECT {k} FROM {t} WHERE {w}",
+                k = KEY_COL,
+                t = table,
+                w = where_sql
+            );
             let client = client.lock().await;
-            let boxed: Vec<Box<dyn ToSql + Sync + Send>> = params.into_iter().map(|p| p.into_box()).collect();
-            let param_refs: Vec<&(dyn ToSql + Sync)> = boxed.iter().map(|b| &**b as &(dyn ToSql + Sync)).collect();
+            let boxed: Vec<Box<dyn ToSql + Sync + Send>> =
+                params.into_iter().map(|p| p.into_box()).collect();
+            let param_refs: Vec<&(dyn ToSql + Sync)> =
+                boxed.iter().map(|b| &**b as &(dyn ToSql + Sync)).collect();
             let rows = client
                 .query(&sql, param_refs.as_slice())
                 .await
@@ -537,7 +601,11 @@ impl DatabaseConnection for PostgresDbConnection {
         let (where_sql, params) = Self::build_where(&spec);
         let client = self.client.clone();
         let conn = self.clone();
-        bevy::log::debug!("[pg] count_documents: store={} params_len={}", spec.store, params.len());
+        bevy::log::debug!(
+            "[pg] count_documents: store={} params_len={}",
+            spec.store,
+            params.len()
+        );
         async move {
             let table = conn.ensure_store_table(&spec.store).await?;
             let sql = format!(
@@ -556,7 +624,8 @@ impl DatabaseConnection for PostgresDbConnection {
                 .map_err(|e| PersistenceError::new(format!("pg count_documents failed: {}", e)))?;
             let count: i64 = row.get(0);
             Ok(count as usize)
-        }.boxed()
+        }
+        .boxed()
     }
 
     fn execute_transaction(
@@ -813,7 +882,11 @@ impl DatabaseConnection for PostgresDbConnection {
         store: &str,
         entity_key: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        self.fetch_from_store(store.to_string(), entity_key.to_string(), DocumentKind::Entity)
+        self.fetch_from_store(
+            store.to_string(),
+            entity_key.to_string(),
+            DocumentKind::Entity,
+        )
     }
 
     fn fetch_component(
@@ -829,7 +902,10 @@ impl DatabaseConnection for PostgresDbConnection {
         let client = self.client.clone();
         async move {
             let table = conn.ensure_store_table(&store_name).await?;
-            debug!("[pg] fetch_component store={} key={} comp={}", store_name, key, comp);
+            debug!(
+                "[pg] fetch_component store={} key={} comp={}",
+                store_name, key, comp
+            );
             let stmt = format!(
                 "SELECT doc -> $2 FROM {t} WHERE {k} = $1 AND {type_col} = $3",
                 t = table,
@@ -856,16 +932,28 @@ impl DatabaseConnection for PostgresDbConnection {
         store: &str,
         resource_name: &str,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        self.fetch_from_store(store.to_string(), resource_name.to_string(), DocumentKind::Resource)
+        self.fetch_from_store(
+            store.to_string(),
+            resource_name.to_string(),
+            DocumentKind::Resource,
+        )
     }
 
-    fn clear_store(&self, store: &str, kind: DocumentKind) -> BoxFuture<'static, Result<(), PersistenceError>> {
+    fn clear_store(
+        &self,
+        store: &str,
+        kind: DocumentKind,
+    ) -> BoxFuture<'static, Result<(), PersistenceError>> {
         let store_name = store.to_string();
         let conn = self.clone();
         let client = self.client.clone();
         async move {
             let table = conn.ensure_store_table(&store_name).await?;
-            let stmt = format!("DELETE FROM {t} WHERE {type_col} = $1", t = table, type_col = BEVY_TYPE_FIELD);
+            let stmt = format!(
+                "DELETE FROM {t} WHERE {type_col} = $1",
+                t = table,
+                type_col = BEVY_TYPE_FIELD
+            );
             let client = client.lock().await;
             client
                 .execute(&stmt, &[&kind.as_str()])
@@ -880,8 +968,8 @@ impl DatabaseConnection for PostgresDbConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::persistence_query_specification::PersistenceQuerySpecification;
     use crate::query::filter_expression::FilterExpression;
+    use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 
     /// Helper: run the private build_where and count params
     fn build_where(spec: PersistenceQuerySpecification) -> (String, usize) {
@@ -910,7 +998,7 @@ mod tests {
     #[test]
     fn value_filter_generates_param_and_expr() {
         let mut spec = PersistenceQuerySpecification::default();
-        spec.value_filters = Some(FilterExpression::field("Position","x").lt(3.5));
+        spec.value_filters = Some(FilterExpression::field("Position", "x").lt(3.5));
         let (sql, p) = build_where(spec);
         assert!(sql.contains("<"));
         assert!(sql.contains("$1"));
@@ -940,7 +1028,7 @@ mod tests {
     fn in_operator_generates_array_param_any_clause() {
         let mut spec = PersistenceQuerySpecification::default();
         // key IN ('a','b','c')
-        spec.value_filters = Some(FilterExpression::DocumentKey.in_(vec!["a","b","c"]));
+        spec.value_filters = Some(FilterExpression::DocumentKey.in_(vec!["a", "b", "c"]));
         let (sql, pcount) = build_where(spec);
         assert!(sql.contains("ANY("), "SQL should use ANY(...) for IN");
         assert_eq!(pcount, 2, "one bevy_type param plus array param expected");

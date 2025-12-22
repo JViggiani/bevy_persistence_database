@@ -1,10 +1,16 @@
-use bevy::prelude::*;
-use bevy_persistence_database::{commit_sync, persistence_plugin::PersistencePlugins, PersistentQuery, PersistenceSystemSet, Guid};
-use bevy_persistence_database_derive::db_matrix_test;
-use crate::common::*;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 use crate::common::CountingDbConnection;
+use crate::common::*;
 use bevy::prelude::IntoScheduleConfigs;
+use bevy::prelude::*;
+use bevy_persistence_database::{
+    Guid, PersistenceSystemSet, PersistentQuery, commit_sync,
+    persistence_plugin::PersistencePlugins,
+};
+use bevy_persistence_database_derive::db_matrix_test;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 #[db_matrix_test]
 fn test_ensure_loaded_then_pass_through() {
@@ -14,7 +20,9 @@ fn test_ensure_loaded_then_pass_through() {
     let mut app_seed = App::new();
     app_seed.add_plugins(MinimalPlugins);
     app_seed.add_plugins(PersistencePlugins::new(real_db.clone()));
-    app_seed.world_mut().spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 }));
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 150 }, Position { x: 10.0, y: 20.0 }));
     app_seed.update();
     commit_sync(&mut app_seed, real_db.clone(), TEST_STORE).expect("seed commit failed");
 
@@ -50,7 +58,11 @@ fn test_ensure_loaded_then_pass_through() {
     app.update();
 
     // Exactly one execute_documents call
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "expected exactly one execute_documents call");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "expected exactly one execute_documents call"
+    );
 }
 
 #[db_matrix_test]
@@ -85,7 +97,11 @@ fn test_cache_prevents_duplicate_loads_in_same_frame() {
     // No additional loads in later frame unless requested
     app.update();
 
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "cache should coalesce identical loads");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "cache should coalesce identical loads"
+    );
 }
 
 #[db_matrix_test]
@@ -96,7 +112,10 @@ fn test_deref_forwards_bevy_query_methods() {
     let mut app_seed = App::new();
     app_seed.add_plugins(MinimalPlugins);
     app_seed.add_plugins(PersistencePlugins::new(db_real.clone()));
-    let e = app_seed.world_mut().spawn((Health { value: 5 }, Position { x: 1.0, y: 2.0 })).id();
+    let e = app_seed
+        .world_mut()
+        .spawn((Health { value: 5 }, Position { x: 1.0, y: 2.0 }))
+        .id();
     app_seed.update();
     commit_sync(&mut app_seed, db_real.clone(), TEST_STORE).unwrap();
 
@@ -106,7 +125,9 @@ fn test_deref_forwards_bevy_query_methods() {
     app.add_plugins(PersistencePlugins::new(db_real.clone()));
 
     // Frame 1: load
-    fn load(mut pq: PersistentQuery<(&Health, &Position)>) { let _ = pq.ensure_loaded(); }
+    fn load(mut pq: PersistentQuery<(&Health, &Position)>) {
+        let _ = pq.ensure_loaded();
+    }
     app.add_systems(Update, load);
     app.update();
 
@@ -114,10 +135,7 @@ fn test_deref_forwards_bevy_query_methods() {
     #[derive(Resource)]
     struct Ent(Entity);
     app.insert_resource(Ent(e));
-    fn verify(
-        pq: PersistentQuery<(&Health, &Position)>,
-        ent: Res<Ent>,
-    ) {
+    fn verify(pq: PersistentQuery<(&Health, &Position)>, ent: Res<Ent>) {
         // contains
         assert!(pq.contains(ent.0));
         // get
@@ -152,7 +170,7 @@ fn test_immediate_pass_through() {
     // App under test
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // Test resource to store results
     #[derive(Resource, Default)]
     struct TestResults {
@@ -162,16 +180,16 @@ fn test_immediate_pass_through() {
         first_entity: Option<Entity>,
     }
     app.insert_resource(TestResults::default());
-    
+
     // System with load and immediate query in the same function
     fn test_immediate_system(mut pq: PersistentQuery<&Health>, mut results: ResMut<TestResults>) {
         // Load with immediate apply
         pq.ensure_loaded();
-        
+
         // Test immediate iter
         let entities: Vec<Entity> = pq.iter().map(|(e, _)| e).collect();
         results.immediate_iter_count = entities.len();
-        
+
         // Try get and contains on the first entity
         if let Some(&first) = entities.first() {
             results.first_entity = Some(first);
@@ -179,16 +197,28 @@ fn test_immediate_pass_through() {
             results.immediate_contains = pq.contains(first);
         }
     }
-    
-    app.add_systems(PostUpdate, test_immediate_system.after(PersistenceSystemSet::PreCommit));
+
+    app.add_systems(
+        PostUpdate,
+        test_immediate_system.after(PersistenceSystemSet::PreCommit),
+    );
     app.update();
-    
+
     // Verify results
     let result = app.world().resource::<TestResults>();
-    assert_eq!(result.immediate_iter_count, 2, "iter should return all loaded entities immediately");
-    assert!(result.immediate_get_success, "get should work immediately after load");
-    assert!(result.immediate_contains, "contains should work immediately after load");
-    
+    assert_eq!(
+        result.immediate_iter_count, 2,
+        "iter should return all loaded entities immediately"
+    );
+    assert!(
+        result.immediate_get_success,
+        "get should work immediately after load"
+    );
+    assert!(
+        result.immediate_contains,
+        "contains should work immediately after load"
+    );
+
     // Verify entity is actually in the world
     if let Some(entity) = result.first_entity {
         let health = app.world().get::<Health>(entity);
@@ -212,57 +242,62 @@ fn test_query_contains_method() {
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // Now we can safely get the Guid (after commit)
-    let _guid = app_seed.world().get::<Guid>(entity).unwrap().id().to_string();
+    let _guid = app_seed
+        .world()
+        .get::<Guid>(entity)
+        .unwrap()
+        .id()
+        .to_string();
 
     // WHEN we load it into a new app
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // First system loads the entity
     #[derive(Resource, Default)]
     struct LoadedEntity(Option<Entity>);
-    
+
     app.insert_resource(LoadedEntity::default());
-    
-    fn load_health(
-        mut pq: PersistentQuery<&Health>,
-        mut res: ResMut<LoadedEntity>
-    ) {
+
+    fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntity>) {
         // Load health entities
         pq.ensure_loaded();
-        
+
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
             res.0 = Some(e);
         }
     }
-    
+
     // Second system tests contains()
     #[derive(Resource, Default)]
     struct TestResult(bool);
-    
+
     app.insert_resource(TestResult::default());
-    
+
     fn check_contains(
         pq: PersistentQuery<&Health>,
         entity: Res<LoadedEntity>,
-        mut result: ResMut<TestResult>
+        mut result: ResMut<TestResult>,
     ) {
         if let Some(e) = entity.0 {
             result.0 = pq.contains(e);
         }
     }
-    
+
     // Run the systems in sequence
     app.add_systems(Update, load_health.after(PersistenceSystemSet::PreCommit));
     app.update();
-    
+
     app.add_systems(Update, check_contains);
     app.update();
-    
+
     // Verify the result
     let contains_result = app.world().resource::<TestResult>().0;
-    assert!(contains_result, "contains() should return true for a loaded entity");
+    assert!(
+        contains_result,
+        "contains() should return true for a loaded entity"
+    );
 }
 
 /// Test that verifies get() method works after a load
@@ -280,49 +315,46 @@ fn test_query_get_method() {
     // WHEN we load it into a new app
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // First system loads the entity
     #[derive(Resource, Default)]
     struct LoadedEntity(Option<Entity>);
-    
+
     app.insert_resource(LoadedEntity::default());
-    
-    fn load_health(
-        mut pq: PersistentQuery<&Health>,
-        mut res: ResMut<LoadedEntity>
-    ) {
+
+    fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntity>) {
         // Load health entities
         pq.ensure_loaded();
-        
+
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
             res.0 = Some(e);
         }
     }
-    
+
     // Second system tests get()
     #[derive(Resource, Default)]
     struct TestResult(bool);
-    
+
     app.insert_resource(TestResult::default());
-    
+
     fn check_get(
         pq: PersistentQuery<&Health>,
         entity: Res<LoadedEntity>,
-        mut result: ResMut<TestResult>
+        mut result: ResMut<TestResult>,
     ) {
         if let Some(e) = entity.0 {
             result.0 = pq.get(e).is_ok();
         }
     }
-    
+
     // Run the systems in sequence
     app.add_systems(Update, load_health.after(PersistenceSystemSet::PreCommit));
     app.update();
-    
+
     app.add_systems(Update, check_get);
     app.update();
-    
+
     // Verify the result
     let get_result = app.world().resource::<TestResult>().0;
     assert!(get_result, "get() should succeed for a loaded entity");
@@ -343,52 +375,52 @@ fn test_query_get_mut_method() {
     // WHEN we load it into a new app
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // First system loads the entity
     #[derive(Resource, Default)]
     struct LoadedEntity(Option<Entity>);
-    
+
     app.insert_resource(LoadedEntity::default());
-    
-    fn load_health(
-        mut pq: PersistentQuery<&Health>,
-        mut res: ResMut<LoadedEntity>
-    ) {
+
+    fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntity>) {
         // Load health entities
         pq.ensure_loaded();
-        
+
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
             res.0 = Some(e);
         }
     }
-    
+
     // Second system tests get_mut()
     #[derive(Resource, Default)]
     struct TestResult(bool);
-    
+
     app.insert_resource(TestResult::default());
-    
+
     fn check_get_mut(
         mut pq: PersistentQuery<&mut Health>,
         entity: Res<LoadedEntity>,
-        mut result: ResMut<TestResult>
+        mut result: ResMut<TestResult>,
     ) {
         if let Some(e) = entity.0 {
             result.0 = pq.get_mut(e).is_ok();
         }
     }
-    
+
     // Run the systems in sequence
     app.add_systems(Update, load_health.after(PersistenceSystemSet::PreCommit));
     app.update();
-    
+
     app.add_systems(Update, check_get_mut);
     app.update();
-    
+
     // Verify the result
     let get_mut_result = app.world().resource::<TestResult>().0;
-    assert!(get_mut_result, "get_mut() should succeed for a loaded entity");
+    assert!(
+        get_mut_result,
+        "get_mut() should succeed for a loaded entity"
+    );
 }
 
 /// Test that verifies get_many() method works after a load
@@ -407,55 +439,55 @@ fn test_query_get_many_method() {
     // WHEN we load them into a new app
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // Resource to store entities
     #[derive(Resource, Default)]
     struct LoadedEntities(Vec<Entity>);
-    
+
     app.insert_resource(LoadedEntities::default());
-    
-    fn load_health(
-        mut pq: PersistentQuery<&Health>,
-        mut res: ResMut<LoadedEntities>
-    ) {
+
+    fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntities>) {
         // Load health entities
         pq.ensure_loaded();
-        
+
         // Capture entities
         for (e, _) in pq.iter() {
             res.0.push(e);
         }
     }
-    
+
     // Second system tests get_many()
     #[derive(Resource, Default)]
     struct TestResult(bool);
-    
+
     app.insert_resource(TestResult::default());
-    
+
     fn check_get_many(
         pq: PersistentQuery<&Health>,
         entities: Res<LoadedEntities>,
-        mut result: ResMut<TestResult>
+        mut result: ResMut<TestResult>,
     ) {
         if entities.0.len() < 2 {
             return;
         }
-        
+
         let get_result = pq.get_many([entities.0[0], entities.0[1]]);
         result.0 = get_result.is_ok();
     }
-    
+
     // Run the systems in sequence
     app.add_systems(Update, load_health.after(PersistenceSystemSet::PreCommit));
     app.update();
-    
+
     app.add_systems(Update, check_get_many);
     app.update();
-    
+
     // Verify the result
     let get_many_result = app.world().resource::<TestResult>().0;
-    assert!(get_many_result, "get_many() should succeed for loaded entities");
+    assert!(
+        get_many_result,
+        "get_many() should succeed for loaded entities"
+    );
 }
 
 /// Test that verifies single() method works after a load
@@ -466,30 +498,35 @@ fn test_query_single_method() {
     // GIVEN a committed entity with PlayerName (to ensure exactly one entity)
     let mut app_seed = App::new();
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
-    app_seed.world_mut().spawn((Health { value: 50 }, PlayerName { name: "player".into() }));
+    app_seed.world_mut().spawn((
+        Health { value: 50 },
+        PlayerName {
+            name: "player".into(),
+        },
+    ));
     app_seed.update();
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // WHEN we load it into a new app with a filter for PlayerName
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // Resource to store result
     #[derive(Resource, Default)]
     struct SingleResult {
         health_value: Option<i32>,
-        success: bool
+        success: bool,
     }
-    
+
     app.insert_resource(SingleResult::default());
-    
+
     fn test_single(
         mut pq: PersistentQuery<&Health, With<PlayerName>>,
-        mut result: ResMut<SingleResult>
+        mut result: ResMut<SingleResult>,
     ) {
         // Load and immediately use single
         pq.ensure_loaded();
-        
+
         match pq.single() {
             Ok((_e, health)) => {
                 result.health_value = Some(health.value);
@@ -500,14 +537,21 @@ fn test_query_single_method() {
             }
         }
     }
-    
+
     app.add_systems(Update, test_single.after(PersistenceSystemSet::PreCommit));
     app.update();
-    
+
     // THEN the single method should succeed
     let result = app.world().resource::<SingleResult>();
-    assert!(result.success, "single() should succeed for a unique entity");
-    assert_eq!(result.health_value, Some(50), "single() should return the correct health value");
+    assert!(
+        result.success,
+        "single() should succeed for a unique entity"
+    );
+    assert_eq!(
+        result.health_value,
+        Some(50),
+        "single() should return the correct health value"
+    );
 }
 
 /// Test that verifies iter_combinations() method works after a load
@@ -527,31 +571,34 @@ fn test_query_iter_combinations_method() {
     // WHEN we load them into a new app
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // Resource to store result
     #[derive(Resource, Default)]
     struct CombinationsResult {
-        count: usize
+        count: usize,
     }
-    
+
     app.insert_resource(CombinationsResult::default());
-    
-    fn test_combinations(
-        mut pq: PersistentQuery<&Health>,
-        mut result: ResMut<CombinationsResult>
-    ) {
+
+    fn test_combinations(mut pq: PersistentQuery<&Health>, mut result: ResMut<CombinationsResult>) {
         // Load and immediately use iter_combinations
         pq.ensure_loaded();
-        
+
         // Count combinations of 2 entities
         result.count = pq.iter_combinations::<2>().count();
         bevy::log::info!("Found {} combinations of 2 entities", result.count);
     }
-    
-    app.add_systems(Update, test_combinations.after(PersistenceSystemSet::PreCommit));
+
+    app.add_systems(
+        Update,
+        test_combinations.after(PersistenceSystemSet::PreCommit),
+    );
     app.update();
-    
+
     // THEN there should be exactly 3 combinations (3 choose 2 = 3)
     let result = app.world().resource::<CombinationsResult>();
-    assert_eq!(result.count, 3, "iter_combinations should return the correct number of combinations");
+    assert_eq!(
+        result.count, 3,
+        "iter_combinations should return the correct number of combinations"
+    );
 }

@@ -1,18 +1,18 @@
-use std::hash::{Hash, Hasher};
-use bevy::prelude::{Entity, Mut, World};
-use bevy::ecs::query::{QueryData, QueryFilter};
-use crate::{Guid, PersistenceSession, BEVY_PERSISTENCE_VERSION_FIELD};
-use crate::versioning::version_manager::VersionKey;
-use crate::query::filter_expression::FilterExpression;
-use crate::query::persistence_query_specification::{PersistenceQuerySpecification, PaginationConfig};
 use crate::query::cache::CachePolicy;
+use crate::query::filter_expression::FilterExpression;
+use crate::query::persistence_query_specification::{
+    PaginationConfig, PersistenceQuerySpecification,
+};
 use crate::query::persistence_query_system_param::PersistentQuery;
-use crate::query::tls_config::{take_pagination_config};
+use crate::query::tls_config::take_pagination_config;
+use crate::versioning::version_manager::VersionKey;
+use crate::{BEVY_PERSISTENCE_VERSION_FIELD, Guid, PersistenceSession};
+use bevy::ecs::query::{QueryData, QueryFilter};
+use bevy::prelude::{Entity, Mut, World};
 use rayon::prelude::*;
+use std::hash::{Hash, Hasher};
 
-impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
-    PersistentQuery<'w, 's, Q, F>
-{
+impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'w, 's, Q, F> {
     #[inline]
     pub(crate) fn apply_one_document(
         world: &mut World,
@@ -22,8 +22,15 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
         allow_overwrite: bool,
         key_field: &str,
     ) {
-        let Some(key) = doc.get(key_field).and_then(|v| v.as_str()).map(|s| s.to_string()) else {
-            bevy::log::trace!("apply_one_document: skipping doc missing key '{}'", key_field);
+        let Some(key) = doc
+            .get(key_field)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+        else {
+            bevy::log::trace!(
+                "apply_one_document: skipping doc missing key '{}'",
+                key_field
+            );
             return;
         };
         let version = doc
@@ -64,7 +71,11 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
         };
 
         if existed && !allow_overwrite {
-            bevy::log::trace!("apply_one_document: skip overwrite entity={:?} key={}", entity, key);
+            bevy::log::trace!(
+                "apply_one_document: skip overwrite entity={:?} key={}",
+                entity,
+                key
+            );
             return;
         }
 
@@ -79,7 +90,11 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                 if let Some(val) = doc.get(comp_name) {
                     if let Some(deser) = session.component_deserializers.get(comp_name) {
                         if let Err(e) = deser(world, entity, val.clone()) {
-                            bevy::log::error!("Failed to deserialize component {}: {}", comp_name, e);
+                            bevy::log::error!(
+                                "Failed to deserialize component {}: {}",
+                                comp_name,
+                                e
+                            );
                         }
                     }
                 }
@@ -88,7 +103,11 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
             for (registered_name, deser) in session.component_deserializers.iter() {
                 if let Some(val) = doc.get(registered_name) {
                     if let Err(e) = deser(world, entity, val.clone()) {
-                        bevy::log::error!("Failed to deserialize component {}: {}", registered_name, e);
+                        bevy::log::error!(
+                            "Failed to deserialize component {}: {}",
+                            registered_name,
+                            e
+                        );
                     }
                 }
             }
@@ -118,18 +137,28 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                 .chunks(CHUNK_SIZE)
                 .map(|chunk| chunk.to_vec())
                 .collect();
-                
+
             chunks.into_par_iter().for_each(|chunk| {
                 // Create a single operation that processes a chunk of documents
                 let comps = explicit_components.clone();
                 let allow = allow_overwrite;
                 let key_field = key_field.to_string();
-                
+
                 self.ops.push(Box::new(move |world: &mut World| {
-                    bevy::log::trace!("PQ::process_documents/op: applying deferred chunk of {} documents", chunk.len());
+                    bevy::log::trace!(
+                        "PQ::process_documents/op: applying deferred chunk of {} documents",
+                        chunk.len()
+                    );
                     world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                         for doc in &chunk {
-                            Self::apply_one_document(world, &mut session, doc, &comps, allow, &key_field);
+                            Self::apply_one_document(
+                                world,
+                                &mut session,
+                                doc,
+                                &comps,
+                                allow,
+                                &key_field,
+                            );
                         }
                     });
                 }));
@@ -142,10 +171,20 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
             let key_field = key_field.to_string();
 
             self.ops.push(Box::new(move |world: &mut World| {
-                bevy::log::trace!("PQ::process_documents/op: applying deferred batch of {} documents", docs.len());
+                bevy::log::trace!(
+                    "PQ::process_documents/op: applying deferred batch of {} documents",
+                    docs.len()
+                );
                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                     for doc in &docs {
-                        Self::apply_one_document(world, &mut session, doc, &comps, allow, &key_field);
+                        Self::apply_one_document(
+                            world,
+                            &mut session,
+                            doc,
+                            &comps,
+                            allow,
+                            &key_field,
+                        );
                     }
                 });
             }));
@@ -199,10 +238,14 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
             CachePolicy::ForceRefresh => true,
             CachePolicy::UseCache => !self.cache.contains(query_hash),
         };
-        
+
         bevy::log::debug!(
             "PQ::execute_combined_load: should_query_db={} presence_with={:?} presence_without={:?} fetch_only={:?} expr={:?}",
-            should_query_db, presence_with, presence_without, fetch_only, value_filters
+            should_query_db,
+            presence_with,
+            presence_without,
+            fetch_only,
+            value_filters
         );
 
         if should_query_db {
@@ -213,14 +256,16 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                 presence_without: presence_without.clone(),
                 fetch_only: fetch_only.clone(),
                 value_filters: value_filters.clone(),
-                return_full_docs: force_full_docs || (presence_with.is_empty() && presence_without.is_empty()),
+                return_full_docs: force_full_docs
+                    || (presence_with.is_empty() && presence_without.is_empty()),
                 pagination: take_pagination_config(),
             };
-            
+
             // Check if pagination is active
             if let Some(page_size) = spec.pagination.as_ref().map(|p| p.page_size) {
                 // Determine allow_overwrite based on cache policy or presence filters
-                let allow_overwrite = matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_with.is_empty();
+                let allow_overwrite =
+                    matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_with.is_empty();
                 self.process_paginated_load(&spec, page_size, allow_overwrite);
             } else {
                 // Original single-load code
@@ -231,14 +276,15 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                             documents.len(),
                             self.world_ptr.is_some()
                         );
-                        let allow_overwrite =
-                            matches!(cache_policy, CachePolicy::ForceRefresh) || !presence_with.is_empty();
+                        let allow_overwrite = matches!(cache_policy, CachePolicy::ForceRefresh)
+                            || !presence_with.is_empty();
 
-                        let comps_to_deser: Vec<&'static str> = if presence_with.is_empty() && presence_without.is_empty() {
-                            Vec::new()
-                        } else {
-                            fetch_only.clone()
-                        };
+                        let comps_to_deser: Vec<&'static str> =
+                            if presence_with.is_empty() && presence_without.is_empty() {
+                                Vec::new()
+                            } else {
+                                fetch_only.clone()
+                            };
 
                         if let Some(ptr_res) = &self.world_ptr {
                             let world: &mut World = ptr_res.as_world_mut();
@@ -247,7 +293,14 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                             // Apply all documents in a single scope to minimize world locking overhead.
                             world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                                 for doc in &documents {
-                                    Self::apply_one_document(world, &mut session, doc, &comps_to_deser, allow_overwrite, key_field);
+                                    Self::apply_one_document(
+                                        world,
+                                        &mut session,
+                                        doc,
+                                        &comps_to_deser,
+                                        allow_overwrite,
+                                        key_field,
+                                    );
                                 }
 
                                 // Fetch resources once alongside the entity loads.
@@ -257,7 +310,10 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                                     .clone();
                                 let db = self.db.0.clone();
                                 bevy::log::trace!("PQ::immediate_apply: fetching resources");
-                                rt.block_on(session.fetch_and_insert_resources(&*db, &store, world)).ok();
+                                rt.block_on(
+                                    session.fetch_and_insert_resources(&*db, &store, world),
+                                )
+                                .ok();
                             });
 
                             bevy::log::trace!("PQ::immediate_apply: world.flush()");
@@ -268,7 +324,10 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
 
                             // Compare what the inner Query vs a fresh QueryState sees after immediate apply.
                             let inner_cnt = self.query.iter().count();
-                            bevy::log::trace!("PQ::immediate_apply: inner_query_iter_count={}", inner_cnt);
+                            bevy::log::trace!(
+                                "PQ::immediate_apply: inner_query_iter_count={}",
+                                inner_cnt
+                            );
 
                             // Warm-up current archetypes count for diagnostics via fresh QueryState
                             let lhs_cnt = {
@@ -276,10 +335,15 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                                     bevy::ecs::query::QueryState::new(world);
                                 qs.iter(&*world).count()
                             };
-                            bevy::log::trace!("PQ::immediate_apply: fresh_qstate_iter_count={}", lhs_cnt);
-
+                            bevy::log::trace!(
+                                "PQ::immediate_apply: fresh_qstate_iter_count={}",
+                                lhs_cnt
+                            );
                         } else {
-                            bevy::log::trace!("PQ::execute_combined_load: deferring {} docs", documents.len());
+                            bevy::log::trace!(
+                                "PQ::execute_combined_load: deferring {} docs",
+                                documents.len()
+                            );
                             self.process_documents(documents, &comps_to_deser, allow_overwrite);
 
                             // Also fetch resources alongside any query (deferred)
@@ -303,17 +367,20 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                     }
                 }
             }
-            
+
             // Cache the query hash if successful
             if !matches!(cache_policy, CachePolicy::ForceRefresh) {
                 bevy::log::trace!("PQ::execute_combined_load: caching hash {:#x}", query_hash);
                 self.cache.insert(query_hash);
             }
         } else {
-            bevy::log::trace!("Skipping DB query - using cached results for hash={:#x}", query_hash);
+            bevy::log::trace!(
+                "Skipping DB query - using cached results for hash={:#x}",
+                query_hash
+            );
         }
     }
-    
+
     fn process_paginated_load(
         &mut self,
         spec: &PersistenceQuerySpecification,
@@ -321,7 +388,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
         allow_overwrite: bool,
     ) {
         bevy::log::debug!("Processing paginated load with page_size={}", page_size);
-        
+
         // First get total count
         let total = match self.runtime.block_on(self.db.0.count_documents(spec)) {
             Ok(count) => count,
@@ -330,10 +397,10 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                 return;
             }
         };
-        
+
         let pages = (total + page_size - 1) / page_size; // Ceiling division
         bevy::log::debug!("Paginated load: total={} pages={}", total, pages);
-        
+
         // Process each page
         let mut processed = 0;
         for page in 0..pages {
@@ -342,21 +409,29 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static>
                 page_size,
                 page_number: page,
             });
-            
-            match self.runtime.block_on(self.db.0.execute_documents(&page_spec)) {
+
+            match self
+                .runtime
+                .block_on(self.db.0.execute_documents(&page_spec))
+            {
                 Ok(documents) => {
                     processed += documents.len();
                     bevy::log::debug!(
                         "Loaded page {}/{} with {} documents (total processed: {}/{})",
-                        page + 1, pages, documents.len(), processed, total
+                        page + 1,
+                        pages,
+                        documents.len(),
+                        processed,
+                        total
                     );
-                    
-                    let comps_to_deser = if spec.presence_with.is_empty() && spec.presence_without.is_empty() {
-                        Vec::new()
-                    } else {
-                        spec.fetch_only.clone()
-                    };
-                    
+
+                    let comps_to_deser =
+                        if spec.presence_with.is_empty() && spec.presence_without.is_empty() {
+                            Vec::new()
+                        } else {
+                            spec.fetch_only.clone()
+                        };
+
                     self.process_documents(documents, &comps_to_deser, allow_overwrite);
                 }
                 Err(e) => {

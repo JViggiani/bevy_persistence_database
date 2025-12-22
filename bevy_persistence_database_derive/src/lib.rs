@@ -2,23 +2,20 @@
 extern crate ctor;
 
 use proc_macro::TokenStream;
-use quote::{quote, format_ident};
-use syn::{
-    parse_macro_input,
-    punctuated::Punctuated,
-    token::Comma,
-    Item, Meta,
-    LitStr,
-    ItemFn,
-};
+use quote::{format_ident, quote};
+use syn::{Item, ItemFn, LitStr, Meta, parse_macro_input, punctuated::Punctuated, token::Comma};
 
 // New attribute macro: single annotation for derive + registration
 #[proc_macro_attribute]
 pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parse component/resource list: e.g. #[persist(component,resource)]
     let metas = parse_macro_input!(attr with Punctuated::<Meta, Comma>::parse_terminated);
-    let is_comp = metas.iter().any(|m| matches!(m, Meta::Path(p) if p.is_ident("component")));
-    let is_res  = metas.iter().any(|m| matches!(m, Meta::Path(p) if p.is_ident("resource")));
+    let is_comp = metas
+        .iter()
+        .any(|m| matches!(m, Meta::Path(p) if p.is_ident("component")));
+    let is_res = metas
+        .iter()
+        .any(|m| matches!(m, Meta::Path(p) if p.is_ident("resource")));
 
     // No effect if neither
     if !is_comp && !is_res {
@@ -54,14 +51,14 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Registration boilerplate
-    let name       = match &ast {
+    let name = match &ast {
         Item::Struct(s) => &s.ident,
-        Item::Enum(e)   => &e.ident,
+        Item::Enum(e) => &e.ident,
         _ => unreachable!(),
     };
     let register_fn = format_ident!("__persist_register_{}", name);
     let ctor_fn = format_ident!("__persist_ctor_{}", name);
-    let crate_path  = get_crate_path();
+    let crate_path = get_crate_path();
 
     let registration = if is_comp {
         quote! {
@@ -77,7 +74,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                     app.add_systems(
                         bevy::app::PostUpdate,
                         #crate_path::persistence_plugin::auto_dirty_tracking_entity_system::<#name>
-                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::PreCommit),
+                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::ChangeDetection),
                     );
                 }
             }
@@ -96,7 +93,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                     app.add_systems(
                         bevy::app::PostUpdate,
                         #crate_path::persistence_plugin::auto_dirty_tracking_resource_system::<#name>
-                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::PreCommit),
+                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::ChangeDetection),
                     );
                 }
             }
@@ -167,7 +164,9 @@ pub fn db_matrix_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .collect();
 
     // Helper to build a backend-gated test
-    let gen_backend_test = |suffix: &str, backend_expr: proc_macro2::TokenStream, cfg: proc_macro2::TokenStream| {
+    let gen_backend_test = |suffix: &str,
+                            backend_expr: proc_macro2::TokenStream,
+                            cfg: proc_macro2::TokenStream| {
         let fn_name = format_ident!("{}_{}", orig_name, suffix);
         let attrs = &passthrough_attrs;
 
@@ -249,7 +248,7 @@ pub fn db_matrix_test(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn get_crate_path() -> proc_macro2::TokenStream {
-    use proc_macro_crate::{crate_name, FoundCrate};
+    use proc_macro_crate::{FoundCrate, crate_name};
 
     // First check if we're in the bevy_persistence_database crate
     if let Ok(FoundCrate::Itself) = crate_name("bevy_persistence_database") {

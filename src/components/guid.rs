@@ -1,7 +1,7 @@
 //! A component for storing a globally-unique ID for an entity.
 
 use bevy::prelude::Component;
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// A globally-unique identifier for an entity, used to link the Bevy `Entity`
 /// to its corresponding document in the database. This is typically the document key.

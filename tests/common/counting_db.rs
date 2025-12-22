@@ -1,8 +1,13 @@
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-use bevy_persistence_database::{DatabaseConnection, PersistenceError, TransactionOperation, DocumentKind};
 use bevy_persistence_database::query::persistence_query_specification::PersistenceQuerySpecification;
+use bevy_persistence_database::{
+    DatabaseConnection, DocumentKind, PersistenceError, TransactionOperation,
+};
 use futures::future::BoxFuture;
 use serde_json::Value;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 /// Wrapper that counts execute_documents calls and forwards to a real backend.
 #[derive(Debug)]
@@ -76,7 +81,11 @@ impl DatabaseConnection for CountingDbConnection {
         self.inner.fetch_resource(store, resource_name)
     }
 
-    fn clear_store(&self, store: &str, kind: DocumentKind) -> BoxFuture<'static, Result<(), PersistenceError>> {
+    fn clear_store(
+        &self,
+        store: &str,
+        kind: DocumentKind,
+    ) -> BoxFuture<'static, Result<(), PersistenceError>> {
         self.inner.clear_store(store, kind)
     }
 
@@ -86,7 +95,7 @@ impl DatabaseConnection for CountingDbConnection {
     ) -> BoxFuture<'static, Result<usize, PersistenceError>> {
         // Increment the counter since this is a DB operation
         self.queries.fetch_add(1, Ordering::SeqCst);
-        
+
         // Forward the call to the inner connection
         self.inner.count_documents(spec)
     }

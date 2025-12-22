@@ -1,6 +1,6 @@
 //! A marker trait for components and resources that should be persisted.
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 
 /// A marker trait for components and resources that should be persisted.
 ///

@@ -1,18 +1,24 @@
+use crate::common::CountingDbConnection;
+use crate::common::*;
 use bevy::prelude::*;
 use bevy_persistence_database::{
-    commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
-    DatabaseConnection, db::connection::DatabaseConnectionResource,
+    DatabaseConnection, Guid, PersistentQuery, commit_sync,
+    db::connection::DatabaseConnectionResource, persistence_plugin::PersistencePlugins,
 };
-use crate::common::*;
-use crate::common::CountingDbConnection;
 use bevy_persistence_database_derive::db_matrix_test;
-use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 // System that uses query twice to test caching
-fn test_cached_query_system(mut query1: PersistentQuery<&Health>, mut query2: PersistentQuery<&Health>) {
+fn test_cached_query_system(
+    mut query1: PersistentQuery<&Health>,
+    mut query2: PersistentQuery<&Health>,
+) {
     // First query execution - should hit database
     let _ = query1.ensure_loaded();
-    
+
     // Second execution of equivalent query - should use cache
     let _ = query2.ensure_loaded();
 }
@@ -38,27 +44,36 @@ fn test_persistent_query_caching() {
     // 2. Create a new app that will use the PersistentQuery with cache tracking
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins::new(db.clone()));
-    
+
     // Wrap the real DB so we can count execute_documents() calls
     let query_count = Arc::new(AtomicUsize::new(0));
-    let counting = Arc::new(CountingDbConnection::new(db.clone(), query_count.clone())) as Arc<dyn DatabaseConnection>;
+    let counting = Arc::new(CountingDbConnection::new(db.clone(), query_count.clone()))
+        as Arc<dyn DatabaseConnection>;
     app2.insert_resource(DatabaseConnectionResource(counting));
-    
+
     // Add system that uses the PersistentQuery twice
     app2.add_systems(bevy::prelude::Update, test_cached_query_system);
-    
+
     // Run the app to execute the system
     app2.update();
-    
+
     // The second identical query should use cache, so only 1 DB call
-    assert_eq!(query_count.load(Ordering::SeqCst), 1, "Database should only be queried once due to caching");
-    
+    assert_eq!(
+        query_count.load(Ordering::SeqCst),
+        1,
+        "Database should only be queried once due to caching"
+    );
+
     // Run again with force refresh to verify it bypasses cache
     app2.add_systems(bevy::prelude::Update, test_force_refresh_system);
     app2.update();
-    
+
     // Now we should see a second query
-    assert_eq!(query_count.load(Ordering::SeqCst), 2, "Force refresh should bypass cache and query again");
+    assert_eq!(
+        query_count.load(Ordering::SeqCst),
+        2,
+        "Force refresh should bypass cache and query again"
+    );
 }
 
 #[derive(bevy::prelude::Resource, Default)]
@@ -104,9 +119,7 @@ fn system_second_load(
 ) {
     if let Some(e) = state.entity {
         if let Ok(g) = q_guid.get(e) {
-            let _ = pq
-                .filter(Guid::key_field().eq(g.id()))
-                .ensure_loaded();
+            let _ = pq.filter(Guid::key_field().eq(g.id())).ensure_loaded();
         }
     }
 }
@@ -142,7 +155,10 @@ fn test_entity_not_overwritten_on_second_query_without_refresh() {
     // Read back health using the captured entity
     let state = app2.world().resource::<TestState>();
     let entity = state.entity.expect("Entity should be captured");
-    let health = app2.world().get::<Health>(entity).expect("Health not found");
+    let health = app2
+        .world()
+        .get::<Health>(entity)
+        .expect("Health not found");
     assert_eq!(health.value, 123, "Local mutation should be preserved");
 }
 
@@ -169,7 +185,9 @@ fn test_force_refresh_overwrites() {
     // Load into app2 via system, then mutate locally
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins::new(db.clone()));
-    fn load(mut pq: PersistentQuery<&Health, With<Health>>) { let _ = pq.ensure_loaded(); }
+    fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
+        let _ = pq.ensure_loaded();
+    }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
 

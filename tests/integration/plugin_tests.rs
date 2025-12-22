@@ -1,13 +1,13 @@
-use bevy::prelude::{App, Messages, IntoScheduleConfigs};
-use bevy::MinimalPlugins;
-use bevy_persistence_database::{
-    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, persistence_plugin::PersistencePlugins, Persist,
-    TriggerCommit,
-    commit_sync, PersistentQuery, persistence_plugin::PersistenceSystemSet,
-};
 use crate::common::*;
-use std::sync::Arc;
+use bevy::MinimalPlugins;
+use bevy::prelude::{App, IntoScheduleConfigs, Messages};
+use bevy_persistence_database::{
+    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, Persist, PersistentQuery,
+    TriggerCommit, commit_sync, persistence_plugin::PersistencePlugins,
+    persistence_plugin::PersistenceSystemSet,
+};
 use bevy_persistence_database_derive::db_matrix_test;
+use std::sync::Arc;
 
 #[test]
 fn test_trigger_commit_clears_event_queue() {
@@ -25,7 +25,11 @@ fn test_trigger_commit_clears_event_queue() {
     app.add_plugins(PersistencePlugins::new(db.clone()));
 
     // GIVEN multiple TriggerCommit events are sent
-    let trigger = TriggerCommit { correlation_id: None, target_connection: db.clone(), store: TEST_STORE.to_string() };
+    let trigger = TriggerCommit {
+        correlation_id: None,
+        target_connection: db.clone(),
+        store: TEST_STORE.to_string(),
+    };
     app.world_mut().write_message(trigger.clone());
     app.world_mut().write_message(trigger);
 
@@ -52,7 +56,11 @@ fn test_event_triggers_commit_and_persists_data() {
     app.update(); // Run change detection
 
     // WHEN a TriggerCommit event is sent
-    app.world_mut().write_message(TriggerCommit { correlation_id: None, target_connection: db.clone(), store: TEST_STORE.to_string() });
+    app.world_mut().write_message(TriggerCommit {
+        correlation_id: None,
+        target_connection: db.clone(),
+        store: TEST_STORE.to_string(),
+    });
 
     // AND we manually drive the app loop until the commit is complete
     loop {
@@ -73,7 +81,10 @@ fn test_event_triggers_commit_and_persists_data() {
     let event = events.drain().next().unwrap();
     assert!(event.0.is_ok());
 
-    let guid = app.world().get::<Guid>(entity_id).expect("Guid after commit");
+    let guid = app
+        .world()
+        .get::<Guid>(entity_id)
+        .expect("Guid after commit");
     let health_json = run_async(db.fetch_component(TEST_STORE, guid.id(), Health::name()))
         .expect("DB fetch failed")
         .expect("Component not found in DB");
@@ -91,22 +102,34 @@ fn test_queued_commit_persists_all_changes() {
     // GIVEN an initial entity is created and a commit is triggered
     let entity_a = app.world_mut().spawn(Health { value: 100 }).id();
     app.update();
-    app.world_mut().write_message(TriggerCommit { correlation_id: None, target_connection: db.clone(), store: TEST_STORE.to_string() });
+    app.world_mut().write_message(TriggerCommit {
+        correlation_id: None,
+        target_connection: db.clone(),
+        store: TEST_STORE.to_string(),
+    });
     app.update(); // Start the first commit
 
     // WHEN another entity is created and a second commit is triggered
     // before the first one has completed
     let entity_b = app.world_mut().spawn(Position { x: 50.0, y: 50.0 }).id();
     app.update();
-    app.world_mut().write_message(TriggerCommit { correlation_id: None, target_connection: db.clone(), store: TEST_STORE.to_string() });
+    app.world_mut().write_message(TriggerCommit {
+        correlation_id: None,
+        target_connection: db.clone(),
+        store: TEST_STORE.to_string(),
+    });
     app.update(); // This should queue the second commit
 
     // THEN the status should be InProgressAndDirty
-    assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::InProgressAndDirty);
+    assert_eq!(
+        *app.world().resource::<CommitStatus>(),
+        CommitStatus::InProgressAndDirty
+    );
 
     // AND we drive the app loop until two commits have completed
     let mut completed_count = 0;
-    for _ in 0..20 { // Loop with a timeout
+    for _ in 0..20 {
+        // Loop with a timeout
         app.update();
         let mut events = app.world_mut().resource_mut::<Messages<CommitCompleted>>();
         if !events.is_empty() {
@@ -119,7 +142,7 @@ fn test_queued_commit_persists_all_changes() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert_eq!(completed_count, 2, "Expected two commits to complete");
-    
+
     // AND the final status is Idle
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 
@@ -128,7 +151,10 @@ fn test_queued_commit_persists_all_changes() {
     let health_json = run_async(db.fetch_component(TEST_STORE, guid_a.id(), Health::name()))
         .unwrap()
         .unwrap();
-    assert_eq!(serde_json::from_value::<Health>(health_json).unwrap().value, 100);
+    assert_eq!(
+        serde_json::from_value::<Health>(health_json).unwrap().value,
+        100
+    );
 
     let guid_b = app.world().get::<Guid>(entity_b).unwrap();
     let pos_json = run_async(db.fetch_component(TEST_STORE, guid_b.id(), Position::name()))
@@ -146,7 +172,8 @@ fn test_postupdate_load_applies_next_frame() {
     let mut app1 = App::new();
     app1.add_plugins(MinimalPlugins);
     app1.add_plugins(PersistencePlugins::new(db.clone()));
-    app1.world_mut().spawn((Health { value: 7 }, Position { x: 1.0, y: 2.0 }));
+    app1.world_mut()
+        .spawn((Health { value: 7 }, Position { x: 1.0, y: 2.0 }));
     app1.update();
     commit_sync(&mut app1, db.clone(), TEST_STORE).expect("commit failed");
 
@@ -166,10 +193,18 @@ fn test_postupdate_load_applies_next_frame() {
     // First frame: load queued and applied within PostUpdate; data is visible immediately
     app2.update();
     let mut q0 = app2.world_mut().query::<&Health>();
-    assert_eq!(q0.iter(&app2.world()).count(), 1, "PostUpdate load should be visible in the same frame");
+    assert_eq!(
+        q0.iter(&app2.world()).count(),
+        1,
+        "PostUpdate load should be visible in the same frame"
+    );
 
     // Second frame: remains visible
     app2.update();
     let mut q1 = app2.world_mut().query::<(&Health, &Position)>();
-    assert_eq!(q1.iter(&app2.world()).count(), 1, "Loaded entity should be present");
+    assert_eq!(
+        q1.iter(&app2.world()).count(),
+        1,
+        "Loaded entity should be present"
+    );
 }

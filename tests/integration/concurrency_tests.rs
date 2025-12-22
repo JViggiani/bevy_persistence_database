@@ -1,14 +1,14 @@
-use bevy::prelude::App;
 use bevy::MinimalPlugins;
+use bevy::prelude::App;
 use bevy_persistence_database::{
-    commit_sync, DocumentKind, Guid, PersistenceError, persistence_plugin::PersistencePlugins,
-    TransactionOperation, BEVY_PERSISTENCE_VERSION_FIELD, Persist,
+    BEVY_PERSISTENCE_VERSION_FIELD, DocumentKind, Guid, Persist, PersistenceError,
+    TransactionOperation, commit_sync, persistence_plugin::PersistencePlugins,
 };
 use serde_json::json;
 
 use crate::common::*;
-use bevy_persistence_database::PersistentQuery;
 use bevy::prelude::With;
+use bevy_persistence_database::PersistentQuery;
 use bevy_persistence_database::query::persistence_query::PersistenceQuery;
 use bevy_persistence_database_derive::db_matrix_test;
 
@@ -38,24 +38,26 @@ fn test_update_conflict_is_detected() {
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
-        obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
+        obj.insert(
+            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+            json!(version + 1),
+        );
     }
 
     // Execute direct update
-    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
-        store: TEST_STORE.to_string(),
-        kind: DocumentKind::Entity,
-        key: key.clone(),
-        expected_current_version: version,
-        patch: updated_doc,
-    }]))
+    run_async(
+        db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+            store: TEST_STORE.to_string(),
+            kind: DocumentKind::Entity,
+            key: key.clone(),
+            expected_current_version: version,
+            patch: updated_doc,
+        }]),
+    )
     .expect("Direct DB update failed");
 
     // 3. In the app, modify the same entity
-    app.world_mut()
-        .get_mut::<Health>(entity_id)
-        .unwrap()
-        .value = 200;
+    app.world_mut().get_mut::<Health>(entity_id).unwrap().value = 200;
     app.update();
 
     // 4. Attempt to commit - should fail with conflict
@@ -85,16 +87,21 @@ fn test_delete_conflict_is_detected() {
 
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
-        obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
+        obj.insert(
+            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+            json!(version + 1),
+        );
     }
 
-    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
-        store: TEST_STORE.to_string(),
-        kind: DocumentKind::Entity,
-        key: key.clone(),
-        expected_current_version: version,
-        patch: updated_doc,
-    }]))
+    run_async(
+        db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+            store: TEST_STORE.to_string(),
+            kind: DocumentKind::Entity,
+            key: key.clone(),
+            expected_current_version: version,
+            patch: updated_doc,
+        }]),
+    )
     .expect("Direct version update failed");
 
     // 3. In the app, despawn the entity
@@ -131,23 +138,25 @@ fn test_conflict_strategy_last_write_wins() {
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
-        obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
+        obj.insert(
+            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+            json!(version + 1),
+        );
     }
 
-    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
-        store: TEST_STORE.to_string(),
-        kind: DocumentKind::Entity,
-        key: key.clone(),
-        expected_current_version: version,
-        patch: updated_doc,
-    }]))
+    run_async(
+        db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+            store: TEST_STORE.to_string(),
+            kind: DocumentKind::Entity,
+            key: key.clone(),
+            expected_current_version: version,
+            patch: updated_doc,
+        }]),
+    )
     .expect("Direct DB update failed");
 
     // 3. In the app, modify Position
-    app.world_mut()
-        .get_mut::<Position>(entity_id)
-        .unwrap()
-        .x = 50.0;
+    app.world_mut().get_mut::<Position>(entity_id).unwrap().x = 50.0;
     app.update();
 
     // 4. First commit attempt - expect conflict
@@ -156,7 +165,8 @@ fn test_conflict_strategy_last_write_wins() {
 
     // 5. Implement "last write wins" strategy:
     // Reload the entity by key inside the same app using a system-param PersistentQuery.
-    #[derive(bevy::prelude::Resource)] struct KeyRes(String);
+    #[derive(bevy::prelude::Resource)]
+    struct KeyRes(String);
     fn reload_by_key(
         pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>,
         key: bevy::prelude::Res<KeyRes>,
@@ -232,31 +242,32 @@ fn test_conflict_strategy_three_way_merge() {
     let key = guid.id().to_string();
 
     // 2. Simulate Session 1's change ("Theirs"): Directly update Health in DB.
-    let (doc, version) = run_async(db.fetch_document(TEST_STORE, &key)).unwrap().unwrap();
+    let (doc, version) = run_async(db.fetch_document(TEST_STORE, &key))
+        .unwrap()
+        .unwrap();
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
-        obj.insert(BEVY_PERSISTENCE_VERSION_FIELD.to_string(), json!(version + 1));
+        obj.insert(
+            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
+            json!(version + 1),
+        );
     }
-    run_async(db.execute_transaction(vec![TransactionOperation::UpdateDocument {
-        store: TEST_STORE.to_string(),
-        kind: DocumentKind::Entity,
-        key: key.clone(),
-        expected_current_version: version,
-        patch: updated_doc,
-    }]))
+    run_async(
+        db.execute_transaction(vec![TransactionOperation::UpdateDocument {
+            store: TEST_STORE.to_string(),
+            kind: DocumentKind::Entity,
+            key: key.clone(),
+            expected_current_version: version,
+            patch: updated_doc,
+        }]),
+    )
     .expect("Direct DB update for Health failed");
 
     // 3. Simulate Session 2's change ("Mine"): In the app, modify Position.
     let my_position_change = Position { x: 50.0, y: 50.0 };
-    app.world_mut()
-        .get_mut::<Position>(entity_id)
-        .unwrap()
-        .x = my_position_change.x;
-    app.world_mut()
-        .get_mut::<Position>(entity_id)
-        .unwrap()
-        .y = my_position_change.y;
+    app.world_mut().get_mut::<Position>(entity_id).unwrap().x = my_position_change.x;
+    app.world_mut().get_mut::<Position>(entity_id).unwrap().y = my_position_change.y;
     app.update();
 
     // 4. Attempt to commit Session 2's change, expecting a conflict.
@@ -295,9 +306,12 @@ fn test_conflict_strategy_three_way_merge() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Merged commit failed");
 
     // 7. Assert that the final document has both the new Health and new Position.
-    let (final_doc, _) = run_async(db.fetch_document(TEST_STORE, &key)).unwrap().unwrap();
+    let (final_doc, _) = run_async(db.fetch_document(TEST_STORE, &key))
+        .unwrap()
+        .unwrap();
     let final_health: Health = serde_json::from_value(final_doc[Health::name()].clone()).unwrap();
-    let final_position: Position = serde_json::from_value(final_doc[Position::name()].clone()).unwrap();
+    let final_position: Position =
+        serde_json::from_value(final_doc[Position::name()].clone()).unwrap();
 
     assert_eq!(final_health.value, 150, "Health change was not merged");
     assert_eq!(final_position.x, 50.0, "Position change was not merged");

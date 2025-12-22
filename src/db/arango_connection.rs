@@ -1,22 +1,25 @@
 //! Real ArangoDB backend: implements `DatabaseConnection` using `arangors`.
 //! Inject this into `PersistenceSession` in production to persist components.
 
+use crate::db::DatabaseConnection;
+use crate::db::connection::{
+    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DocumentKind, PersistenceError,
+    TransactionOperation,
+};
+use crate::db::shared::{GroupedOperations, OperationType, check_operation_success};
+use crate::query::filter_expression::{BinaryOperator, FilterExpression};
+use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use arangors::{
-    client::reqwest::ReqwestClient,
     AqlQuery, ClientError, Connection, Database,
+    client::reqwest::ReqwestClient,
     transaction::{TransactionCollections, TransactionSettings},
 };
-use crate::db::DatabaseConnection;
-use crate::db::connection::{PersistenceError, TransactionOperation, DocumentKind, BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD};
-use crate::query::persistence_query_specification::PersistenceQuerySpecification;
-use crate::query::filter_expression::{FilterExpression, BinaryOperator};
-use futures::future::BoxFuture;
 use futures::FutureExt;
+use futures::future::BoxFuture;
+use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use once_cell::sync::Lazy;
-use crate::db::shared::{GroupedOperations, check_operation_success, OperationType};
 
 // Local helper to pull out the version field
 fn extract_version(doc: &Value, key: &str) -> Result<u64, PersistenceError> {
@@ -39,7 +42,10 @@ const AQL_BIND_STORE: &str = "store";
 const AQL_BIND_KIND: &str = "kind";
 
 fn insert_store_bind(bind_vars: &mut HashMap<String, Value>, store: &str) {
-    bind_vars.insert(format!("@{}", AQL_BIND_STORE), Value::String(store.to_string()));
+    bind_vars.insert(
+        format!("@{}", AQL_BIND_STORE),
+        Value::String(store.to_string()),
+    );
 }
 
 /// A real ArangoDB backend for `DatabaseConnection`.
@@ -49,8 +55,7 @@ pub struct ArangoDbConnection {
 
 impl fmt::Debug for ArangoDbConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ArangoDbConnection")
-            .finish_non_exhaustive()
+        f.debug_struct("ArangoDbConnection").finish_non_exhaustive()
     }
 }
 
@@ -74,7 +79,10 @@ impl ArangoDbConnection {
         Ok(Self { db })
     }
 
-    async fn ensure_collection(db: &Database<ReqwestClient>, name: &str) -> Result<(), PersistenceError> {
+    async fn ensure_collection(
+        db: &Database<ReqwestClient>,
+        name: &str,
+    ) -> Result<(), PersistenceError> {
         match db.create_collection(name).await {
             Ok(_) => Ok(()),
             Err(e) => {
@@ -129,7 +137,10 @@ impl ArangoDbConnection {
                 bind_vars.insert(name.clone(), v.clone());
                 format!("@{}", name)
             }
-            FilterExpression::Field { component_name, field_name } => {
+            FilterExpression::Field {
+                component_name,
+                field_name,
+            } => {
                 if field_name.is_empty() {
                     format!("doc.`{}`", component_name)
                 } else {
@@ -164,11 +175,15 @@ impl ArangoDbConnection {
     ) -> String {
         let mut filters: Vec<String> = Vec::new();
 
-        bind_vars.insert(AQL_BIND_KIND.into(), Value::String(spec.kind.as_str().to_string()));
+        bind_vars.insert(
+            AQL_BIND_KIND.into(),
+            Value::String(spec.kind.as_str().to_string()),
+        );
         filters.push(format!("doc.`{}` == @{}", BEVY_TYPE_FIELD, AQL_BIND_KIND));
 
         if !spec.presence_with.is_empty() {
-            let s = spec.presence_with
+            let s = spec
+                .presence_with
                 .iter()
                 .map(|n| format!("doc.`{}` != null", n))
                 .collect::<Vec<_>>()
@@ -176,7 +191,8 @@ impl ArangoDbConnection {
             filters.push(format!("({})", s));
         }
         if !spec.presence_without.is_empty() {
-            let s = spec.presence_without
+            let s = spec
+                .presence_without
                 .iter()
                 .map(|n| format!("doc.`{}` == null", n))
                 .collect::<Vec<_>>()
@@ -208,17 +224,12 @@ impl ArangoDbConnection {
         let aql = if spec.return_full_docs {
             format!(
                 "FOR doc IN @@{}\n  {}\n  RETURN MERGE(doc, {{ \"{}\": doc.`{}` }})",
-                AQL_BIND_STORE,
-                filter,
-                key_field,
-                key_field
+                AQL_BIND_STORE, filter, key_field, key_field
             )
         } else {
             format!(
                 "FOR doc IN @@{}\n  {}\n  RETURN doc.{}",
-                AQL_BIND_STORE,
-                filter,
-                key_field
+                AQL_BIND_STORE, filter, key_field
             )
         };
 
@@ -260,7 +271,9 @@ impl ArangoDbConnection {
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
             match col.document::<Value>(&key).await {
                 Ok(doc) => {
-                    let matches_kind = doc.document.get(BEVY_TYPE_FIELD)
+                    let matches_kind = doc
+                        .document
+                        .get(BEVY_TYPE_FIELD)
                         .and_then(|v| v.as_str())
                         .map(|s| s == kind.as_str())
                         .unwrap_or(false);
@@ -308,15 +321,21 @@ impl DatabaseConnection for ArangoDbConnection {
         insert_store_bind(&mut bind_vars, &spec.store);
         let filter = Self::build_filter_static(&spec, &mut bind_vars, self.document_key_field());
         let mut aql = String::new();
-        aql.push_str(&format!("FOR doc IN @@{}\n  {}\n  RETURN doc.{}", AQL_BIND_STORE, filter, self.document_key_field()));
+        aql.push_str(&format!(
+            "FOR doc IN @@{}\n  {}\n  RETURN doc.{}",
+            AQL_BIND_STORE,
+            filter,
+            self.document_key_field()
+        ));
         async move {
             ArangoDbConnection::ensure_collection(&db, &spec.store).await?;
             let query = AqlQuery::builder()
                 .query(&aql)
                 .bind_vars(
-                    bind_vars.iter()
-                        .map(|(k,v)| (k.as_str(), v.clone()))
-                        .collect()
+                    bind_vars
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.clone()))
+                        .collect(),
                 )
                 .build();
             let result: Vec<String> = db
@@ -346,16 +365,22 @@ impl DatabaseConnection for ArangoDbConnection {
                 AQL_BIND_STORE, filter, kf, kf
             ));
         } else {
-            aql.push_str(&format!("FOR doc IN @@{}\n  {}\n  RETURN doc.{}", AQL_BIND_STORE, filter, self.document_key_field()));
+            aql.push_str(&format!(
+                "FOR doc IN @@{}\n  {}\n  RETURN doc.{}",
+                AQL_BIND_STORE,
+                filter,
+                self.document_key_field()
+            ));
         }
         async move {
             ArangoDbConnection::ensure_collection(&db, &spec.store).await?;
             let query = AqlQuery::builder()
                 .query(&aql)
                 .bind_vars(
-                    bind_vars.iter()
-                        .map(|(k,v)| (k.as_str(), v.clone()))
-                        .collect()
+                    bind_vars
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.clone()))
+                        .collect(),
                 )
                 .build();
             let result: Vec<Value> = db
@@ -386,9 +411,10 @@ impl DatabaseConnection for ArangoDbConnection {
             let query = AqlQuery::builder()
                 .query(&aql)
                 .bind_vars(
-                    bind_vars.iter()
-                        .map(|(k,v)| (k.as_str(), v.clone()))
-                        .collect()
+                    bind_vars
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.clone()))
+                        .collect(),
                 )
                 .build();
 
@@ -425,7 +451,9 @@ impl DatabaseConnection for ArangoDbConnection {
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
             match col.document::<Value>(&key).await {
                 Ok(doc) => {
-                    let matches_kind = doc.document.get(BEVY_TYPE_FIELD)
+                    let matches_kind = doc
+                        .document
+                        .get(BEVY_TYPE_FIELD)
                         .and_then(|v| v.as_str())
                         .map(|s| s == DocumentKind::Entity.as_str())
                         .unwrap_or(false);
@@ -456,7 +484,11 @@ impl DatabaseConnection for ArangoDbConnection {
         self.fetch_with_version(store, resource_name, DocumentKind::Resource)
     }
 
-    fn clear_store(&self, store: &str, _kind: DocumentKind) -> BoxFuture<'static, Result<(), PersistenceError>> {
+    fn clear_store(
+        &self,
+        store: &str,
+        _kind: DocumentKind,
+    ) -> BoxFuture<'static, Result<(), PersistenceError>> {
         self.clear_collection(store)
     }
 
@@ -471,12 +503,16 @@ impl DatabaseConnection for ArangoDbConnection {
             let store = operations
                 .get(0)
                 .map(|op| op.store().to_string())
-                .ok_or_else(|| PersistenceError::new("execute_transaction requires at least one operation"))?;
+                .ok_or_else(|| {
+                    PersistenceError::new("execute_transaction requires at least one operation")
+                })?;
             if store.is_empty() {
                 return Err(PersistenceError::new("store must be non-empty"));
             }
             if operations.iter().any(|op| op.store() != store) {
-                return Err(PersistenceError::new("all operations in a transaction must target the same store"));
+                return Err(PersistenceError::new(
+                    "all operations in a transaction must target the same store",
+                ));
             }
 
             ArangoDbConnection::ensure_collection(&db, &store).await?;
@@ -504,11 +540,20 @@ impl DatabaseConnection for ArangoDbConnection {
                     col = store,
                     key = key_attr
                 );
-                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert(AQL_BIND_DOCS.into(), Value::Array(groups.entity_creates.clone()));
+                let mut bind_vars: std::collections::HashMap<String, Value> =
+                    std::collections::HashMap::new();
+                bind_vars.insert(
+                    AQL_BIND_DOCS.into(),
+                    Value::Array(groups.entity_creates.clone()),
+                );
                 let query = AqlQuery::builder()
                     .query(&aql)
-                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
                     .build();
                 let keys: Vec<String> = trx
                     .aql_query(query)
@@ -532,18 +577,35 @@ impl DatabaseConnection for ArangoDbConnection {
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
                 );
-                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert(AQL_BIND_PATCHES.into(), Value::Array(groups.entity_updates.clone()));
-                bind_vars.insert(AQL_BIND_KIND.into(), Value::String(DocumentKind::Entity.as_str().to_string()));
+                let mut bind_vars: std::collections::HashMap<String, Value> =
+                    std::collections::HashMap::new();
+                bind_vars.insert(
+                    AQL_BIND_PATCHES.into(),
+                    Value::Array(groups.entity_updates.clone()),
+                );
+                bind_vars.insert(
+                    AQL_BIND_KIND.into(),
+                    Value::String(DocumentKind::Entity.as_str().to_string()),
+                );
                 let query = AqlQuery::builder()
                     .query(&aql)
-                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
                     .build();
                 let updated: Vec<String> = trx
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                check_operation_success(requested, updated, &OperationType::Update, store.as_str())?;
+                check_operation_success(
+                    requested,
+                    updated,
+                    &OperationType::Update,
+                    store.as_str(),
+                )?;
             }
 
             // 3) Entity deletes
@@ -561,18 +623,35 @@ impl DatabaseConnection for ArangoDbConnection {
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
                 );
-                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert(AQL_BIND_DELETES.into(), Value::Array(groups.entity_deletes.clone()));
-                bind_vars.insert(AQL_BIND_KIND.into(), Value::String(DocumentKind::Entity.as_str().to_string()));
+                let mut bind_vars: std::collections::HashMap<String, Value> =
+                    std::collections::HashMap::new();
+                bind_vars.insert(
+                    AQL_BIND_DELETES.into(),
+                    Value::Array(groups.entity_deletes.clone()),
+                );
+                bind_vars.insert(
+                    AQL_BIND_KIND.into(),
+                    Value::String(DocumentKind::Entity.as_str().to_string()),
+                );
                 let query = AqlQuery::builder()
                     .query(&aql)
-                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
                     .build();
                 let removed: Vec<String> = trx
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                check_operation_success(requested, removed, &OperationType::Delete, store.as_str())?;
+                check_operation_success(
+                    requested,
+                    removed,
+                    &OperationType::Delete,
+                    store.as_str(),
+                )?;
             }
 
             // 4) Resource creates
@@ -582,11 +661,20 @@ impl DatabaseConnection for ArangoDbConnection {
                     bind = AQL_BIND_DOCS,
                     col = store
                 );
-                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert(AQL_BIND_DOCS.into(), Value::Array(groups.resource_creates.clone()));
+                let mut bind_vars: std::collections::HashMap<String, Value> =
+                    std::collections::HashMap::new();
+                bind_vars.insert(
+                    AQL_BIND_DOCS.into(),
+                    Value::Array(groups.resource_creates.clone()),
+                );
                 let query = AqlQuery::builder()
                     .query(&aql)
-                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
                     .build();
                 let _: Vec<Value> = trx
                     .aql_query(query)
@@ -609,18 +697,35 @@ impl DatabaseConnection for ArangoDbConnection {
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
                 );
-                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert(AQL_BIND_PATCHES.into(), Value::Array(groups.resource_updates.clone()));
-                bind_vars.insert(AQL_BIND_KIND.into(), Value::String(DocumentKind::Resource.as_str().to_string()));
+                let mut bind_vars: std::collections::HashMap<String, Value> =
+                    std::collections::HashMap::new();
+                bind_vars.insert(
+                    AQL_BIND_PATCHES.into(),
+                    Value::Array(groups.resource_updates.clone()),
+                );
+                bind_vars.insert(
+                    AQL_BIND_KIND.into(),
+                    Value::String(DocumentKind::Resource.as_str().to_string()),
+                );
                 let query = AqlQuery::builder()
                     .query(&aql)
-                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
                     .build();
                 let updated: Vec<String> = trx
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                check_operation_success(requested, updated, &OperationType::Update, store.as_str())?;
+                check_operation_success(
+                    requested,
+                    updated,
+                    &OperationType::Update,
+                    store.as_str(),
+                )?;
             }
 
             // 6) Resource deletes
@@ -638,18 +743,35 @@ impl DatabaseConnection for ArangoDbConnection {
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
                 );
-                let mut bind_vars: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
-                bind_vars.insert(AQL_BIND_DELETES.into(), Value::Array(groups.resource_deletes.clone()));
-                bind_vars.insert(AQL_BIND_KIND.into(), Value::String(DocumentKind::Resource.as_str().to_string()));
+                let mut bind_vars: std::collections::HashMap<String, Value> =
+                    std::collections::HashMap::new();
+                bind_vars.insert(
+                    AQL_BIND_DELETES.into(),
+                    Value::Array(groups.resource_deletes.clone()),
+                );
+                bind_vars.insert(
+                    AQL_BIND_KIND.into(),
+                    Value::String(DocumentKind::Resource.as_str().to_string()),
+                );
                 let query = AqlQuery::builder()
                     .query(&aql)
-                    .bind_vars(bind_vars.iter().map(|(k, v)| (k.as_str(), v.clone())).collect())
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
                     .build();
                 let removed: Vec<String> = trx
                     .aql_query(query)
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                check_operation_success(requested, removed, &OperationType::Delete, store.as_str())?;
+                check_operation_success(
+                    requested,
+                    removed,
+                    &OperationType::Delete,
+                    store.as_str(),
+                )?;
             }
 
             trx.commit()
@@ -672,8 +794,7 @@ impl DatabaseConnection for ArangoDbConnection {
 
         let count_aql = format!(
             "RETURN LENGTH(\n  FOR doc IN @@{}\n  {}\n  RETURN 1\n)",
-            AQL_BIND_STORE,
-            filter
+            AQL_BIND_STORE, filter
         );
 
         bevy::log::debug!("[arango] count_documents AQL: {}", count_aql);
@@ -683,9 +804,10 @@ impl DatabaseConnection for ArangoDbConnection {
             let query = AqlQuery::builder()
                 .query(&count_aql)
                 .bind_vars(
-                    bind_vars.iter()
-                        .map(|(k,v)| (k.as_str(), v.clone()))
-                        .collect()
+                    bind_vars
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.clone()))
+                        .collect(),
                 )
                 .build();
 
@@ -695,15 +817,16 @@ impl DatabaseConnection for ArangoDbConnection {
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
 
             Ok(result.first().copied().unwrap_or(0))
-        }.boxed()
+        }
+        .boxed()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::persistence_query_specification::PersistenceQuerySpecification;
     use crate::query::filter_expression::FilterExpression;
+    use crate::query::persistence_query_specification::PersistenceQuerySpecification;
     use serde_json::Value;
     use std::collections::HashMap;
 

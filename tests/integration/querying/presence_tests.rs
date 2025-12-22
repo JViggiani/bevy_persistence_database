@@ -1,8 +1,8 @@
+use crate::common::*;
 use bevy::prelude::*;
 use bevy_persistence_database::{
-    commit_sync, Guid, persistence_plugin::PersistencePlugins, PersistentQuery,
+    Guid, PersistentQuery, commit_sync, persistence_plugin::PersistencePlugins,
 };
-use crate::common::*;
 use bevy_persistence_database_derive::db_matrix_test;
 
 fn system_without_creature(mut pq: PersistentQuery<&Guid, Without<Creature>>) {
@@ -16,7 +16,9 @@ fn test_presence_without_filter() {
     // GIVEN: one entity with Creature, one with only Health
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    app.world_mut().spawn(Creature { is_screaming: false });
+    app.world_mut().spawn(Creature {
+        is_screaming: false,
+    });
     app.world_mut().spawn(Health { value: 42 });
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
@@ -30,7 +32,10 @@ fn test_presence_without_filter() {
     // THEN: only the Health-only entity is present, and none have Creature
     let mut q_guid = app2.world_mut().query::<&Guid>();
     let count = q_guid.iter(&app2.world()).count();
-    assert_eq!(count, 1, "Only one entity should be loaded (without Creature)");
+    assert_eq!(
+        count, 1,
+        "Only one entity should be loaded (without Creature)"
+    );
 
     let mut q_creature = app2.world_mut().query::<&Creature>();
     assert_eq!(
@@ -40,7 +45,15 @@ fn test_presence_without_filter() {
     );
 }
 
-fn system_type_driven_presence(mut pq: PersistentQuery<&Guid, (bevy::prelude::With<Health>, bevy::prelude::Without<Creature>)>) {
+fn system_type_driven_presence(
+    mut pq: PersistentQuery<
+        &Guid,
+        (
+            bevy::prelude::With<Health>,
+            bevy::prelude::Without<Creature>,
+        ),
+    >,
+) {
     // Load entities that have Health but do NOT have Creature
     let _ = pq.ensure_loaded();
 }
@@ -52,7 +65,12 @@ fn test_type_driven_presence_filters() {
     // GIVEN: one entity with Creature+Health, one with only Health
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
+    app.world_mut().spawn((
+        Health { value: 1 },
+        Creature {
+            is_screaming: false,
+        },
+    ));
     app.world_mut().spawn(Health { value: 2 });
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
@@ -66,16 +84,23 @@ fn test_type_driven_presence_filters() {
     // THEN: only the Health-only entity is loaded (no Creature in world)
     let mut q_guid = app2.world_mut().query::<&Guid>();
     let count = q_guid.iter(&app2.world()).count();
-    assert_eq!(count, 1, "Type-driven presence should exclude Creature entities");
+    assert_eq!(
+        count, 1,
+        "Type-driven presence should exclude Creature entities"
+    );
 
     let mut q_creature = app2.world_mut().query::<&Creature>();
-    assert_eq!(q_creature.iter(&app2.world()).count(), 0, "Loaded entities must not have Creature");
+    assert_eq!(
+        q_creature.iter(&app2.world()).count(),
+        0,
+        "Loaded entities must not have Creature"
+    );
 }
 
 fn system_type_driven_or_presence(
     mut pq: PersistentQuery<
         &Guid,
-        bevy::prelude::Or<(bevy::prelude::With<Health>, bevy::prelude::With<Creature>)>
+        bevy::prelude::Or<(bevy::prelude::With<Health>, bevy::prelude::With<Creature>)>,
     >,
 ) {
     // Load entities that have Health OR Creature
@@ -90,7 +115,9 @@ fn test_type_driven_or_presence_filters() {
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 10 });
-    app.world_mut().spawn(Creature { is_screaming: false });
+    app.world_mut().spawn(Creature {
+        is_screaming: false,
+    });
     app.world_mut().spawn(Position { x: 0.0, y: 0.0 });
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
@@ -104,7 +131,10 @@ fn test_type_driven_or_presence_filters() {
     // THEN: exactly two entities are loaded (those with Health OR Creature)
     let mut q_guid = app2.world_mut().query::<&Guid>();
     let count = q_guid.iter(&app2.world()).count();
-    assert_eq!(count, 2, "OR presence should include entities with Health or Creature");
+    assert_eq!(
+        count, 2,
+        "OR presence should include entities with Health or Creature"
+    );
 }
 
 // System: With<Health> AND (Without<Creature> AND With<Position>)
@@ -113,7 +143,10 @@ fn system_nested_tuple_presence(
         &Guid,
         (
             bevy::prelude::With<Health>,
-            (bevy::prelude::Without<Creature>, bevy::prelude::With<Position>),
+            (
+                bevy::prelude::Without<Creature>,
+                bevy::prelude::With<Position>,
+            ),
         ),
     >,
 ) {
@@ -126,8 +159,14 @@ fn test_nested_tuple_presence_and() {
     // GIVEN: H+P, H+C, P-only
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    app.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }));
-    app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
+    app.world_mut()
+        .spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }));
+    app.world_mut().spawn((
+        Health { value: 2 },
+        Creature {
+            is_screaming: false,
+        },
+    ));
     app.world_mut().spawn(Position { x: 1.0, y: 1.0 });
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
@@ -174,9 +213,19 @@ fn test_and_or_mix_with_without_filters() {
     // GIVEN: H+C, H+P, H+C+PlayerName, H-only
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
-    app.world_mut().spawn((Health { value: 1 }, Creature { is_screaming: false }));
-    app.world_mut().spawn((Health { value: 2 }, Position { x: 0.0, y: 0.0 }));
-    app.world_mut().spawn((Health { value: 3 }, Creature { is_screaming: true }, PlayerName { name: "X".into() }));
+    app.world_mut().spawn((
+        Health { value: 1 },
+        Creature {
+            is_screaming: false,
+        },
+    ));
+    app.world_mut()
+        .spawn((Health { value: 2 }, Position { x: 0.0, y: 0.0 }));
+    app.world_mut().spawn((
+        Health { value: 3 },
+        Creature { is_screaming: true },
+        PlayerName { name: "X".into() },
+    ));
     app.world_mut().spawn(Health { value: 4 });
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
@@ -209,7 +258,12 @@ fn test_optional_q_with_without_exclusion() {
     let mut app = App::new();
     app.add_plugins(PersistencePlugins::new(db.clone()));
     app.world_mut().spawn(Health { value: 1 });
-    app.world_mut().spawn((Health { value: 2 }, Creature { is_screaming: false }));
+    app.world_mut().spawn((
+        Health { value: 2 },
+        Creature {
+            is_screaming: false,
+        },
+    ));
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
@@ -230,7 +284,11 @@ fn test_optional_q_with_without_exclusion() {
 fn system_or_three_arms(
     mut pq: PersistentQuery<
         &Guid,
-        bevy::prelude::Or<(bevy::prelude::With<Health>, bevy::prelude::With<Creature>, bevy::prelude::With<PlayerName>)>,
+        bevy::prelude::Or<(
+            bevy::prelude::With<Health>,
+            bevy::prelude::With<Creature>,
+            bevy::prelude::With<PlayerName>,
+        )>,
     >,
 ) {
     let _ = pq.ensure_loaded();
@@ -276,13 +334,30 @@ fn test_presence_expression_complex_and_or_not() {
     // E7: H+P+PlayerName -> match
     let mut app_seed = App::new();
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
-    app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 })); // E1
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 })); // E1
     app_seed.world_mut().spawn(PlayerName { name: "pn".into() }); // E2
     app_seed.world_mut().spawn(Health { value: 2 }); // E3
-    app_seed.world_mut().spawn((Health { value: 3 }, Position { x: 1.0, y: 1.0 }, Creature { is_screaming: false })); // E4
-    app_seed.world_mut().spawn((PlayerName { name: "pc".into() }, Creature { is_screaming: true })); // E5
+    app_seed.world_mut().spawn((
+        Health { value: 3 },
+        Position { x: 1.0, y: 1.0 },
+        Creature {
+            is_screaming: false,
+        },
+    )); // E4
+    app_seed.world_mut().spawn((
+        PlayerName { name: "pc".into() },
+        Creature { is_screaming: true },
+    )); // E5
     app_seed.world_mut().spawn(Position { x: 2.0, y: 2.0 }); // E6
-    app_seed.world_mut().spawn((Health { value: 4 }, Position { x: 3.0, y: 3.0 }, PlayerName { name: "both".into() })); // E7
+    app_seed.world_mut().spawn((
+        Health { value: 4 },
+        Position { x: 3.0, y: 3.0 },
+        PlayerName {
+            name: "both".into(),
+        },
+    )); // E7
     app_seed.update();
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
@@ -296,11 +371,11 @@ fn test_presence_expression_complex_and_or_not() {
             (
                 bevy::prelude::Or<(
                     (bevy::prelude::With<Health>, bevy::prelude::With<Position>),
-                    bevy::prelude::With<PlayerName>
+                    bevy::prelude::With<PlayerName>,
                 )>,
-                bevy::prelude::Without<Creature>
+                bevy::prelude::Without<Creature>,
             ),
-        >
+        >,
     ) {
         let _ = pq.ensure_loaded();
     }
@@ -310,5 +385,8 @@ fn test_presence_expression_complex_and_or_not() {
     // Expect E1, E2, E7 loaded => 3
     let mut q = app.world_mut().query::<&Guid>();
     let count = q.iter(&app.world()).count();
-    assert_eq!(count, 3, "expected 3 entities for ((H AND P) OR PlayerName) AND NOT Creature");
+    assert_eq!(
+        count, 3,
+        "expected 3 entities for ((H AND P) OR PlayerName) AND NOT Creature"
+    );
 }

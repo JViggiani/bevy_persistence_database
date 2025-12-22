@@ -1,15 +1,14 @@
-use bevy::prelude::*;
-use bevy::prelude::IntoScheduleConfigs;
+use crate::common::*;
 use bevy::ecs::query::QueryState;
 use bevy::ecs::system::QueryLens;
+use bevy::prelude::IntoScheduleConfigs;
+use bevy::prelude::*;
+use bevy_persistence_database::query::immediate_world_ptr::ImmediateWorldPtr;
 use bevy_persistence_database::{
-    PersistentQuery,
-    commit_sync,
+    PersistentQuery, commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
 };
-use bevy_persistence_database::query::immediate_world_ptr::ImmediateWorldPtr;
 use bevy_persistence_database_derive::db_matrix_test;
-use crate::common::*;
 
 // One PersistentQuery + one regular Query: join world-only after loading.
 #[db_matrix_test]
@@ -19,9 +18,19 @@ fn test_query_lens_join_filtered_world_only() {
     // Seed: E1 = H+P+Name, E2 = H+P, E3 = Name
     let mut app_seed = App::new();
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
-    app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }, PlayerName { name: "alice".into() }));
-    app_seed.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 }));
-    app_seed.world_mut().spawn(PlayerName { name: "bob".into() });
+    app_seed.world_mut().spawn((
+        Health { value: 1 },
+        Position { x: 0.0, y: 0.0 },
+        PlayerName {
+            name: "alice".into(),
+        },
+    ));
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 }));
+    app_seed
+        .world_mut()
+        .spawn(PlayerName { name: "bob".into() });
     app_seed.update();
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
@@ -30,11 +39,15 @@ fn test_query_lens_join_filtered_world_only() {
     app.add_plugins(PersistencePlugins::new(db.clone()));
 
     #[derive(Resource, Default)]
-    struct JoinState { joined_count: usize }
+    struct JoinState {
+        joined_count: usize,
+    }
     app.insert_resource(JoinState::default());
 
     // Update: load (&Health, &Position)
-    fn sys_load(mut pq: PersistentQuery<(&Health, &Position)>) { let _ = pq.ensure_loaded(); }
+    fn sys_load(mut pq: PersistentQuery<(&Health, &Position)>) {
+        let _ = pq.ensure_loaded();
+    }
     app.add_systems(Update, sys_load);
 
     // PostUpdate: join Query<&PlayerName> with the loaded (&Health, &Position)
@@ -74,9 +87,19 @@ fn test_join_between_two_persistent_queries_loaded_inline() {
     // E3: PlayerName only          -> should NOT be loaded by smart join
     let mut app_seed = App::new();
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
-    app_seed.world_mut().spawn((Health { value: 1 }, Position { x: 0.0, y: 0.0 }, PlayerName { name: "alice".into() })); // E1
-    app_seed.world_mut().spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 })); // E2
-    app_seed.world_mut().spawn(PlayerName { name: "bob".into() }); // E3
+    app_seed.world_mut().spawn((
+        Health { value: 1 },
+        Position { x: 0.0, y: 0.0 },
+        PlayerName {
+            name: "alice".into(),
+        },
+    )); // E1
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 2 }, Position { x: 1.0, y: 1.0 })); // E2
+    app_seed
+        .world_mut()
+        .spawn(PlayerName { name: "bob".into() }); // E3
     app_seed.update();
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
@@ -127,5 +150,9 @@ fn test_join_between_two_persistent_queries_loaded_inline() {
     let mut q_n = app.world_mut().query::<&PlayerName>();
     assert_eq!(q_h.iter(&app.world()).count(), 1, "no extra Health-only");
     assert_eq!(q_p.iter(&app.world()).count(), 1, "no extra Position-only");
-    assert_eq!(q_n.iter(&app.world()).count(), 1, "no extra PlayerName-only");
+    assert_eq!(
+        q_n.iter(&app.world()).count(),
+        1,
+        "no extra PlayerName-only"
+    );
 }

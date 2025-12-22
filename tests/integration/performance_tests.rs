@@ -1,13 +1,13 @@
-use bevy::prelude::App;
-use bevy_persistence_database::{
-    commit_sync, persistence_plugin::PersistencePlugins, PersistencePluginCore, 
-    persistence_plugin::PersistencePluginConfig
-};
-use bevy_persistence_database::PersistentQuery;
-use bevy::prelude::With;
-use std::time::Instant;
 use crate::common::*;
+use bevy::prelude::App;
+use bevy::prelude::With;
+use bevy_persistence_database::PersistentQuery;
+use bevy_persistence_database::{
+    PersistencePluginCore, commit_sync, persistence_plugin::PersistencePluginConfig,
+    persistence_plugin::PersistencePlugins,
+};
 use bevy_persistence_database_derive::db_matrix_test;
+use std::time::Instant;
 // Add imports for CSV output, timestamp, and git hash
 use std::{
     fs::OpenOptions,
@@ -21,11 +21,11 @@ use std::{
 #[db_matrix_test]
 fn test_persist_many_entities() {
     let (db, _container) = setup();
-    
+
     // Use a higher entity count to better demonstrate parallel performance
     let count = 5000;
     let thread_count = 8; // Explicitly set a higher thread count
-    
+
     // Create app with explicit configuration
     let mut app = App::new();
     let config = PersistencePluginConfig {
@@ -35,7 +35,7 @@ fn test_persist_many_entities() {
         default_store: TEST_STORE.to_string(),
     };
     app.add_plugins(PersistencePluginCore::new(db.clone()).with_config(config));
-    
+
     // --- spawn phase ---
     for _ in 0..count {
         app.world_mut().spawn(Health { value: 42 });
@@ -46,16 +46,16 @@ fn test_persist_many_entities() {
     let res = commit_sync(&mut app, db.clone(), TEST_STORE);
     let duration_commit = start_commit.elapsed();
     res.expect("Bulk commit failed");
-    
+
     println!(
         "[{:?}] Committed {} entities using {} threads in {:.2?} ({:.0} entities/sec)",
         backend,
-        count, 
+        count,
         thread_count,
         duration_commit,
         count as f32 / duration_commit.as_secs_f32()
     );
-    
+
     // --- fetch phase in a new session ---
     let mut app2 = App::new();
     app2.add_plugins(PersistencePlugins::new(db.clone()));
@@ -68,7 +68,11 @@ fn test_persist_many_entities() {
     app2.update();
     let duration_fetch = start_fetch.elapsed();
 
-    let count = app2.world_mut().query::<&Health>().iter(&app2.world()).count();
+    let count = app2
+        .world_mut()
+        .query::<&Health>()
+        .iter(&app2.world())
+        .count();
     println!(
         "[{:?}] Fetched {} entities in {:.2?} ({:.0} entities/sec)",
         backend,
@@ -76,7 +80,7 @@ fn test_persist_many_entities() {
         duration_fetch,
         count as f32 / duration_fetch.as_secs_f32()
     );
-    
+
     // Append CSV row with metrics
     let ts_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -132,6 +136,14 @@ fn test_persist_many_entities() {
     file.write_all(record.as_bytes()).ok();
 
     assert_eq!(count, count, "Loaded entity count mismatch");
-    assert!(duration_commit.as_secs_f32() < 60.0, "Commit too slow: {:?}", duration_commit);
-    assert!(duration_fetch.as_secs_f32() < 60.0, "Fetch too slow: {:?}", duration_fetch);
+    assert!(
+        duration_commit.as_secs_f32() < 60.0,
+        "Commit too slow: {:?}",
+        duration_commit
+    );
+    assert!(
+        duration_fetch.as_secs_f32() < 60.0,
+        "Fetch too slow: {:?}",
+        duration_fetch
+    );
 }

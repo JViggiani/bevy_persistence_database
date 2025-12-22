@@ -1,12 +1,11 @@
-use bevy::prelude::*;
+use crate::common::*;
 use bevy::prelude::IntoScheduleConfigs;
+use bevy::prelude::*;
 use bevy_persistence_database::{
-    commit_sync,
-    PersistentQuery,
+    PersistentQuery, commit_sync,
     persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
 };
 use bevy_persistence_database_derive::db_matrix_test;
-use crate::common::*;
 
 // Load via ensure_loaded, then transmute to a world-only view and verify.
 #[db_matrix_test]
@@ -16,7 +15,9 @@ fn test_query_lens_transmutation_world_only() {
     // Seed: E1 = H+P (match), E2 = H only (no), E3 = P only (no)
     let mut app_seed = App::new();
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
-    app_seed.world_mut().spawn((Health { value: 10 }, Position { x: 1.0, y: 2.0 })); // match
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 10 }, Position { x: 1.0, y: 2.0 })); // match
     app_seed.world_mut().spawn(Health { value: 20 }); // excluded
     app_seed.world_mut().spawn(Position { x: 9.0, y: 9.0 }); // excluded
     app_seed.update();
@@ -39,14 +40,14 @@ fn test_query_lens_transmutation_world_only() {
     app.add_systems(Update, sys_load);
 
     // PostUpdate: use transmute_lens to view as Query<&Health> and count matches
-    fn sys_transmute(
-        mut pq: PersistentQuery<(&Health, &Position)>,
-        mut st: ResMut<LensState>,
-    ) {
+    fn sys_transmute(mut pq: PersistentQuery<(&Health, &Position)>, mut st: ResMut<LensState>) {
         let mut lens = pq.transmute_lens::<&Health>();
         st.transmute_count = lens.query().iter().count();
     }
-    app.add_systems(PostUpdate, sys_transmute.after(PersistenceSystemSet::PreCommit));
+    app.add_systems(
+        PostUpdate,
+        sys_transmute.after(PersistenceSystemSet::PreCommit),
+    );
 
     // Single frame (Update + PostUpdate)
     app.update();
@@ -64,8 +65,12 @@ fn test_query_lens_transmutation_calls_fn() {
     // Seed: two H+P
     let mut app_seed = App::new();
     app_seed.add_plugins(PersistencePlugins::new(db.clone()));
-    app_seed.world_mut().spawn((Health { value: 7 }, Position { x: 0.0, y: 0.0 }));
-    app_seed.world_mut().spawn((Health { value: 8 }, Position { x: 1.0, y: 1.0 }));
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 7 }, Position { x: 0.0, y: 0.0 }));
+    app_seed
+        .world_mut()
+        .spawn((Health { value: 8 }, Position { x: 1.0, y: 1.0 }));
     app_seed.update();
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
@@ -98,10 +103,7 @@ fn test_query_lens_transmutation_calls_fn() {
     app.add_systems(Update, sys_load);
 
     // PostUpdate: transmute and call the helper
-    fn sys_call(
-        mut pq: PersistentQuery<(&Health, &Position)>,
-        mut st: ResMut<CallState>,
-    ) {
+    fn sys_call(mut pq: PersistentQuery<(&Health, &Position)>, mut st: ResMut<CallState>) {
         let mut lens = pq.transmute_lens::<&Health>();
         let (count, total) = debug_healths(lens.query());
         st.count = count;

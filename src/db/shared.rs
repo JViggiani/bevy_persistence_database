@@ -6,8 +6,8 @@ use serde_json::Value;
 /// Groups transaction operations by type and collection
 pub struct GroupedOperations {
     pub entity_creates: Vec<Value>,
-    pub entity_updates: Vec<Value>,  // { key/id, expected, patch }
-    pub entity_deletes: Vec<Value>,  // { key/id, expected }
+    pub entity_updates: Vec<Value>, // { key/id, expected, patch }
+    pub entity_deletes: Vec<Value>, // { key/id, expected }
     pub resource_creates: Vec<Value>,
     pub resource_updates: Vec<Value>,
     pub resource_deletes: Vec<Value>,
@@ -26,12 +26,10 @@ impl GroupedOperations {
 
         for op in operations {
             match op {
-                TransactionOperation::CreateDocument { kind, data, .. } => {
-                    match kind {
-                        DocumentKind::Entity => result.entity_creates.push(data),
-                        DocumentKind::Resource => result.resource_creates.push(data),
-                    }
-                }
+                TransactionOperation::CreateDocument { kind, data, .. } => match kind {
+                    DocumentKind::Entity => result.entity_creates.push(data),
+                    DocumentKind::Resource => result.resource_creates.push(data),
+                },
                 TransactionOperation::UpdateDocument {
                     kind,
                     key,
@@ -73,7 +71,11 @@ impl GroupedOperations {
     pub fn extract_keys(&self, values: &[Value], key_field: &str) -> Vec<String> {
         values
             .iter()
-            .filter_map(|v| v.get(key_field).and_then(|k| k.as_str()).map(|s| s.to_string()))
+            .filter_map(|v| {
+                v.get(key_field)
+                    .and_then(|k| k.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect()
     }
 }
@@ -108,7 +110,8 @@ pub fn check_operation_success(
         } else {
             return Err(PersistenceError::new(format!(
                 "{} conflict ({})",
-                operation_type.as_str(), collection
+                operation_type.as_str(),
+                collection
             )));
         }
     }
