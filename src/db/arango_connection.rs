@@ -535,9 +535,9 @@ impl DatabaseConnection for ArangoDbConnection {
             // 1) Entity creates
             if !groups.entity_creates.is_empty() {
                 let aql = format!(
-                    "FOR d IN @{bind} INSERT d INTO {col} RETURN NEW.`{key}`",
+                    "FOR d IN @{bind} INSERT d INTO @@{col} RETURN NEW.`{key}`",
                     bind = AQL_BIND_DOCS,
-                    col = store,
+                    col = AQL_BIND_STORE,
                     key = key_attr
                 );
                 let mut bind_vars: std::collections::HashMap<String, Value> =
@@ -546,6 +546,7 @@ impl DatabaseConnection for ArangoDbConnection {
                     AQL_BIND_DOCS.into(),
                     Value::Array(groups.entity_creates.clone()),
                 );
+                insert_store_bind(&mut bind_vars, &store);
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(
@@ -567,12 +568,12 @@ impl DatabaseConnection for ArangoDbConnection {
                 let requested = groups.extract_keys(&groups.entity_updates, JSON_KEY_FIELD);
                 let aql = format!(
                     "FOR p IN @{patches}
-                       LET doc = DOCUMENT('{col}', p.{key})
+                       LET doc = DOCUMENT(@@{col}, p.{key})
                        FILTER doc != null AND doc.{type_field} == @kind AND doc.{ver} == p.expected
-                       UPDATE doc WITH p.patch IN {col} OPTIONS {{ mergeObjects: true }}
+                       UPDATE doc WITH p.patch IN @@{col} OPTIONS {{ mergeObjects: true }}
                        RETURN p.{key}",
                     patches = AQL_BIND_PATCHES,
-                    col = store,
+                    col = AQL_BIND_STORE,
                     key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
@@ -587,6 +588,7 @@ impl DatabaseConnection for ArangoDbConnection {
                     AQL_BIND_KIND.into(),
                     Value::String(DocumentKind::Entity.as_str().to_string()),
                 );
+                insert_store_bind(&mut bind_vars, &store);
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(
@@ -613,12 +615,12 @@ impl DatabaseConnection for ArangoDbConnection {
                 let requested = groups.extract_keys(&groups.entity_deletes, JSON_KEY_FIELD);
                 let aql = format!(
                     "FOR p IN @{deletes}
-                       LET doc = DOCUMENT('{col}', p.{key})
+                       LET doc = DOCUMENT(@@{col}, p.{key})
                        FILTER doc != null AND doc.{type_field} == @kind AND doc.{ver} == p.expected
-                       REMOVE doc IN {col}
+                       REMOVE doc IN @@{col}
                        RETURN p.{key}",
                     deletes = AQL_BIND_DELETES,
-                    col = store,
+                    col = AQL_BIND_STORE,
                     key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
@@ -633,6 +635,7 @@ impl DatabaseConnection for ArangoDbConnection {
                     AQL_BIND_KIND.into(),
                     Value::String(DocumentKind::Entity.as_str().to_string()),
                 );
+                insert_store_bind(&mut bind_vars, &store);
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(
@@ -657,9 +660,9 @@ impl DatabaseConnection for ArangoDbConnection {
             // 4) Resource creates
             if !groups.resource_creates.is_empty() {
                 let aql = format!(
-                    "FOR d IN @{bind} INSERT d INTO {col}",
+                    "FOR d IN @{bind} INSERT d INTO @@{col}",
                     bind = AQL_BIND_DOCS,
-                    col = store
+                    col = AQL_BIND_STORE
                 );
                 let mut bind_vars: std::collections::HashMap<String, Value> =
                     std::collections::HashMap::new();
@@ -667,6 +670,7 @@ impl DatabaseConnection for ArangoDbConnection {
                     AQL_BIND_DOCS.into(),
                     Value::Array(groups.resource_creates.clone()),
                 );
+                insert_store_bind(&mut bind_vars, &store);
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(
@@ -687,12 +691,12 @@ impl DatabaseConnection for ArangoDbConnection {
                 let requested = groups.extract_keys(&groups.resource_updates, JSON_KEY_FIELD);
                 let aql = format!(
                     "FOR p IN @{patches}
-                       LET doc = DOCUMENT('{col}', p.{key})
+                       LET doc = DOCUMENT(@@{col}, p.{key})
                        FILTER doc != null AND doc.{type_field} == @kind AND doc.{ver} == p.expected
-                       UPDATE doc WITH p.patch IN {col} OPTIONS {{ mergeObjects: true }}
+                       UPDATE doc WITH p.patch IN @@{col} OPTIONS {{ mergeObjects: true }}
                        RETURN p.{key}",
                     patches = AQL_BIND_PATCHES,
-                    col = store,
+                    col = AQL_BIND_STORE,
                     key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
@@ -707,6 +711,7 @@ impl DatabaseConnection for ArangoDbConnection {
                     AQL_BIND_KIND.into(),
                     Value::String(DocumentKind::Resource.as_str().to_string()),
                 );
+                insert_store_bind(&mut bind_vars, &store);
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(
@@ -733,12 +738,12 @@ impl DatabaseConnection for ArangoDbConnection {
                 let requested = groups.extract_keys(&groups.resource_deletes, JSON_KEY_FIELD);
                 let aql = format!(
                     "FOR p IN @{deletes}
-                       LET doc = DOCUMENT('{col}', p.{key})
+                       LET doc = DOCUMENT(@@{col}, p.{key})
                        FILTER doc != null AND doc.{type_field} == @kind AND doc.{ver} == p.expected
-                       REMOVE doc IN {col}
+                       REMOVE doc IN @@{col}
                        RETURN p.{key}",
                     deletes = AQL_BIND_DELETES,
-                    col = store,
+                    col = AQL_BIND_STORE,
                     key = JSON_KEY_FIELD,
                     ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     type_field = BEVY_TYPE_FIELD,
@@ -753,6 +758,7 @@ impl DatabaseConnection for ArangoDbConnection {
                     AQL_BIND_KIND.into(),
                     Value::String(DocumentKind::Resource.as_str().to_string()),
                 );
+                insert_store_bind(&mut bind_vars, &store);
                 let query = AqlQuery::builder()
                     .query(&aql)
                     .bind_vars(

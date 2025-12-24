@@ -2,6 +2,9 @@
 
 pub mod querying;
 
+#[cfg(feature = "arango")]
+pub mod arango_collection_name_tests;
+
 pub mod batching_tests;
 pub mod concurrency_tests;
 pub mod pass_through_tests;
