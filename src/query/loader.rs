@@ -120,7 +120,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
         comp_names: &[&'static str],
         allow_overwrite: bool,
     ) {
-        let key_field = self.db.0.document_key_field();
+        let key_field = self.db.connection.document_key_field();
         let explicit_components = comp_names.to_vec();
         bevy::log::trace!(
             "PQ::process_documents: deferring {} docs; comps={:?}; allow_overwrite={}",
@@ -269,7 +269,10 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                 self.process_paginated_load(&spec, page_size, allow_overwrite);
             } else {
                 // Original single-load code
-                match self.runtime.block_on(self.db.0.execute_documents(&spec)) {
+                match self
+                    .runtime
+                    .block_on(self.db.connection.execute_documents(&spec))
+                {
                     Ok(documents) => {
                         bevy::log::debug!(
                             "PQ::execute_combined_load: backend returned {} documents; immediate_world_ptr={}",
@@ -289,7 +292,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                         if let Some(ptr_res) = &self.world_ptr {
                             let world: &mut World = ptr_res.as_world_mut();
 
-                            let key_field = self.db.0.document_key_field();
+                            let key_field = self.db.connection.document_key_field();
                             // Apply all documents in a single scope to minimize world locking overhead.
                             world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                                 for doc in &documents {
@@ -308,7 +311,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                                     .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
                                     .0
                                     .clone();
-                                let db = self.db.0.clone();
+                                let db = self.db.connection.clone();
                                 bevy::log::trace!("PQ::immediate_apply: fetching resources");
                                 rt.block_on(
                                     session.fetch_and_insert_resources(&*db, &store, world),
@@ -347,7 +350,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                             self.process_documents(documents, &comps_to_deser, allow_overwrite);
 
                             // Also fetch resources alongside any query (deferred)
-                            let db = self.db.0.clone();
+                            let db = self.db.connection.clone();
                             self.ops.push(Box::new(move |world: &mut World| {
                                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                                     let rt = world
@@ -390,7 +393,10 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
         bevy::log::debug!("Processing paginated load with page_size={}", page_size);
 
         // First get total count
-        let total = match self.runtime.block_on(self.db.0.count_documents(spec)) {
+        let total = match self
+            .runtime
+            .block_on(self.db.connection.count_documents(spec))
+        {
             Ok(count) => count,
             Err(e) => {
                 bevy::log::error!("Error counting documents: {}", e);
@@ -412,7 +418,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
 
             match self
                 .runtime
-                .block_on(self.db.0.execute_documents(&page_spec))
+                .block_on(self.db.connection.execute_documents(&page_spec))
             {
                 Ok(documents) => {
                     processed += documents.len();

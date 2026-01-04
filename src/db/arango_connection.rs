@@ -20,6 +20,7 @@ use once_cell::sync::Lazy;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Arc, RwLock};
 
 // Local helper to pull out the version field
 fn extract_version(doc: &Value, key: &str) -> Result<u64, PersistenceError> {
@@ -48,9 +49,61 @@ fn insert_store_bind(bind_vars: &mut HashMap<String, Value>, store: &str) {
     );
 }
 
+/// Authentication strategy for Arango connections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArangoAuthMode {
+    Jwt,
+    Basic,
+}
+
+/// Refresh policy for authentication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArangoAuthRefresh {
+    /// Do not refresh automatically.
+    Never,
+    /// Reconnect and retry once when the server responds with an auth error.
+    OnAuthError,
+}
+
+impl Default for ArangoAuthRefresh {
+    fn default() -> Self {
+        ArangoAuthRefresh::OnAuthError
+    }
+}
+
+/// Configuration for establishing an Arango connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArangoConnectionConfig {
+    pub endpoint: String,
+    pub username: String,
+    pub password: String,
+    pub database: String,
+    pub auth_mode: ArangoAuthMode,
+    pub refresh: ArangoAuthRefresh,
+}
+
+impl ArangoConnectionConfig {
+    pub fn new(
+        endpoint: impl Into<String>,
+        username: impl Into<String>,
+        password: impl Into<String>,
+        database: impl Into<String>,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            username: username.into(),
+            password: password.into(),
+            database: database.into(),
+            auth_mode: ArangoAuthMode::Jwt,
+            refresh: ArangoAuthRefresh::OnAuthError,
+        }
+    }
+}
+
 /// A real ArangoDB backend for `DatabaseConnection`.
 pub struct ArangoDbConnection {
-    db: Database<ReqwestClient>,
+    db: Arc<RwLock<Database<ReqwestClient>>>,
+    config: ArangoConnectionConfig,
 }
 
 impl fmt::Debug for ArangoDbConnection {
@@ -60,23 +113,101 @@ impl fmt::Debug for ArangoDbConnection {
 }
 
 impl ArangoDbConnection {
-    /// Connects to ArangoDB via JWT, selects the specified database, and
-    /// ensures the required collections exist.
-    pub async fn connect(
-        url: &str,
-        user: &str,
-        pass: &str,
-        db_name: &str,
-    ) -> Result<Self, PersistenceError> {
-        let conn = Connection::establish_jwt(url, user, pass)
-            .await
-            .map_err(|e| PersistenceError::new(e.to_string()))?;
-        let db: Database<ReqwestClient> = conn
-            .db(db_name)
-            .await
-            .map_err(|e| PersistenceError::new(e.to_string()))?;
+    fn is_auth_error(err: &PersistenceError) -> bool {
+        match err {
+            PersistenceError::General(msg) => {
+                let lower = msg.to_ascii_lowercase();
+                lower.contains("not authorized") || lower.contains("unauthorized")
+                    || lower.contains("status code 401")
+                    || lower.contains("error code 401")
+            }
+            PersistenceError::Conflict { .. } => false,
+        }
+    }
 
-        Ok(Self { db })
+    async fn establish(config: &ArangoConnectionConfig) -> Result<Database<ReqwestClient>, PersistenceError> {
+        let conn = match config.auth_mode {
+            ArangoAuthMode::Jwt => Connection::establish_jwt(
+                &config.endpoint,
+                &config.username,
+                &config.password,
+            )
+            .await
+            .map_err(|e| PersistenceError::new(e.to_string()))?,
+            ArangoAuthMode::Basic => Connection::establish_basic_auth(
+                &config.endpoint,
+                &config.username,
+                &config.password,
+            )
+            .await
+            .map_err(|e| PersistenceError::new(e.to_string()))?,
+        };
+
+        conn.db(&config.database)
+            .await
+            .map_err(|e| PersistenceError::new(e.to_string()))
+    }
+
+    async fn reconnect(&self) -> Result<(), PersistenceError> {
+        let db = Self::establish(&self.config).await?;
+        if let Ok(mut guard) = self.db.write() {
+            *guard = db;
+            return Ok(());
+        }
+        Err(PersistenceError::new("failed to acquire write lock for db refresh"))
+    }
+
+    fn with_reauth<T, Fut, F>(&self, op: F) -> BoxFuture<'static, Result<T, PersistenceError>>
+    where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = Result<T, PersistenceError>> + Send + 'static,
+        F: Fn(Database<ReqwestClient>) -> Fut + Send + Sync + 'static,
+    {
+        let config = self.config.clone();
+        let db_lock = Arc::clone(&self.db);
+
+        async move {
+            let mut attempt = 0;
+            loop {
+                let db = db_lock
+                    .read()
+                    .map(|guard| guard.clone())
+                    .map_err(|_| PersistenceError::new("failed to acquire read lock for db"))?;
+
+                match op(db).await {
+                    Ok(v) => return Ok(v),
+                    Err(err)
+                        if config.refresh == ArangoAuthRefresh::OnAuthError
+                            && attempt == 0
+                            && ArangoDbConnection::is_auth_error(&err) =>
+                    {
+                        let new_db = ArangoDbConnection::establish(&config).await?;
+                        db_lock
+                            .write()
+                            .map(|mut guard| *guard = new_db)
+                            .map_err(|_| PersistenceError::new("failed to acquire write lock for db refresh"))?;
+                        attempt += 1;
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        .boxed()
+    }
+
+    /// External hook to proactively refresh credentials.
+    pub async fn refresh_auth(&self) -> Result<(), PersistenceError> {
+        self.reconnect().await
+    }
+
+    /// Connect using a supplied configuration.
+    pub async fn connect(config: ArangoConnectionConfig) -> Result<Self, PersistenceError> {
+        let db = ArangoDbConnection::establish(&config).await?;
+        Ok(Self {
+            db: Arc::new(RwLock::new(db)),
+            config,
+        })
     }
 
     async fn ensure_collection(
@@ -97,30 +228,36 @@ impl ArangoDbConnection {
     }
 
     /// Ensure a database exists, creating it if necessary.
-    pub async fn ensure_database(
-        url: &str,
-        user: &str,
-        pass: &str,
-        db_name: &str,
-    ) -> Result<(), PersistenceError> {
-        // Establish a root connection to the server
-        let conn = Connection::establish_jwt(url, user, pass)
+    /// Ensure a database exists using the supplied configuration.
+    pub async fn ensure_database(config: &ArangoConnectionConfig) -> Result<(), PersistenceError> {
+        let conn = match config.auth_mode {
+            ArangoAuthMode::Jwt => Connection::establish_jwt(
+                &config.endpoint,
+                &config.username,
+                &config.password,
+            )
             .await
-            .map_err(|e| PersistenceError::new(e.to_string()))?;
+            .map_err(|e| PersistenceError::new(e.to_string()))?,
+            ArangoAuthMode::Basic => Connection::establish_basic_auth(
+                &config.endpoint,
+                &config.username,
+                &config.password,
+            )
+            .await
+            .map_err(|e| PersistenceError::new(e.to_string()))?,
+        };
 
-        // Try to create the database; ignore duplicate-name errors
-        match conn.create_database(db_name).await {
+        match conn.create_database(&config.database).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 if let ClientError::Arango(ref arango_error) = e {
-                    // 1207 = ARANGO_DUPLICATE_NAME
                     if arango_error.error_num() == 1207 {
                         return Ok(());
                     }
                 }
                 Err(PersistenceError::new(format!(
                     "Failed to ensure database '{}': {}",
-                    db_name, e
+                    config.database, e
                 )))
             }
         }
@@ -238,19 +375,20 @@ impl ArangoDbConnection {
 
     // Private helper to truncate any collection
     fn clear_collection(&self, name: &str) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        let db = self.db.clone();
         let name = name.to_string();
-        async move {
-            let col = db
-                .collection(&name)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            col.truncate()
-                .await
-                .map(|_| ())
-                .map_err(|e| PersistenceError::new(e.to_string()))
-        }
-        .boxed()
+        self.with_reauth(move |db| {
+            let name = name.clone();
+            async move {
+                let col = db
+                    .collection(&name)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                col.truncate()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| PersistenceError::new(e.to_string()))
+            }
+        })
     }
 
     // Private helper to fetch a full document + version
@@ -260,40 +398,42 @@ impl ArangoDbConnection {
         key: &str,
         kind: DocumentKind,
     ) -> BoxFuture<'static, Result<Option<(Value, u64)>, PersistenceError>> {
-        let db = self.db.clone();
         let name = store.to_string();
         let key = key.to_string();
-        async move {
-            ArangoDbConnection::ensure_collection(&db, &name).await?;
-            let col = db
-                .collection(&name)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            match col.document::<Value>(&key).await {
-                Ok(doc) => {
-                    let matches_kind = doc
-                        .document
-                        .get(BEVY_TYPE_FIELD)
-                        .and_then(|v| v.as_str())
-                        .map(|s| s == kind.as_str())
-                        .unwrap_or(false);
-                    if !matches_kind {
-                        return Ok(None);
-                    }
-                    let version = extract_version(&doc.document, &key)?;
-                    Ok(Some((doc.document, version)))
-                }
-                Err(e) => {
-                    if let ClientError::Arango(api_err) = &e {
-                        if api_err.error_num() == 1202 {
+        self.with_reauth(move |db| {
+            let name = name.clone();
+            let key = key.clone();
+            async move {
+                ArangoDbConnection::ensure_collection(&db, &name).await?;
+                let col = db
+                    .collection(&name)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                match col.document::<Value>(&key).await {
+                    Ok(doc) => {
+                        let matches_kind = doc
+                            .document
+                            .get(BEVY_TYPE_FIELD)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == kind.as_str())
+                            .unwrap_or(false);
+                        if !matches_kind {
                             return Ok(None);
                         }
+                        let version = extract_version(&doc.document, &key)?;
+                        Ok(Some((doc.document, version)))
                     }
-                    Err(PersistenceError::new(e.to_string()))
+                    Err(e) => {
+                        if let ClientError::Arango(api_err) = &e {
+                            if api_err.error_num() == 1202 {
+                                return Ok(None);
+                            }
+                        }
+                        Err(PersistenceError::new(e.to_string()))
+                    }
                 }
             }
-        }
-        .boxed()
+        })
     }
 }
 
@@ -314,7 +454,6 @@ impl DatabaseConnection for ArangoDbConnection {
         &self,
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
-        let db = self.db.clone();
         let mut spec = spec.clone();
         spec.return_full_docs = false;
         let mut bind_vars = HashMap::new();
@@ -327,31 +466,35 @@ impl DatabaseConnection for ArangoDbConnection {
             filter,
             self.document_key_field()
         ));
-        async move {
-            ArangoDbConnection::ensure_collection(&db, &spec.store).await?;
-            let query = AqlQuery::builder()
-                .query(&aql)
-                .bind_vars(
-                    bind_vars
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.clone()))
-                        .collect(),
-                )
-                .build();
-            let result: Vec<String> = db
-                .aql_query(query)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            Ok(result)
-        }
-        .boxed()
+        let store = spec.store.clone();
+        self.with_reauth(move |db| {
+            let aql = aql.clone();
+            let store = store.clone();
+            let bind_vars = bind_vars.clone();
+            async move {
+                ArangoDbConnection::ensure_collection(&db, &store).await?;
+                let query = AqlQuery::builder()
+                    .query(&aql)
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
+                    .build();
+                let result: Vec<String> = db
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                Ok(result)
+            }
+        })
     }
 
     fn execute_documents(
         &self,
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<Vec<Value>, PersistenceError>> {
-        let db = self.db.clone();
         let mut spec = spec.clone();
         spec.return_full_docs = true;
         let mut bind_vars = HashMap::new();
@@ -372,24 +515,29 @@ impl DatabaseConnection for ArangoDbConnection {
                 self.document_key_field()
             ));
         }
-        async move {
-            ArangoDbConnection::ensure_collection(&db, &spec.store).await?;
-            let query = AqlQuery::builder()
-                .query(&aql)
-                .bind_vars(
-                    bind_vars
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.clone()))
-                        .collect(),
-                )
-                .build();
-            let result: Vec<Value> = db
-                .aql_query(query)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            Ok(result)
-        }
-        .boxed()
+        let store = spec.store.clone();
+        self.with_reauth(move |db| {
+            let aql = aql.clone();
+            let store = store.clone();
+            let bind_vars = bind_vars.clone();
+            async move {
+                ArangoDbConnection::ensure_collection(&db, &store).await?;
+                let query = AqlQuery::builder()
+                    .query(&aql)
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
+                    .build();
+                let result: Vec<Value> = db
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                Ok(result)
+            }
+        })
     }
 
     fn execute_documents_sync(
@@ -407,7 +555,13 @@ impl DatabaseConnection for ArangoDbConnection {
             AQL_BIND_STORE, filter, kf, kf
         );
         SYNC_RT.block_on(async {
-            ArangoDbConnection::ensure_collection(&self.db, &spec.store).await?;
+            let db = self
+                .db
+                .read()
+                .map(|guard| guard.clone())
+                .map_err(|_| PersistenceError::new("failed to acquire read lock for db"))?;
+
+            ArangoDbConnection::ensure_collection(&db, &spec.store).await?;
             let query = AqlQuery::builder()
                 .query(&aql)
                 .bind_vars(
@@ -418,7 +572,7 @@ impl DatabaseConnection for ArangoDbConnection {
                 )
                 .build();
 
-            self.db
+            db
                 .aql_query(query)
                 .await
                 .map_err(|e| PersistenceError::new(e.to_string()))
@@ -439,17 +593,20 @@ impl DatabaseConnection for ArangoDbConnection {
         entity_key: &str,
         comp_name: &str,
     ) -> BoxFuture<'static, Result<Option<Value>, PersistenceError>> {
-        let db = self.db.clone();
         let key = entity_key.to_string();
         let comp = comp_name.to_string();
         let store_name = store.to_string();
-        async move {
-            ArangoDbConnection::ensure_collection(&db, &store_name).await?;
-            let col = db
-                .collection(&store_name)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
-            match col.document::<Value>(&key).await {
+        self.with_reauth(move |db| {
+            let key = key.clone();
+            let comp = comp.clone();
+            let store_name = store_name.clone();
+            async move {
+                ArangoDbConnection::ensure_collection(&db, &store_name).await?;
+                let col = db
+                    .collection(&store_name)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                match col.document::<Value>(&key).await {
                 Ok(doc) => {
                     let matches_kind = doc
                         .document
@@ -471,9 +628,9 @@ impl DatabaseConnection for ArangoDbConnection {
                     }
                     Err(PersistenceError::new(e.to_string()))
                 }
+                }
             }
-        }
-        .boxed()
+        })
     }
 
     fn fetch_resource(
@@ -496,10 +653,11 @@ impl DatabaseConnection for ArangoDbConnection {
         &self,
         operations: Vec<TransactionOperation>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
-        let db = self.db.clone();
         // The DB-level key attribute (e.g., `_key`) for returns
         let key_attr = self.document_key_field();
-        async move {
+        self.with_reauth(move |db| {
+            let operations = operations.clone();
+            async move {
             let store = operations
                 .get(0)
                 .map(|op| op.store().to_string())
@@ -784,15 +942,14 @@ impl DatabaseConnection for ArangoDbConnection {
                 .await
                 .map_err(|e| PersistenceError::new(e.to_string()))?;
             Ok(new_keys)
-        }
-        .boxed()
+            }
+        })
     }
 
     fn count_documents(
         &self,
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<usize, PersistenceError>> {
-        let db = self.db.clone();
         let mut bind_vars = HashMap::new();
         insert_store_bind(&mut bind_vars, &spec.store);
         let filter = Self::build_filter_static(spec, &mut bind_vars, self.document_key_field());
@@ -805,26 +962,30 @@ impl DatabaseConnection for ArangoDbConnection {
 
         bevy::log::debug!("[arango] count_documents AQL: {}", count_aql);
 
-        async move {
-            ArangoDbConnection::ensure_collection(&db, &store).await?;
-            let query = AqlQuery::builder()
-                .query(&count_aql)
-                .bind_vars(
-                    bind_vars
-                        .iter()
-                        .map(|(k, v)| (k.as_str(), v.clone()))
-                        .collect(),
-                )
-                .build();
+        self.with_reauth(move |db| {
+            let store = store.clone();
+            let count_aql = count_aql.clone();
+            let bind_vars = bind_vars.clone();
+            async move {
+                ArangoDbConnection::ensure_collection(&db, &store).await?;
+                let query = AqlQuery::builder()
+                    .query(&count_aql)
+                    .bind_vars(
+                        bind_vars
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.clone()))
+                            .collect(),
+                    )
+                    .build();
 
-            let result: Vec<usize> = db
-                .aql_query(query)
-                .await
-                .map_err(|e| PersistenceError::new(e.to_string()))?;
+                let result: Vec<usize> = db
+                    .aql_query(query)
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
 
-            Ok(result.first().copied().unwrap_or(0))
-        }
-        .boxed()
+                Ok(result.first().copied().unwrap_or(0))
+            }
+        })
     }
 }
 

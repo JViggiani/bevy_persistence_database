@@ -3,7 +3,9 @@ use bevy_persistence_database::PersistencePluginCore;
 #[cfg(feature = "postgres")]
 use bevy_persistence_database::PostgresDbConnection;
 use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
-use bevy_persistence_database::{ArangoDbConnection, DatabaseConnection};
+use bevy_persistence_database::{
+    ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection, DatabaseConnection,
+};
 use std::sync::Arc;
 use std::sync::{
     Mutex, OnceLock,
@@ -271,19 +273,17 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
         TestBackend::Arango => {
             let state = ensure_global();
             let db_name = format!("test_db_{}", DB_COUNTER.fetch_add(1, Ordering::Relaxed));
+            let mut config = ArangoConnectionConfig::new(&state.base_url, "root", "password", &db_name);
+            config.auth_mode = ArangoAuthMode::Basic;
+            config.refresh = ArangoAuthRefresh::OnAuthError;
             state.rt.block_on(async {
-                ArangoDbConnection::ensure_database(&state.base_url, "root", "password", &db_name)
+                ArangoDbConnection::ensure_database(&config)
                     .await
                     .expect("Failed to create database");
             });
             let db = state
                 .rt
-                .block_on(ArangoDbConnection::connect(
-                    &state.base_url,
-                    "root",
-                    "password",
-                    &db_name,
-                ))
+                .block_on(ArangoDbConnection::connect(config))
                 .expect("Failed to connect to per-test database");
             (Arc::new(db), ContainerGuard { inner: None })
         }

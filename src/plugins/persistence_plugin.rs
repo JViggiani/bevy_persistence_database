@@ -770,7 +770,9 @@ impl Plugin for PersistencePluginCore {
         app.insert_resource(session);
         app.insert_resource(self.config.clone());
         // Add the database connection as a resource
-        app.insert_resource(DatabaseConnectionResource(db_conn.clone()));
+        app.insert_resource(DatabaseConnectionResource {
+            connection: db_conn.clone(),
+        });
         app.init_resource::<RegisteredPersistTypes>();
         app.add_message::<TriggerCommit>();
         app.add_message::<CommitCompleted>();

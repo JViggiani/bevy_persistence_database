@@ -39,8 +39,14 @@ bevy_persistence_database = { version = "0.2.2", features = ["arango", "postgres
 - Provide an `Arc<dyn DatabaseConnection>` at startup:
   - **Arango:**
     ```rust
-    await ArangoDbConnection::ensure_database(url, user, pass, db_name)
-    let db = ArangoDbConnection::connect(url, user, pass, db_name).await?
+    use bevy_persistence_database::{ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection};
+
+    let mut config = ArangoConnectionConfig::new(url, user, pass, db_name);
+    config.auth_mode = ArangoAuthMode::Basic; // or Jwt (default)
+    config.refresh = ArangoAuthRefresh::OnAuthError; // default; set to Never to manage manually
+
+    ArangoDbConnection::ensure_database(&config).await?;
+    let db = ArangoDbConnection::connect(config).await?;
     ```
   - **Postgres:**
     ```rust

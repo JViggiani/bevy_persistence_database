@@ -19,7 +19,9 @@ pub use plugins::persistence_plugin;
 
 pub use components::Guid;
 #[cfg(feature = "arango")]
-pub use db::ArangoDbConnection;
+pub use db::{
+    ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
+};
 pub use db::MockDatabaseConnection;
 #[cfg(feature = "postgres")]
 pub use db::PostgresDbConnection;
@@ -52,7 +54,9 @@ pub mod prelude {
     pub use bevy::prelude::Component;
 
     #[cfg(feature = "arango")]
-    pub use crate::ArangoDbConnection;
+    pub use crate::{
+        ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
+    };
 
     #[cfg(feature = "postgres")]
     pub use crate::PostgresDbConnection;

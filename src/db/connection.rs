@@ -158,12 +158,14 @@ pub trait DatabaseConnection: Send + Sync + std::fmt::Debug {
 
 /// A resource wrapper around the DatabaseConnection
 #[derive(Resource)]
-pub struct DatabaseConnectionResource(pub Arc<dyn DatabaseConnection>);
+pub struct DatabaseConnectionResource {
+    pub connection: Arc<dyn DatabaseConnection>,
+}
 
 impl std::ops::Deref for DatabaseConnectionResource {
     type Target = Arc<dyn DatabaseConnection>;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        &self.connection
     }
 }

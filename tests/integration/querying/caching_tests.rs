@@ -49,7 +49,9 @@ fn test_persistent_query_caching() {
     let query_count = Arc::new(AtomicUsize::new(0));
     let counting = Arc::new(CountingDbConnection::new(db.clone(), query_count.clone()))
         as Arc<dyn DatabaseConnection>;
-    app2.insert_resource(DatabaseConnectionResource(counting));
+    app2.insert_resource(DatabaseConnectionResource {
+        connection: counting,
+    });
 
     // Add system that uses the PersistentQuery twice
     app2.add_systems(bevy::prelude::Update, test_cached_query_system);

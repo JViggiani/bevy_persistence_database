@@ -11,7 +11,9 @@ pub use connection::{
 };
 
 #[cfg(feature = "arango")]
-pub use arango_connection::ArangoDbConnection;
+pub use arango_connection::{
+    ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
+};
 #[cfg(feature = "postgres")]
 pub use postgres_connection::PostgresDbConnection;
 

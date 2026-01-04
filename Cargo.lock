@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_persistence_database"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "arangors",
  "bevy",
