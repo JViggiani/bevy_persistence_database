@@ -79,7 +79,7 @@ fn test_event_triggers_commit_and_persists_data() {
     let mut events = app.world_mut().resource_mut::<Messages<CommitCompleted>>();
     assert_eq!(events.len(), 1);
     let event = events.drain().next().unwrap();
-    assert!(event.0.is_ok());
+    assert!(event.result.is_ok());
 
     let guid = app
         .world()

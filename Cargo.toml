@@ -1,6 +1,6 @@
 [package]
 name = "bevy_persistence_database"
-version = "0.2.5"
+version = "0.2.6"
 edition = "2024"
 description = "A persistence and database integration solution for the Bevy game engine"
 license-file = "LICENSE"
@@ -38,7 +38,7 @@ testcontainers = "0.19.0"
 debug = true
 
 [dependencies]
-bevy_persistence_database_derive = { version = "0.2.3", path = "bevy_persistence_database_derive" }
+bevy_persistence_database_derive = { version = "0.2.6", path = "bevy_persistence_database_derive" }
 bevy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -68,4 +68,4 @@ tokio = { workspace = true, features = ["full", "macros", "rt"] }
 ctor = { workspace = true }
 futures = { workspace = true }
 tracing-subscriber = "0.3.19"
-bevy_persistence_database_derive = { version = "0.2.3", path = "bevy_persistence_database_derive" }
+bevy_persistence_database_derive = { version = "0.2.6", path = "bevy_persistence_database_derive" }

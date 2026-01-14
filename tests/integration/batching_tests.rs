@@ -3,8 +3,10 @@ use bevy::prelude::With;
 use bevy::prelude::*;
 use bevy_persistence_database::PersistentQuery;
 use bevy_persistence_database::{
-    CommitStatus, DocumentKind, Guid, MockDatabaseConnection, PersistenceError,
-    PersistencePluginCore, TransactionOperation, commit_sync,
+    BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, CommitStatus, DocumentKind, Guid,
+    MockDatabaseConnection, PersistenceError, PersistencePluginCore, TransactionOperation,
+    commit_sync,
     persistence_plugin::PersistencePluginConfig, persistence_plugin::PersistencePlugins,
 };
 use bevy_persistence_database_derive::db_matrix_test;
@@ -109,7 +111,13 @@ fn test_batch_commit_failure_propagates() {
         .unwrap()
         .unwrap();
     // bump version directly
-    let bad = serde_json::json!({"_key": guid,"bevy_persistence_version":ver+1});
+    let bad = serde_json::json!({
+        "_key": guid,
+        BEVY_PERSISTENCE_DATABASE_METADATA_FIELD: {
+            BEVY_PERSISTENCE_DATABASE_VERSION_FIELD: ver + 1,
+            BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: "entity"
+        }
+    });
     run_async(
         db.execute_transaction(vec![TransactionOperation::UpdateDocument {
             store: TEST_STORE.to_string(),

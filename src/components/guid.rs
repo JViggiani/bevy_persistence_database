@@ -7,14 +7,16 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// to its corresponding document in the database. This is typically the document key.
 /// The inner value is private to prevent manual modification.
 #[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Guid(String);
+pub struct Guid {
+    value: String,
+}
 
 impl Serialize for Guid {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: Serializer,
     {
-        serializer.serialize_str(&self.0)
+        serializer.serialize_str(&self.value)
     }
 }
 
@@ -23,19 +25,19 @@ impl<'de> Deserialize<'de> for Guid {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer).map(Guid)
+        String::deserialize(deserializer).map(Guid::new)
     }
 }
 
 impl Guid {
     /// Creates a new `Guid`. This is intended for modification in the internal library, but is available to read externally.
     pub fn new(id: String) -> Self {
-        Self(id)
+        Self { value: id }
     }
 
     /// Returns the underlying global ID
     pub fn id(&self) -> &str {
-        &self.0
+        &self.value
     }
 
     /// Creates a value-expression for the document key field

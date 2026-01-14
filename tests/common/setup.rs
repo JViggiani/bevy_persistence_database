@@ -4,7 +4,8 @@ use bevy_persistence_database::PersistencePluginCore;
 use bevy_persistence_database::PostgresDbConnection;
 use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
 use bevy_persistence_database::{
-    ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection, DatabaseConnection,
+    ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
+    DatabaseConnection,
 };
 use std::sync::Arc;
 use std::sync::{
@@ -273,7 +274,8 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
         TestBackend::Arango => {
             let state = ensure_global();
             let db_name = format!("test_db_{}", DB_COUNTER.fetch_add(1, Ordering::Relaxed));
-            let mut config = ArangoConnectionConfig::new(&state.base_url, "root", "password", &db_name);
+            let mut config =
+                ArangoConnectionConfig::new(&state.base_url, "root", "password", &db_name);
             config.auth_mode = ArangoAuthMode::Basic;
             config.refresh = ArangoAuthRefresh::OnAuthError;
             state.rt.block_on(async {

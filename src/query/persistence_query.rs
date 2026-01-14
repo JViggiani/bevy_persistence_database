@@ -1,11 +1,10 @@
 //! A manual builder for creating and executing database queries outside of Bevy systems.
 
-use crate::db::connection::BEVY_PERSISTENCE_VERSION_FIELD;
 use crate::db::connection::DocumentKind;
 use crate::query::filter_expression::FilterExpression;
 use crate::query::persistence_query_specification::PersistenceQuerySpecification;
 use crate::versioning::version_manager::VersionKey;
-use crate::{DatabaseConnection, Guid, Persist, PersistenceSession};
+use crate::{DatabaseConnection, Guid, Persist, PersistenceSession, read_version};
 use bevy::prelude::{Component, World};
 use std::sync::Arc;
 
@@ -186,7 +185,7 @@ impl PersistenceQuery {
                     );
                     continue;
                 }
-                let version = doc[BEVY_PERSISTENCE_VERSION_FIELD].as_u64().unwrap_or(1);
+                let version = read_version(&doc).unwrap_or(1);
 
                 // Resolve entity (reuse if already present by Guid, otherwise spawn)
                 let entity = if let Some(&e) = existing.get(&key) {
@@ -279,6 +278,7 @@ impl WithComponentExt for PersistenceQuery {
 mod tests {
     use super::*;
     use crate::db::connection::MockDatabaseConnection;
+    use crate::BEVY_PERSISTENCE_DATABASE_METADATA_FIELD;
     use crate::{Persist, persistence_plugin::PersistencePluginCore};
     use bevy::MinimalPlugins;
     use bevy::prelude::App;
@@ -353,8 +353,8 @@ mod tests {
             assert!(spec.return_full_docs, "execute_documents must be full-docs");
             Box::pin(async {
                 Ok(vec![
-                    json!({"_key":"k1",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
-                    json!({"_key":"k2",BEVY_PERSISTENCE_VERSION_FIELD:1,"A":{}}),
+                    json!({"_key":"k1", BEVY_PERSISTENCE_DATABASE_METADATA_FIELD: {"bevy_persistence_version":1,"bevy_type": DocumentKind::Entity.as_str()},"A":{}}),
+                    json!({"_key":"k2", BEVY_PERSISTENCE_DATABASE_METADATA_FIELD: {"bevy_persistence_version":1,"bevy_type": DocumentKind::Entity.as_str()},"A":{}}),
                 ])
             })
         });

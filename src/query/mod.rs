@@ -16,4 +16,4 @@ pub mod persistence_query_specification;
 pub mod persistence_query_system_param;
 pub mod presence_spec;
 pub mod query_data_to_components;
-pub mod tls_config;
+pub mod query_thread_local;

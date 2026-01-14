@@ -2,26 +2,28 @@ use bevy::prelude::{Resource, World};
 
 /// Unsafe world pointer published each frame to enable immediate application of DB results.
 #[derive(Resource, Clone, Copy)]
-pub struct ImmediateWorldPtr(pub(crate) *mut World);
+pub struct ImmediateWorldPtr {
+    pub(crate) ptr: *mut World,
+}
 
 impl ImmediateWorldPtr {
     #[inline]
     pub fn new(ptr: *mut World) -> Self {
-        Self(ptr)
+        Self { ptr }
     }
     #[inline]
     pub fn set(&mut self, ptr: *mut World) {
-        self.0 = ptr;
+        self.ptr = ptr;
     }
     #[inline]
     pub fn as_world(&self) -> &World {
         // Main thread only; pointer provided by exclusive systems
-        unsafe { &*self.0 }
+        unsafe { &*self.ptr }
     }
     #[inline]
     pub fn as_world_mut(&self) -> &mut World {
         // Main thread only; pointer provided by exclusive systems
-        unsafe { &mut *self.0 }
+        unsafe { &mut *self.ptr }
     }
 }
 

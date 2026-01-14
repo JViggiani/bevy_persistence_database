@@ -2,8 +2,8 @@
 //! Storage model: one table per store, keyed by id with bevy_type discriminator and jsonb payload.
 
 use crate::db::connection::{
-    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
-    PersistenceError, TransactionOperation,
+    BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, DatabaseConnection,
+    DocumentKind, PersistenceError, TransactionOperation, read_version,
 };
 use crate::db::shared::{GroupedOperations, OperationType, check_operation_success};
 use crate::query::filter_expression::{BinaryOperator, FilterExpression};
@@ -168,7 +168,7 @@ impl PostgresDbConnection {
 
         // constrain bevy_type to the requested document kind
         params.push(SqlParam::Text(spec.kind.as_str().to_string()));
-        clauses.push(format!("({} = ${})", BEVY_TYPE_FIELD, params.len()));
+        clauses.push(format!("({} = ${})", BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, params.len()));
 
         // presence_with: ensure component exists (use jsonb existence operator)
         if !spec.presence_with.is_empty() {
@@ -458,8 +458,13 @@ impl PostgresDbConnection {
         async move {
             let table = conn.ensure_store_table(&store).await?;
             let stmt = format!(
-                "SELECT doc, bevy_persistence_version FROM {} WHERE {} = $1 AND {} = $2",
-                table, KEY_COL, BEVY_TYPE_FIELD
+                "SELECT (doc || jsonb_build_object('{meta}', jsonb_build_object('{type_field}', {type_col}, '{ver}', bevy_persistence_version))) AS doc, bevy_persistence_version FROM {table} WHERE {key_col} = $1 AND {type_col} = $2",
+                meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+                type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+                type_col = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+                ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
+                table = table,
+                key_col = KEY_COL,
             );
             let c = client.lock().await;
             let row_opt = c
@@ -539,19 +544,23 @@ impl DatabaseConnection for PostgresDbConnection {
 
             let sql = if spec.return_full_docs {
                 format!(
-                    "SELECT (doc || jsonb_build_object('{k}', {k}, '{ver}', bevy_persistence_version)) AS doc \
+                    "SELECT (doc || jsonb_build_object('{meta}', jsonb_build_object('{type}', bevy_type, '{ver}', bevy_persistence_version)) || jsonb_build_object('{k}', {k})) AS doc \
                      FROM {t} WHERE {w}",
+                    meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+                    type = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+                    ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
                     k = KEY_COL,
-                    ver = BEVY_PERSISTENCE_VERSION_FIELD,
                     t = table,
                     w = where_sql
                 )
             } else if !spec.fetch_only.is_empty() {
                 fn q(s: &str) -> String { s.replace('\'', "''") }
                 let mut proj = format!(
-                    "SELECT jsonb_strip_nulls(jsonb_build_object('{k}', {k}, '{ver}', bevy_persistence_version",
+                    "SELECT jsonb_strip_nulls(jsonb_build_object('{k}', {k}, '{meta}', jsonb_build_object('{type}', bevy_type, '{ver}', bevy_persistence_version)",
                     k = KEY_COL,
-                    ver = BEVY_PERSISTENCE_VERSION_FIELD
+                    meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+                    type = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+                    ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD
                 );
                 for name in &spec.fetch_only {
                     let key = q(name);
@@ -564,10 +573,12 @@ impl DatabaseConnection for PostgresDbConnection {
                 proj
             } else {
                 format!(
-                    "SELECT jsonb_build_object('{k}', {k}, '{ver}', bevy_persistence_version) AS doc \
+                    "SELECT jsonb_build_object('{k}', {k}, '{meta}', jsonb_build_object('{type}', bevy_type, '{ver}', bevy_persistence_version)) AS doc \
                      FROM {t} WHERE {w}",
                     k = KEY_COL,
-                    ver = BEVY_PERSISTENCE_VERSION_FIELD,
+                    meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+                    type = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+                    ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
                     t = table,
                     w = where_sql
                 )
@@ -739,14 +750,13 @@ impl DatabaseConnection for PostgresDbConnection {
                     .map(|_| Uuid::new_v4().to_string())
                     .collect();
 
-                let ver_field = BEVY_PERSISTENCE_VERSION_FIELD;
                 let input_docs: Vec<serde_json::Value> = groups
                     .entity_creates
                     .iter()
                     .cloned()
                     .zip(ids.iter())
                     .map(|(doc, id)| {
-                        let ver = doc.get(ver_field).and_then(|v| v.as_i64()).unwrap_or(1);
+                        let ver = read_version(&doc).map(|v| v as i64).unwrap_or(1);
                         serde_json::json!({
                             "id": id,
                             "ver": ver,
@@ -804,7 +814,6 @@ impl DatabaseConnection for PostgresDbConnection {
 
             // Resource creates
             if !groups.resource_creates.is_empty() {
-                let ver_field = BEVY_PERSISTENCE_VERSION_FIELD;
                 let input_docs: Vec<serde_json::Value> = groups
                     .resource_creates
                     .iter()
@@ -815,7 +824,7 @@ impl DatabaseConnection for PostgresDbConnection {
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| PersistenceError::new("Resource create missing id"))?
                             .to_string();
-                        let ver = doc.get(ver_field).and_then(|v| v.as_i64()).unwrap_or(1);
+                        let ver = read_version(&doc).map(|v| v as i64).unwrap_or(1);
                         Ok(serde_json::json!({
                             "id": id,
                             "ver": ver,
@@ -910,7 +919,7 @@ impl DatabaseConnection for PostgresDbConnection {
                 "SELECT doc -> $2 FROM {t} WHERE {k} = $1 AND {type_col} = $3",
                 t = table,
                 k = KEY_COL,
-                type_col = BEVY_TYPE_FIELD
+                type_col = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD
             );
             let client = client.lock().await;
             let row_opt = client
@@ -952,7 +961,7 @@ impl DatabaseConnection for PostgresDbConnection {
             let stmt = format!(
                 "DELETE FROM {t} WHERE {type_col} = $1",
                 t = table,
-                type_col = BEVY_TYPE_FIELD
+                type_col = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD
             );
             let client = client.lock().await;
             client
@@ -1020,7 +1029,7 @@ mod tests {
     fn empty_spec_maps_to_true() {
         let spec = PersistenceQuerySpecification::default();
         let (sql, p) = build_where(spec);
-        assert!(sql.contains(BEVY_TYPE_FIELD));
+        assert!(sql.contains(BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD));
         assert_eq!(p, 1);
     }
 

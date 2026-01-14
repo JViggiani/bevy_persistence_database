@@ -6,8 +6,8 @@ mod postgres_connection;
 mod shared;
 
 pub use connection::{
-    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
-    PersistenceError, TransactionOperation,
+    BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, DatabaseConnection,
+    DocumentKind, PersistenceError, TransactionOperation, read_kind, read_version,
 };
 
 #[cfg(feature = "arango")]

@@ -1,3 +1,7 @@
+//! Thread-local knobs used to tweak a single `PersistentQuery` call (filters, cache policy,
+//! pagination, store override, presence components). Values are drained after each use so
+//! subsequent queries start from a clean slate.
+
 use crate::query::cache::CachePolicy;
 use crate::query::filter_expression::FilterExpression;
 use crate::query::persistence_query_specification::PaginationConfig;

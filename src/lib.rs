@@ -18,17 +18,15 @@ mod persist;
 pub use plugins::persistence_plugin;
 
 pub use components::Guid;
-#[cfg(feature = "arango")]
-pub use db::{
-    ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
-};
 pub use db::MockDatabaseConnection;
 #[cfg(feature = "postgres")]
 pub use db::PostgresDbConnection;
 pub use db::connection::DatabaseConnectionResource;
+#[cfg(feature = "arango")]
+pub use db::{ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection};
 pub use db::{
-    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
-    PersistenceError, TransactionOperation,
+    BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, DatabaseConnection,
+    DocumentKind, PersistenceError, TransactionOperation, read_kind, read_version,
 };
 pub use persist::Persist;
 pub use plugins::{
@@ -36,7 +34,7 @@ pub use plugins::{
     persistence_plugin::PersistenceSystemSet,
 };
 pub use query::{CachePolicy, PersistenceQueryCache, PersistentQuery};
-pub use resources::{PersistenceSession, commit, commit_sync};
+pub use resources::{PersistenceSession, PersistentRes, PersistentResMut, commit, commit_sync};
 
 pub use versioning::VersionManager;
 
@@ -50,6 +48,7 @@ pub mod prelude {
         DatabaseConnection, Guid, Persist, PersistenceError, PersistenceSession, persist,
         plugins::{PersistencePluginCore, PersistencePlugins, TriggerCommit},
         query::{FilterExpression, PersistentQuery},
+        resources::{PersistentRes, PersistentResMut},
     };
     pub use bevy::prelude::Component;
 

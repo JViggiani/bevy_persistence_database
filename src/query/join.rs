@@ -6,7 +6,7 @@ use crate::query::cache::CachePolicy;
 use crate::query::persistence_query_system_param::PersistentQuery;
 use crate::query::presence_spec::{FilterSupported, ToPresenceSpec, collect_presence_components};
 use crate::query::query_data_to_components::QueryDataToComponents;
-use crate::query::tls_config::take_filter;
+use crate::query::query_thread_local::take_filter;
 
 impl<'w, 's, Q, F> PersistentQuery<'w, 's, Q, F>
 where
@@ -84,7 +84,7 @@ where
             (None, None) => None,
         };
         let tls_expr = take_filter();
-        let store = crate::query::tls_config::take_store()
+        let store = crate::query::query_thread_local::take_store()
             .unwrap_or_else(|| self.config.default_store.clone());
         let combined_expr = match (presence_expr, tls_expr) {
             (Some(a), Some(b)) => Some(a.and(b)),

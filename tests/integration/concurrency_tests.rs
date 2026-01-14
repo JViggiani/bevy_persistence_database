@@ -1,8 +1,9 @@
 use bevy::MinimalPlugins;
 use bevy::prelude::App;
 use bevy_persistence_database::{
-    BEVY_PERSISTENCE_VERSION_FIELD, DocumentKind, Guid, Persist, PersistenceError,
-    TransactionOperation, commit_sync, persistence_plugin::PersistencePlugins,
+    BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
+    DocumentKind, Guid, Persist, PersistenceError, TransactionOperation, commit_sync,
+    persistence_plugin::PersistencePlugins,
 };
 use serde_json::json;
 
@@ -38,10 +39,15 @@ fn test_update_conflict_is_detected() {
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
-        obj.insert(
-            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-            json!(version + 1),
-        );
+        let meta = obj
+            .entry(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(meta_obj) = meta.as_object_mut() {
+            meta_obj.insert(
+                BEVY_PERSISTENCE_DATABASE_VERSION_FIELD.to_string(),
+                json!(version + 1),
+            );
+        }
     }
 
     // Execute direct update
@@ -87,10 +93,15 @@ fn test_delete_conflict_is_detected() {
 
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
-        obj.insert(
-            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-            json!(version + 1),
-        );
+        let meta = obj
+            .entry(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(meta_obj) = meta.as_object_mut() {
+            meta_obj.insert(
+                BEVY_PERSISTENCE_DATABASE_VERSION_FIELD.to_string(),
+                json!(version + 1),
+            );
+        }
     }
 
     run_async(
@@ -138,10 +149,15 @@ fn test_conflict_strategy_last_write_wins() {
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
-        obj.insert(
-            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-            json!(version + 1),
-        );
+        let meta = obj
+            .entry(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(meta_obj) = meta.as_object_mut() {
+            meta_obj.insert(
+                BEVY_PERSISTENCE_DATABASE_VERSION_FIELD.to_string(),
+                json!(version + 1),
+            );
+        }
     }
 
     run_async(
@@ -248,10 +264,15 @@ fn test_conflict_strategy_three_way_merge() {
     let mut updated_doc = doc.clone();
     if let Some(obj) = updated_doc.as_object_mut() {
         obj.insert("Health".to_string(), json!({"value": 150}));
-        obj.insert(
-            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-            json!(version + 1),
-        );
+        let meta = obj
+            .entry(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD.to_string())
+            .or_insert_with(|| json!({}));
+        if let Some(meta_obj) = meta.as_object_mut() {
+            meta_obj.insert(
+                BEVY_PERSISTENCE_DATABASE_VERSION_FIELD.to_string(),
+                json!(version + 1),
+            );
+        }
     }
     run_async(
         db.execute_transaction(vec![TransactionOperation::UpdateDocument {

@@ -4,9 +4,9 @@ use crate::query::persistence_query_specification::{
     PaginationConfig, PersistenceQuerySpecification,
 };
 use crate::query::persistence_query_system_param::PersistentQuery;
-use crate::query::tls_config::take_pagination_config;
+use crate::query::query_thread_local::take_pagination_config;
 use crate::versioning::version_manager::VersionKey;
-use crate::{BEVY_PERSISTENCE_VERSION_FIELD, Guid, PersistenceSession};
+use crate::{Guid, PersistenceSession, read_version};
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::prelude::{Entity, Mut, World};
 use rayon::prelude::*;
@@ -33,10 +33,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
             );
             return;
         };
-        let version = doc
-            .get(BEVY_PERSISTENCE_VERSION_FIELD)
-            .and_then(|v| v.as_u64())
-            .unwrap_or(1);
+        let version = read_version(doc).unwrap_or(1);
 
         // Try to find an existing entity by Guid first.
         let existing_entity = world
@@ -309,7 +306,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                                 // Fetch resources once alongside the entity loads.
                                 let rt = world
                                     .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
-                                    .0
+                                    .runtime
                                     .clone();
                                 let db = self.db.connection.clone();
                                 bevy::log::trace!("PQ::immediate_apply: fetching resources");
@@ -355,7 +352,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                                 world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                                     let rt = world
                                         .resource::<crate::plugins::persistence_plugin::TokioRuntime>()
-                                        .0
+                                        .runtime
                                         .clone();
                                     bevy::log::trace!("PQ::execute_combined_load: fetching resources");
                                     // Use db directly rather than dereferencing it

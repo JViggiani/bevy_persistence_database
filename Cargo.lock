@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_persistence_database"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "arangors",
  "bevy",
@@ -411,7 +411,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_persistence_database_derive"
-version = "0.2.3"
+version = "0.2.6"
 dependencies = [
  "ctor",
  "proc-macro-crate",

@@ -15,7 +15,7 @@ use crate::query::immediate_world_ptr::ImmediateWorldPtr;
 use crate::query::presence_spec::ToPresenceSpec;
 use crate::query::presence_spec::collect_presence_components;
 use crate::query::query_data_to_components::QueryDataToComponents;
-use crate::query::tls_config::{
+use crate::query::query_thread_local::{
     drain_additional_components, drain_without_components, set_cache_policy, set_filter,
     set_pagination_size, set_store, take_cache_policy, take_filter, take_store,
 };
@@ -50,7 +50,7 @@ where
 {
     #[inline]
     fn immediate_world_ptr(&self) -> Option<*mut World> {
-        self.world_ptr.as_ref().map(|p| p.0)
+        self.world_ptr.as_ref().map(|p| p.ptr)
     }
 
     /// Explicit load trigger that performs DB I/O (if needed) and returns self for pass-through use.

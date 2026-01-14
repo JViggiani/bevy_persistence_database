@@ -43,9 +43,11 @@ static TOKIO_RUNTIME: Lazy<Arc<Runtime>> = Lazy::new(|| {
 
 /// A component holding the future result of a commit operation.
 #[derive(Component)]
-struct CommitTask(
-    Option<tokio::sync::oneshot::Receiver<Result<(Vec<String>, Vec<Entity>), PersistenceError>>>,
-);
+struct CommitTask {
+    receiver: Option<
+        tokio::sync::oneshot::Receiver<Result<(Vec<String>, Vec<Entity>), PersistenceError>>,
+    >,
+}
 
 /// A component that tracks the state of a multi-batch commit operation.
 #[derive(Component)]
@@ -68,16 +70,18 @@ pub enum PersistenceSystemSet {
 
 /// Message emitted when a background commit task is complete.
 #[derive(Message)]
-pub struct CommitCompleted(
-    pub Result<Vec<String>, PersistenceError>,
-    pub Vec<Entity>,
-    pub Option<u64>,
-);
+pub struct CommitCompleted {
+    pub result: Result<Vec<String>, PersistenceError>,
+    pub dirty_entities: Vec<Entity>,
+    pub correlation_id: Option<u64>,
+}
 
 /// A resource used to track which `Persist` types have been registered with an `App`.
 /// This prevents duplicate systems from being added.
 #[derive(Resource, Default)]
-pub struct RegisteredPersistTypes(pub HashSet<TypeId>);
+pub struct RegisteredPersistTypes {
+    pub types: HashSet<TypeId>,
+}
 
 /// Message that users send to trigger a commit.
 #[derive(Message, Clone)]
@@ -105,11 +109,13 @@ enum PersistenceBackend {
 }
 
 #[derive(Resource)]
-pub struct TokioRuntime(pub Arc<Runtime>);
+pub struct TokioRuntime {
+    pub runtime: Arc<Runtime>,
+}
 
 impl TokioRuntime {
     pub fn block_on<F: std::future::Future>(&self, fut: F) -> F::Output {
-        self.0.block_on(fut)
+        self.runtime.block_on(fut)
     }
 }
 
@@ -157,7 +163,11 @@ fn handle_commit_trigger(world: &mut World) {
         conn
     } else {
         let err = PersistenceError::new("TriggerCommit missing target_connection");
-        world.write_message(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+        world.write_message(CommitCompleted {
+            result: Err(err.clone()),
+            dirty_entities: vec![],
+            correlation_id,
+        });
         bevy::log::error!(%err, "failed to select database connection before commit");
         return;
     };
@@ -165,14 +175,22 @@ fn handle_commit_trigger(world: &mut World) {
     let store = if let Some(store) = requested_store {
         if store.is_empty() {
             let err = PersistenceError::new("TriggerCommit store must be non-empty");
-            world.write_message(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+            world.write_message(CommitCompleted {
+                result: Err(err.clone()),
+                dirty_entities: vec![],
+                correlation_id,
+            });
             bevy::log::error!(%err, "invalid store for commit");
             return;
         }
         store
     } else {
         let err = PersistenceError::new("TriggerCommit missing store");
-        world.write_message(CommitCompleted(Err(err.clone()), vec![], correlation_id));
+        world.write_message(CommitCompleted {
+            result: Err(err.clone()),
+            dirty_entities: vec![],
+            correlation_id,
+        });
         bevy::log::error!(%err, "failed to select store before commit");
         return;
     };
@@ -202,7 +220,11 @@ fn handle_commit_trigger(world: &mut World) {
     ) {
         Ok(data) if data.operations.is_empty() => {
             // nothing to do → send completion and restore dirty sets
-            world.write_message(CommitCompleted(Ok(vec![]), vec![], correlation_id));
+            world.write_message(CommitCompleted {
+                result: Ok(vec![]),
+                dirty_entities: vec![],
+                correlation_id,
+            });
             let mut session = world.resource_mut::<PersistenceSession>();
             session.dirty_entities.extend(dirty_entities);
             session.despawned_entities.extend(despawned_entities);
@@ -212,7 +234,11 @@ fn handle_commit_trigger(world: &mut World) {
         Ok(data) => data,
         Err(e) => {
             // prepare failed → send error and restore dirty sets
-            world.write_message(CommitCompleted(Err(e.clone()), vec![], correlation_id));
+            world.write_message(CommitCompleted {
+                result: Err(e.clone()),
+                dirty_entities: vec![],
+                correlation_id,
+            });
             let mut session = world.resource_mut::<PersistenceSession>();
             session.dirty_entities.extend(dirty_entities);
             session.despawned_entities.extend(despawned_entities);
@@ -223,7 +249,7 @@ fn handle_commit_trigger(world: &mut World) {
 
     // 3) spawn the async task(s)
     *world.resource_mut::<CommitStatus>() = CommitStatus::InProgress;
-    let runtime = world.resource::<TokioRuntime>().0.clone();
+    let runtime = world.resource::<TokioRuntime>().runtime.clone();
     let db = connection.clone();
 
     let all_operations = commit_data.operations;
@@ -344,7 +370,7 @@ fn handle_commit_trigger(world: &mut World) {
         );
 
         if let Some(cid) = correlation_id {
-            if let Some(listener) = world.resource_mut::<CommitEventListeners>().0.remove(&cid) {
+            if let Some(listener) = take_commit_listener(world, cid) {
                 bevy::log::debug!(
                     "registered multi-batch tracker for correlation_id={cid} batches={}",
                     num_batches
@@ -405,7 +431,11 @@ fn handle_commit_trigger(world: &mut World) {
                 store: store.clone(),
             };
 
-            world.spawn((CommitTask(Some(rx)), TriggerID(correlation_id), meta));
+            world.spawn((
+                CommitTask { receiver: Some(rx) },
+                TriggerID { correlation_id },
+                meta,
+            ));
         }
     } else {
         let db_for_task = db.clone();
@@ -423,8 +453,8 @@ fn handle_commit_trigger(world: &mut World) {
         });
 
         world.spawn((
-            CommitTask(Some(rx)),
-            TriggerID(correlation_id),
+            CommitTask { receiver: Some(rx) },
+            TriggerID { correlation_id },
             CommitMeta {
                 dirty_entities,
                 despawned_entities,
@@ -438,7 +468,9 @@ fn handle_commit_trigger(world: &mut World) {
 
 /// A component to correlate a commit task with its trigger event.
 #[derive(Component)]
-struct TriggerID(Option<u64>);
+struct TriggerID {
+    correlation_id: Option<u64>,
+}
 
 /// Carries exactly the dirty‐sets for one in‐flight commit.
 #[derive(Component)]
@@ -467,13 +499,13 @@ fn handle_commit_completed(
     let mut had_error = false;
 
     for (ent, mut task, trigger_id, meta_opt) in &mut query {
-        if let Some(mut receiver) = task.0.take() {
+        if let Some(mut receiver) = task.receiver.take() {
             let result: Result<(Vec<String>, Vec<Entity>), PersistenceError> =
                 match receiver.try_recv() {
                     Ok(res) => res,
                     Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                         // Put the receiver back if not finished
-                        task.0 = Some(receiver);
+                        task.receiver = Some(receiver);
                         continue;
                     }
                     Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
@@ -483,7 +515,7 @@ fn handle_commit_completed(
                         ))
                     }
                 };
-            let cid = trigger_id.0;
+            let cid = trigger_id.correlation_id;
             let mut is_final_batch = true;
             let mut should_send_result = true;
             let mut commit_connection: Option<Arc<dyn DatabaseConnection>> = None;
@@ -607,12 +639,20 @@ fn handle_commit_completed(
                         is_final_batch,
                         result.is_err()
                     );
-                    completed.write(CommitCompleted(event_res, vec![], cid));
+                    completed.write(CommitCompleted {
+                        result: event_res,
+                        dirty_entities: vec![],
+                        correlation_id: cid,
+                    });
                 }
             } else if let Err(e) = &result {
                 // A non-meta batch failed. Signal failure.
                 if should_send_result {
-                    completed.write(CommitCompleted(Err(e.clone()), vec![], cid));
+                    completed.write(CommitCompleted {
+                        result: Err(e.clone()),
+                        dirty_entities: vec![],
+                        correlation_id: cid,
+                    });
                 }
             }
 
@@ -641,7 +681,10 @@ fn handle_commit_completed(
                 }
             }
         } else if PENDING_LOG_COUNT.fetch_add(1, Ordering::Relaxed) < 5 {
-            bevy::log::debug!("commit task still pending (cid={:?})", trigger_id.0);
+            bevy::log::debug!(
+                "commit task still pending (cid={:?})",
+                trigger_id.correlation_id
+            );
         }
     }
 
@@ -736,24 +779,51 @@ impl PersistencePluginCore {
 }
 
 #[derive(Resource, Default)]
-pub(crate) struct CommitEventListeners(
-    pub(crate) HashMap<u64, oneshot::Sender<Result<(), PersistenceError>>>,
-);
+struct CommitEventListeners {
+    pub listeners: HashMap<u64, oneshot::Sender<Result<(), PersistenceError>>>,
+}
+
+/// Register a commit listener for the given correlation ID.
+pub fn register_commit_listener(
+    world: &mut World,
+    correlation_id: u64,
+    sender: oneshot::Sender<Result<(), PersistenceError>>,
+) {
+    world
+        .resource_mut::<CommitEventListeners>()
+        .listeners
+        .insert(correlation_id, sender);
+}
+
+/// Remove and return a registered commit listener by correlation ID, if present.
+pub fn take_commit_listener(
+    world: &mut World,
+    correlation_id: u64,
+) -> Option<oneshot::Sender<Result<(), PersistenceError>>> {
+    world
+        .resource_mut::<CommitEventListeners>()
+        .listeners
+        .remove(&correlation_id)
+}
 
 fn commit_event_listener(
     mut events: MessageReader<CommitCompleted>,
     mut listeners: ResMut<CommitEventListeners>,
 ) {
     for event in events.read() {
-        if let Some(id) = event.2 {
-            if let Some(sender) = listeners.0.remove(&id) {
+        if let Some(id) = event.correlation_id {
+            if let Some(sender) = listeners.listeners.remove(&id) {
                 info!("Found listener for commit {}. Sending result.", id);
-                let result = match &event.0 {
+                let result = match &event.result {
                     Ok(_) => Ok(()),
                     Err(e) => Err(e.clone()),
                 };
                 let _ = sender.send(result);
+            } else {
+                info!("Commit listener missing for correlation_id={}", id);
             }
+        } else {
+            trace!("CommitCompleted event without correlation id consumed");
         }
     }
 }
@@ -780,7 +850,9 @@ impl Plugin for PersistencePluginCore {
         app.init_resource::<CommitEventListeners>();
 
         // Insert the dedicated Tokio runtime from the global static.
-        app.insert_resource(TokioRuntime(TOKIO_RUNTIME.clone()));
+        app.insert_resource(TokioRuntime {
+            runtime: TOKIO_RUNTIME.clone(),
+        });
 
         // Add the query cache
         app.init_resource::<PersistenceQueryCache>();
@@ -811,7 +883,8 @@ impl Plugin for PersistencePluginCore {
             }
         }
 
-        // Update pointer at the very start of the frame
+        // Update pointer before any Startup systems and again at the start of each frame.
+        app.add_systems(Startup, publish_immediate_world_ptr);
         app.add_systems(First, publish_immediate_world_ptr);
 
         // Remove the process_queued_component_data system - we don't need it anymore
@@ -825,10 +898,7 @@ impl Plugin for PersistencePluginCore {
                 "No #[persist] registrations detected; components/resources will not be persisted"
             );
         } else {
-            bevy::log::debug!(
-                registrations,
-                "Applying #[persist] registrations"
-            );
+            bevy::log::debug!(registrations, "Applying #[persist] registrations");
         }
 
         for reg_fn in registry.iter() {
@@ -947,8 +1017,12 @@ impl PluginGroup for PersistencePlugins {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Persist, PersistenceSession};
+    use crate::db::connection::MockDatabaseConnection;
+    use crate::{Persist, PersistenceSession, PersistentRes};
+    use bevy_persistence_database_derive::persist;
     use serde::{Deserialize, Serialize};
+    use serde_json::json;
+    use std::sync::Arc;
 
     // Define a test component that implements Persist
     #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -960,6 +1034,20 @@ mod tests {
         fn name() -> &'static str {
             "TestHealth"
         }
+    }
+
+    #[derive(Clone)]
+    #[persist(resource)]
+    struct TestSettings {
+        difficulty: f32,
+        map_name: String,
+    }
+
+    #[derive(Resource, Default)]
+    struct Capture {
+        loaded: bool,
+        map_name: Option<String>,
+        difficulty: Option<f32>,
     }
 
     #[test]
@@ -1021,5 +1109,49 @@ mod tests {
                 "Entity should be marked dirty after modification"
             );
         }
+    }
+
+    #[test]
+    fn refreshes_immediate_world_ptr_before_startup_after_app_move() {
+        let mut db = MockDatabaseConnection::new();
+        db.expect_fetch_resource()
+            .returning(|_, _| Box::pin(async {
+                Ok(Some((json!({ "difficulty": 0.3, "map_name": "moved" }), 1)))
+            }));
+        db.expect_document_key_field().return_const("_key");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(PersistencePlugins::new(Arc::new(db)));
+
+        {
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
+            session.register_resource::<TestSettings>();
+        }
+
+        app.insert_resource(Capture::default());
+
+        // Move the app to a new memory location after plugin construction.
+        let mut relocated = Vec::new();
+        relocated.push(app);
+        let mut app = relocated.pop().expect("relocated app");
+
+        app.add_systems(
+            Update,
+            |mut res: PersistentRes<TestSettings>, mut cap: ResMut<Capture>| {
+                if let Some(gs) = res.get() {
+                    cap.loaded = true;
+                    cap.map_name = Some(gs.map_name.clone());
+                    cap.difficulty = Some(gs.difficulty);
+                }
+            },
+        );
+
+        app.update();
+
+        let cap = app.world().resource::<Capture>();
+        assert!(cap.loaded, "resource should load even after app move");
+        assert_eq!(cap.map_name.as_deref(), Some("moved"));
+        assert_eq!(cap.difficulty, Some(0.3));
     }
 }

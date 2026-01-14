@@ -67,7 +67,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 use bevy::prelude::IntoScheduleConfigs;
                 let type_id = std::any::TypeId::of::<#name>();
                 let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
-                if registered.0.insert(type_id) {
+                if registered.types.insert(type_id) {
                     app.world_mut()
                         .resource_mut::<#crate_path::PersistenceSession>()
                         .register_component::<#name>();
@@ -86,7 +86,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 use bevy::prelude::IntoScheduleConfigs;
                 let type_id = std::any::TypeId::of::<#name>();
                 let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
-                if registered.0.insert(type_id) {
+                if registered.types.insert(type_id) {
                     app.world_mut()
                         .resource_mut::<#crate_path::PersistenceSession>()
                         .register_resource::<#name>();

@@ -8,11 +8,14 @@ use serde_json::Value;
 use std::fmt;
 use std::sync::Arc;
 
+/// Container field for persistence metadata.
+pub const BEVY_PERSISTENCE_DATABASE_METADATA_FIELD: &str = "bevy_persistence_database_metadata";
+
 /// The field name used for optimistic locking version tracking.
-pub const BEVY_PERSISTENCE_VERSION_FIELD: &str = "bevy_persistence_version";
+pub const BEVY_PERSISTENCE_DATABASE_VERSION_FIELD: &str = "bevy_persistence_version";
 
 /// Field indicating whether a document represents an entity or a resource.
-pub const BEVY_TYPE_FIELD: &str = "bevy_type";
+pub const BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: &str = "bevy_type";
 
 /// Logical discriminator for persisted documents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -28,6 +31,27 @@ impl DocumentKind {
             DocumentKind::Resource => "resource",
         }
     }
+
+    pub fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "entity" => Some(DocumentKind::Entity),
+            "resource" => Some(DocumentKind::Resource),
+            _ => None,
+        }
+    }
+}
+
+pub fn read_version(doc: &Value) -> Option<u64> {
+    doc.get(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD)
+        .and_then(|meta| meta.get(BEVY_PERSISTENCE_DATABASE_VERSION_FIELD))
+        .and_then(Value::as_u64)
+}
+
+pub fn read_kind(doc: &Value) -> Option<DocumentKind> {
+    doc.get(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD)
+        .and_then(|meta| meta.get(BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD))
+        .and_then(Value::as_str)
+        .and_then(DocumentKind::from_str)
 }
 
 /// An error type for database operations.

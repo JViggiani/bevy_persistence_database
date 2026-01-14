@@ -1,8 +1,8 @@
 use bevy::prelude::*;
-use bevy_persistence_database::{commit_sync, plugins::PersistencePlugins, Guid, Persist};
+use bevy_persistence_database::{Guid, Persist, commit_sync, plugins::PersistencePlugins};
 
-use crate::common::{run_async, setup_backend, TestBackend};
 use crate::common::components::Health;
+use crate::common::{TestBackend, run_async, setup_backend};
 
 #[test]
 #[cfg(feature = "arango")]

@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_persistence_database::{
-    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, CommitStatus, Guid, Persist, commit_sync,
-    plugins::PersistencePlugins,
+    BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, CommitStatus, Guid,
+    Persist, commit_sync, plugins::PersistencePlugins,
 };
 
 use crate::common::*;
@@ -310,7 +310,10 @@ fn test_commit_entity_with_non_persisted_component() {
     let component_fields: Vec<_> = obj
         .keys()
         .filter(|k| {
-            !k.starts_with('_') && *k != BEVY_PERSISTENCE_VERSION_FIELD && *k != BEVY_TYPE_FIELD
+            !k.starts_with('_')
+                && *k != BEVY_PERSISTENCE_DATABASE_METADATA_FIELD
+                && *k != BEVY_PERSISTENCE_DATABASE_VERSION_FIELD
+                && *k != BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD
         })
         .collect();
 

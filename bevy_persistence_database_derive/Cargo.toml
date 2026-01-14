@@ -1,10 +1,11 @@
 [package]
 name = "bevy_persistence_database_derive"
-version = "0.2.3"
+version = "0.2.6"
 edition.workspace = true
 description = "Derive macros for bevy_persistence_database"
 license-file = "LICENSE"
-repository = "https://github.com/your-username/bevy_persistence_database"
+homepage = "https://github.com/JViggiani/bevy_persistence_database"
+repository = "https://github.com/JViggiani/bevy_persistence_database"
 documentation = "https://docs.rs/bevy_persistence_database_derive"
 keywords = ["bevy", "database", "persistence", "gamedev", "storage"]
 categories = ["game-development", "development-tools", "database", "asynchronous", "caching"]

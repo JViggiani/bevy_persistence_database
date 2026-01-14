@@ -2,12 +2,12 @@
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
 use crate::db::connection::{
-    BEVY_PERSISTENCE_VERSION_FIELD, BEVY_TYPE_FIELD, DatabaseConnection, DocumentKind,
-    PersistenceError, TransactionOperation,
+    BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, DatabaseConnection,
+    DocumentKind, PersistenceError, TransactionOperation,
 };
 use crate::persist::Persist;
 use crate::plugins::TriggerCommit;
-use crate::plugins::persistence_plugin::{CommitEventListeners, TokioRuntime};
+use crate::plugins::persistence_plugin::{TokioRuntime, register_commit_listener};
 use crate::versioning::version_manager::{VersionKey, VersionManager};
 use bevy::prelude::{App, Component, Entity, Resource, World, info};
 use rayon::ThreadPoolBuilder;
@@ -155,6 +155,33 @@ impl PersistenceSession {
         self.dirty_resources.insert(TypeId::of::<R>());
     }
 
+    /// Return the tracked version for a persisted resource type, if cached.
+    pub fn resource_version<R: Resource + 'static>(&self) -> Option<u64> {
+        self.version_manager
+            .get_version(&VersionKey::Resource(TypeId::of::<R>()))
+    }
+
+    /// Lookup the registered `TypeId` for a persisted resource by name.
+    pub fn resource_type_id(&self, name: &str) -> Option<TypeId> {
+        self.resource_name_to_type_id.get(name).copied()
+    }
+
+    /// Run the registered resource deserializer for a given persisted resource name.
+    pub fn deserialize_resource_by_name(
+        &self,
+        world: &mut World,
+        name: &str,
+        value: Value,
+    ) -> Result<(), PersistenceError> {
+        if let Some(deser) = self.resource_deserializers.get(name) {
+            deser(world, value)
+        } else {
+            Err(PersistenceError::new(format!(
+                "no deserializer registered for resource {name}"
+            )))
+        }
+    }
+
     /// Manually mark an entity as having been removed.
     pub fn mark_despawned(&mut self, entity: Entity) {
         self.despawned_entities.insert(entity);
@@ -273,6 +300,20 @@ impl PersistenceSession {
         let mut operations = Vec::new();
         let mut newly_created_entities = Vec::new();
 
+        fn insert_meta(
+            data: &mut serde_json::Map<String, Value>,
+            kind: DocumentKind,
+            version: u64,
+        ) {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                BEVY_PERSISTENCE_DATABASE_VERSION_FIELD.to_string(),
+                serde_json::json!(version),
+            );
+            meta.insert(BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD.to_string(), serde_json::json!(kind.as_str()));
+            data.insert(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD.to_string(), Value::Object(meta));
+        }
+
         // 1) Deletions (order matters less, do sequentially)
         for &entity in despawned_entities {
             if let Some(key) = session.entity_keys.get(&entity) {
@@ -320,14 +361,7 @@ impl PersistenceSession {
                             .get_version(&version_key)
                             .ok_or_else(|| PersistenceError::new("Missing version for update"))?;
                         let next_version = current_version + 1;
-                        data_map.insert(
-                            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                            serde_json::json!(next_version),
-                        );
-                        data_map.insert(
-                            BEVY_TYPE_FIELD.to_string(),
-                            serde_json::json!(DocumentKind::Entity.as_str()),
-                        );
+                        insert_meta(&mut data_map, DocumentKind::Entity, next_version);
                         Ok(Some((
                             TransactionOperation::UpdateDocument {
                                 store: store.to_string(),
@@ -340,14 +374,7 @@ impl PersistenceSession {
                         )))
                     } else {
                         // create new document
-                        data_map.insert(
-                            BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                            serde_json::json!(1u64),
-                        );
-                        data_map.insert(
-                            BEVY_TYPE_FIELD.to_string(),
-                            serde_json::json!(DocumentKind::Entity.as_str()),
-                        );
+                        insert_meta(&mut data_map, DocumentKind::Entity, 1);
                         let document = Value::Object(data_map);
                         Ok(Some((
                             TransactionOperation::CreateDocument {
@@ -387,14 +414,7 @@ impl PersistenceSession {
                                 // update existing resource
                                 let next_version = current_version + 1;
                                 if let Some(obj) = value.as_object_mut() {
-                                    obj.insert(
-                                        BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                                        serde_json::json!(next_version),
-                                    );
-                                    obj.insert(
-                                        BEVY_TYPE_FIELD.to_string(),
-                                        serde_json::json!(DocumentKind::Resource.as_str()),
-                                    );
+                                    insert_meta(obj, DocumentKind::Resource, next_version);
                                 }
                                 resource_ops.push(TransactionOperation::UpdateDocument {
                                     store: store.to_string(),
@@ -406,16 +426,9 @@ impl PersistenceSession {
                             } else {
                                 // create new resource
                                 if let Some(obj) = value.as_object_mut() {
-                                    obj.insert(
-                                        BEVY_PERSISTENCE_VERSION_FIELD.to_string(),
-                                        serde_json::json!(1u64),
-                                    );
                                     // Use backend-specific key field instead of hardcoding "_key"
                                     obj.insert(key_field.to_string(), Value::String(name.clone()));
-                                    obj.insert(
-                                        BEVY_TYPE_FIELD.to_string(),
-                                        serde_json::json!(DocumentKind::Resource.as_str()),
-                                    );
+                                    insert_meta(obj, DocumentKind::Resource, 1);
                                 }
                                 resource_ops.push(TransactionOperation::CreateDocument {
                                     store: store.to_string(),
@@ -461,10 +474,7 @@ pub async fn commit(
     let (tx, mut rx) = oneshot::channel();
 
     // Insert the sender into the world so the listener system can find it.
-    app.world_mut()
-        .resource_mut::<CommitEventListeners>()
-        .0
-        .insert(correlation_id, tx);
+    register_commit_listener(app.world_mut(), correlation_id, tx);
 
     // Send the message to trigger the commit.
     app.world_mut().write_message(TriggerCommit {
@@ -509,7 +519,7 @@ pub fn commit_sync(
     connection: Arc<dyn DatabaseConnection>,
     store: impl Into<String>,
 ) -> Result<(), PersistenceError> {
-    let rt = { app.world().resource::<TokioRuntime>().0.clone() };
+    let rt = { app.world().resource::<TokioRuntime>().runtime.clone() };
     rt.block_on(commit(app, connection, store))
 }
 
