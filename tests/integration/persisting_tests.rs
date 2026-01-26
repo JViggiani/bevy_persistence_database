@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use bevy_persistence_database::{
     BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, CommitStatus, Guid,
-    Persist, commit_sync, plugins::PersistencePlugins,
+    Persist, commit_sync,
 };
 
 use crate::common::*;
@@ -11,9 +11,7 @@ use bevy_persistence_database_derive::db_matrix_test;
 fn test_create_new_entity() {
     let (db, _container) = setup();
 
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     let health_val = Health { value: 100 };
     let pos_val = Position { x: 1.0, y: 2.0 };
@@ -51,9 +49,7 @@ fn test_create_new_entity() {
 #[db_matrix_test]
 fn test_create_new_resource() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Create a session, add a resource, and commit it
     let settings = GameSettings {
@@ -82,9 +78,7 @@ fn test_create_new_resource() {
 #[db_matrix_test]
 fn test_update_existing_entity() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. GIVEN a committed entity with a Health component of value 100
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
@@ -128,9 +122,7 @@ fn test_update_existing_entity() {
 #[db_matrix_test]
 fn test_update_existing_resource() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. GIVEN a committed GameSettings resource
     let initial_settings = GameSettings {
@@ -167,9 +159,7 @@ fn test_update_existing_resource() {
 #[db_matrix_test]
 fn test_delete_persisted_entity() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Spawn and commit an entity.
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
@@ -203,8 +193,7 @@ fn test_delete_persisted_entity() {
 #[db_matrix_test]
 fn test_commit_with_no_changes() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN a committed app in a synchronized state with the database
     app.world_mut().spawn(Health { value: 100 });
@@ -223,8 +212,7 @@ fn test_commit_with_no_changes() {
 #[db_matrix_test]
 fn test_add_new_component_to_existing_entity() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. GIVEN a committed entity with only a Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
@@ -278,8 +266,7 @@ struct NonPersisted {
 fn test_commit_entity_with_non_persisted_component() {
     // GIVEN a new Bevy app with the PersistencePluginCore
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // WHEN an entity is spawned with a mix of persisted and non-persisted components
     let entity_id = app
@@ -339,8 +326,7 @@ fn test_commit_entity_with_non_persisted_component() {
 #[db_matrix_test]
 fn test_persist_component_with_empty_vec() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // WHEN an entity is spawned with a component that contains an empty `Vec`
     let inventory = Inventory { items: vec![] };
@@ -375,8 +361,7 @@ fn test_persist_component_with_empty_vec() {
 #[db_matrix_test]
 fn test_persist_component_with_option_none() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // WHEN an entity is spawned with a component that has an `Option<T>` field set to `None`
     let optional_data = OptionalData { data: None };

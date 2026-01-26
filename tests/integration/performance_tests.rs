@@ -1,11 +1,7 @@
 use crate::common::*;
-use bevy::prelude::App;
 use bevy::prelude::With;
 use bevy_persistence_database::PersistentQuery;
-use bevy_persistence_database::{
-    PersistencePluginCore, commit_sync, persistence_plugin::PersistencePluginConfig,
-    persistence_plugin::PersistencePlugins,
-};
+use bevy_persistence_database::{commit_sync, persistence_plugin::PersistencePluginConfig};
 use bevy_persistence_database_derive::db_matrix_test;
 use std::time::Instant;
 // Add imports for CSV output, timestamp, and git hash
@@ -27,14 +23,13 @@ fn test_persist_many_entities() {
     let thread_count = 8; // Explicitly set a higher thread count
 
     // Create app with explicit configuration
-    let mut app = App::new();
     let config = PersistencePluginConfig {
         batching_enabled: true,
         commit_batch_size: 1000,
         thread_count,
         default_store: TEST_STORE.to_string(),
     };
-    app.add_plugins(PersistencePluginCore::new(db.clone()).with_config(config));
+    let mut app = setup_test_app(db.clone(), Some(config.clone()));
 
     // --- spawn phase ---
     for _ in 0..count {
@@ -57,8 +52,7 @@ fn test_persist_many_entities() {
     );
 
     // --- fetch phase in a new session ---
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
 
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
         let _ = pq.ensure_loaded();

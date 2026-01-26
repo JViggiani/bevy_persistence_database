@@ -1,13 +1,12 @@
-use crate::common::{Health, TEST_STORE, make_app, run_async};
+use crate::common::{Health, TEST_STORE, make_app, run_async, setup_test_app};
 use bevy::prelude::With;
 use bevy::prelude::*;
 use bevy_persistence_database::PersistentQuery;
 use bevy_persistence_database::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
     BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, CommitStatus, DocumentKind, Guid,
-    MockDatabaseConnection, PersistenceError, PersistencePluginCore, TransactionOperation,
-    commit_sync,
-    persistence_plugin::PersistencePluginConfig, persistence_plugin::PersistencePlugins,
+    MockDatabaseConnection, PersistenceError, TransactionOperation, commit_sync,
+    persistence_plugin::PersistencePluginConfig,
 };
 use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::Arc;
@@ -35,9 +34,7 @@ fn test_successful_batch_commit_of_new_entities() {
     assert_eq!(count, 10);
 
     // loading back from DB
-    let mut app2 = App::new();
-    app2.add_plugins(MinimalPlugins);
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
         let _ = pq.ensure_loaded();
     }
@@ -74,9 +71,7 @@ fn test_batch_commit_with_updates_and_deletes() {
     assert!(res.is_ok());
     assert_eq!(*app.world().resource::<CommitStatus>(), CommitStatus::Idle);
 
-    let mut app2 = App::new();
-    app2.add_plugins(MinimalPlugins);
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
         let _ = pq.ensure_loaded();
     }
@@ -169,9 +164,7 @@ fn test_concurrent_batch_execution() {
         thread_count: 4,
         default_store: TEST_STORE.to_string(),
     };
-    let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config.clone());
-    let mut app = App::new();
-    app.add_plugins(plugin);
+    let mut app = setup_test_app(db_arc.clone(), Some(config.clone()));
 
     // Spawn enough entities to create `batch_count` batches
     for i in 0..entity_count {
@@ -245,9 +238,7 @@ fn test_atomic_multi_batch_commit() {
         thread_count: 2,
         default_store: TEST_STORE.to_string(),
     };
-    let plugin = PersistencePluginCore::new(db_arc.clone()).with_config(config);
-    let mut app = App::new();
-    app.add_plugins(plugin);
+    let mut app = setup_test_app(db_arc.clone(), Some(config));
 
     // Spawn enough entities to create multiple batches
     let entity_count = batch_count * 3; // use commit_batch_size = 3
@@ -280,8 +271,7 @@ fn test_atomic_multi_batch_commit() {
 #[test]
 fn test_batches_respect_config_max_ops() {
     use bevy_persistence_database::{
-        MockDatabaseConnection, PersistencePluginCore, commit_sync,
-        persistence_plugin::PersistencePluginConfig,
+        MockDatabaseConnection, commit_sync, persistence_plugin::PersistencePluginConfig,
     };
     use std::sync::Arc;
 
@@ -315,9 +305,7 @@ fn test_batches_respect_config_max_ops() {
         default_store: TEST_STORE.to_string(),
     };
     let conn = Arc::new(db);
-    let plugin = PersistencePluginCore::new(conn.clone()).with_config(config);
-    let mut app = App::new();
-    app.add_plugins(plugin);
+    let mut app = setup_test_app(conn.clone(), Some(config));
 
     // Spawn enough entities to require multiple batches
     for i in 0..entity_count {

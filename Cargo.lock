@@ -388,7 +388,7 @@ dependencies = [
 
 [[package]]
 name = "bevy_persistence_database"
-version = "0.2.6"
+version = "0.2.7"
 dependencies = [
  "arangors",
  "bevy",
@@ -405,6 +405,7 @@ dependencies = [
  "testcontainers",
  "tokio",
  "tokio-postgres",
+ "tracing",
  "tracing-subscriber",
  "uuid",
 ]

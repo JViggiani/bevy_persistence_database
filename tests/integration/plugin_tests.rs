@@ -1,10 +1,8 @@
 use crate::common::*;
-use bevy::MinimalPlugins;
-use bevy::prelude::{App, IntoScheduleConfigs, Messages};
+use bevy::prelude::{IntoScheduleConfigs, Messages};
 use bevy_persistence_database::{
     CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, Persist, PersistentQuery,
-    TriggerCommit, commit_sync, persistence_plugin::PersistencePlugins,
-    persistence_plugin::PersistenceSystemSet,
+    TriggerCommit, commit_sync, persistence_plugin::PersistenceSystemSet,
 };
 use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::Arc;
@@ -20,9 +18,7 @@ fn test_trigger_commit_clears_event_queue() {
         .returning(|_| Box::pin(async { Ok(vec![]) }));
 
     let db = Arc::new(db);
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN multiple TriggerCommit events are sent
     let trigger = TriggerCommit {
@@ -47,9 +43,7 @@ fn test_trigger_commit_clears_event_queue() {
 #[db_matrix_test]
 fn test_event_triggers_commit_and_persists_data() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN an entity is spawned
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
@@ -95,9 +89,7 @@ fn test_event_triggers_commit_and_persists_data() {
 #[db_matrix_test]
 fn test_queued_commit_persists_all_changes() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN an initial entity is created and a commit is triggered
     let entity_a = app.world_mut().spawn(Health { value: 100 }).id();
@@ -169,18 +161,14 @@ fn test_postupdate_load_applies_next_frame() {
     let (db, _container) = setup();
 
     // GIVEN: one entity to load
-    let mut app1 = App::new();
-    app1.add_plugins(MinimalPlugins);
-    app1.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app1 = setup_test_app(db.clone(), None);
     app1.world_mut()
         .spawn((Health { value: 7 }, Position { x: 1.0, y: 2.0 }));
     app1.update();
     commit_sync(&mut app1, db.clone(), TEST_STORE).expect("commit failed");
 
     // WHEN: load is triggered from PostUpdate
-    let mut app2 = App::new();
-    app2.add_plugins(MinimalPlugins);
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn postupdate_load(mut pq: PersistentQuery<(&Health, &Position)>) {
         let _ = pq.ensure_loaded();
     }

@@ -3,7 +3,6 @@ use bevy::prelude::*;
 use bevy_persistence_database::db::connection::MockDatabaseConnection;
 use bevy_persistence_database::{
     CommitStatus, Guid, Persist, PersistenceError, PersistenceSession, commit_sync,
-    persistence_plugin::PersistencePlugins,
 };
 use bevy_persistence_database_derive::{db_matrix_test, persist};
 use serde_json;
@@ -18,8 +17,7 @@ struct RoutedComp {
 fn commit_uses_provided_connection() {
     let (db, _container) = setup();
 
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     app.world_mut()
         .resource_mut::<PersistenceSession>()
@@ -46,8 +44,7 @@ fn commits_can_switch_connections_between_calls() {
     let (db_a, _guard_a) = setup();
     let (db_b, _guard_b) = setup();
 
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db_a.clone()));
+    let mut app = setup_test_app(db_a.clone(), None);
     app.world_mut()
         .resource_mut::<PersistenceSession>()
         .register_component::<RoutedComp>();
@@ -107,8 +104,7 @@ fn commit_failure_propagates_error_and_resets_status() {
         .returning(|_| Box::pin(async { Err(PersistenceError::new("boom")) }));
 
     let db = std::sync::Arc::new(mock_db);
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.world_mut()
         .resource_mut::<PersistenceSession>()
         .register_component::<RoutedComp>();

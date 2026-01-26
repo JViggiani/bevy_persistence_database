@@ -1,15 +1,11 @@
 use crate::common::*;
-use bevy::prelude::App;
-use bevy_persistence_database::{
-    Guid, PersistentQuery, commit_sync, persistence_plugin::PersistencePlugins,
-};
+use bevy_persistence_database::{Guid, PersistentQuery, commit_sync};
 use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
 fn test_load_resources_alongside_entities() {
     let (db, _container) = setup();
-    let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app1 = setup_test_app(db.clone(), None);
 
     // GIVEN a committed GameSettings resource
     let settings = GameSettings {
@@ -21,8 +17,7 @@ fn test_load_resources_alongside_entities() {
     commit_sync(&mut app1, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // WHEN any query is fetched into a new app
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn sys(mut pq: PersistentQuery<&Guid>) {
         let _ = pq.ensure_loaded();
     }

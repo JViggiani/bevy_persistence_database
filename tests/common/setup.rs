@@ -1,8 +1,8 @@
-use bevy::prelude::App;
+use bevy::prelude::{App, MinimalPlugins};
 use bevy_persistence_database::PersistencePluginCore;
 #[cfg(feature = "postgres")]
 use bevy_persistence_database::PostgresDbConnection;
-use bevy_persistence_database::persistence_plugin::PersistencePluginConfig;
+use bevy_persistence_database::persistence_plugin::{PersistencePluginConfig, PersistencePlugins};
 use bevy_persistence_database::{
     ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
     DatabaseConnection,
@@ -94,16 +94,7 @@ fn ensure_global() -> &'static GlobalContainerState {
 // Init logging + ensure Arango up
 #[ctor::ctor]
 fn initialize_logging() {
-    if std::env::var("RUST_LOG").is_err() {
-        unsafe {
-            std::env::set_var("RUST_LOG", "warn");
-        }
-    }
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_test_writer()
-        .init();
-    let _ = ensure_global();
+    initialize_tests();
 }
 
 // Teardown Arango if not kept
@@ -186,6 +177,45 @@ pub fn configured_backends() -> Vec<TestBackend> {
         }
     }
     out
+}
+
+static TEST_INIT: OnceLock<()> = OnceLock::new();
+
+/// Initialize test logging and shared containers exactly once.
+pub fn initialize_tests() {
+    let _ = TEST_INIT.get_or_init(|| {
+        if std::env::var("RUST_LOG").is_err() {
+            // Default to only this crate's logs at info level to keep output scoped.
+            unsafe {
+                std::env::set_var("RUST_LOG", "bevy_persistence_database=debug");
+            }
+        }
+
+        if !tracing::dispatcher::has_been_set() {
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("bevy_persistence_database=debug"));
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_test_writer()
+                .init();
+        }
+
+        // Ensure the shared test backend container is ready before tests run.
+        let _ = ensure_global();
+    });
+}
+
+/// Create a test `App` with `MinimalPlugins` and optional custom persistence configuration.
+pub fn setup_test_app(db: Arc<dyn DatabaseConnection>, config: Option<PersistencePluginConfig>) -> App {
+    initialize_tests();
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins);
+    if let Some(cfg) = config {
+        app.add_plugins(PersistencePluginCore::new(db).with_config(cfg));
+    } else {
+        app.add_plugins(PersistencePlugins::new(db));
+    }
+    app
 }
 
 // Postgres container state
@@ -393,11 +423,7 @@ pub fn make_app(db: Arc<dyn DatabaseConnection>, batch_size: usize) -> App {
         thread_count: 4,
         default_store: TEST_STORE.to_string(),
     };
-    let plugin = PersistencePluginCore::new(db.clone()).with_config(config);
-    let mut app = App::new();
-    app.add_plugins(bevy::MinimalPlugins);
-    app.add_plugins(plugin);
-    app
+    setup_test_app(db, Some(config))
 }
 
 #[cfg(feature = "postgres")]

@@ -1,16 +1,14 @@
 use bevy::prelude::*;
-use bevy_persistence_database::{Guid, Persist, commit_sync, plugins::PersistencePlugins};
+use bevy_persistence_database::{Guid, Persist, commit_sync};
 
 use crate::common::components::Health;
-use crate::common::{TestBackend, run_async, setup_backend};
+use crate::common::{TestBackend, run_async, setup_backend, setup_test_app};
 
 #[test]
 #[cfg(feature = "arango")]
 fn arango_accepts_hyphenated_collection_names() {
     let (db, _guard) = setup_backend(TestBackend::Arango);
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     let store = "world-test-with-dashes";
     let entity = app.world_mut().spawn(Health { value: 7 }).id();

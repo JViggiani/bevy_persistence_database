@@ -1,9 +1,6 @@
-use bevy::MinimalPlugins;
-use bevy::prelude::App;
 use bevy_persistence_database::{
     BEVY_PERSISTENCE_DATABASE_METADATA_FIELD, BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
     DocumentKind, Guid, Persist, PersistenceError, TransactionOperation, commit_sync,
-    persistence_plugin::PersistencePlugins,
 };
 use serde_json::json;
 
@@ -16,9 +13,7 @@ use bevy_persistence_database_derive::db_matrix_test;
 #[db_matrix_test]
 fn test_update_conflict_is_detected() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Commit an entity with Health component
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
@@ -74,9 +69,7 @@ fn test_update_conflict_is_detected() {
 #[db_matrix_test]
 fn test_delete_conflict_is_detected() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Commit an entity
     let entity_id = app.world_mut().spawn(Health { value: 100 }).id();
@@ -127,8 +120,7 @@ fn test_delete_conflict_is_detected() {
 #[db_matrix_test]
 fn test_conflict_strategy_last_write_wins() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Commit an entity with Health and Position
     let entity_id = app
@@ -241,8 +233,7 @@ fn test_conflict_strategy_last_write_wins() {
 #[db_matrix_test]
 fn test_conflict_strategy_three_way_merge() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. "Base" state: Commit an entity with Health and Position.
     let base_health = Health { value: 100 };

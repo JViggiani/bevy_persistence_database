@@ -1,15 +1,11 @@
 use crate::common::*;
-use bevy::prelude::App;
-use bevy_persistence_database::{
-    Guid, PersistentQuery, commit_sync, persistence_plugin::PersistencePlugins,
-};
+use bevy_persistence_database::{Guid, PersistentQuery, commit_sync};
 use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]
 fn test_value_filters_equality_operator() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN Health, Creature, PlayerName entities
     app.world_mut().spawn(Health { value: 100 });
@@ -26,8 +22,7 @@ fn test_value_filters_equality_operator() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // Health == 100
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn s1(pq: PersistentQuery<&Health>) {
         let _ = pq.filter(Health::value().eq(100)).ensure_loaded();
     }
@@ -72,8 +67,7 @@ fn test_value_filters_equality_operator() {
 #[db_matrix_test]
 fn test_value_filters_relational_operators() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN Health 99,100,101
     app.world_mut().spawn(Health { value: 99 });
@@ -83,8 +77,7 @@ fn test_value_filters_relational_operators() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // gt(100) -> 1
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn gt(pq: PersistentQuery<&Health>) {
         let _ = pq.filter(Health::value().gt(100)).ensure_loaded();
     }
@@ -147,8 +140,7 @@ fn test_value_filters_relational_operators() {
 #[db_matrix_test]
 fn test_value_filters_logical_combinations() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // GIVEN entities for AND/OR
     app.world_mut()
@@ -162,8 +154,7 @@ fn test_value_filters_logical_combinations() {
     app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
 
     fn and_sys(pq: PersistentQuery<(&Health, &Position)>) {
         let expr = Health::value().gt(100).and(Position::x().lt(100.0));
@@ -202,8 +193,7 @@ fn test_presence_value_combination_and_or() {
     let (db, _container) = setup();
 
     // Seed: only the first should match after value filter (Health.value >= 100)
-    let mut app_seed = App::new();
-    app_seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app_seed = setup_test_app(db.clone(), None);
     app_seed
         .world_mut()
         .spawn((Health { value: 120 }, Position { x: 0.0, y: 0.0 })); // match
@@ -213,8 +203,7 @@ fn test_presence_value_combination_and_or() {
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test: load using presence OR + value filter
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     fn sys(
         pq: PersistentQuery<

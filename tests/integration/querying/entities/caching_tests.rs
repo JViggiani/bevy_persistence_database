@@ -3,7 +3,7 @@ use crate::common::*;
 use bevy::prelude::*;
 use bevy_persistence_database::{
     DatabaseConnection, Guid, PersistentQuery, commit_sync,
-    db::connection::DatabaseConnectionResource, persistence_plugin::PersistencePlugins,
+    db::connection::DatabaseConnectionResource,
 };
 use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::{
@@ -33,8 +33,7 @@ fn test_force_refresh_system(mut query: PersistentQuery<&Health>) {
 #[db_matrix_test]
 fn test_persistent_query_caching() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Create some test data
     app.world_mut().spawn(Health { value: 100 });
@@ -42,8 +41,7 @@ fn test_persistent_query_caching() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // 2. Create a new app that will use the PersistentQuery with cache tracking
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
 
     // Wrap the real DB so we can count execute_documents() calls
     let query_count = Arc::new(AtomicUsize::new(0));
@@ -130,15 +128,13 @@ fn system_second_load(
 fn test_entity_not_overwritten_on_second_query_without_refresh() {
     // GIVEN an entity persisted with Health { value: 100 }
     let (db, _container) = setup();
-    let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app1 = setup_test_app(db.clone(), None);
     let _e = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
     commit_sync(&mut app1, db.clone(), TEST_STORE).expect("commit failed");
 
     // WHEN we load it into a fresh world via systems
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     app2.insert_resource(TestState::default());
 
     // 1) Load and capture GUID
@@ -178,15 +174,13 @@ fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res
 fn test_force_refresh_overwrites() {
     // GIVEN an entity persisted with Health { value: 100 }
     let (db, _container) = setup();
-    let mut app1 = App::new();
-    app1.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app1 = setup_test_app(db.clone(), None);
     let _e = app1.world_mut().spawn(Health { value: 100 }).id();
     app1.update();
     commit_sync(&mut app1, db.clone(), TEST_STORE).expect("commit failed");
 
     // Load into app2 via system, then mutate locally
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
         let _ = pq.ensure_loaded();
     }

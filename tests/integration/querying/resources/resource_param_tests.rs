@@ -2,7 +2,6 @@ use crate::common::*;
 use bevy::prelude::*;
 use bevy_persistence_database::{
     PersistenceSession, PersistentQuery, PersistentRes, PersistentResMut, commit_sync,
-    persistence_plugin::PersistencePlugins,
 };
 use bevy_persistence_database_derive::db_matrix_test;
 
@@ -33,9 +32,7 @@ fn loads_resource_on_first_access() {
     let (db, _container) = setup();
 
     // Seed: commit GameSettings to the store
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.42,
         map_name: "mystic".into(),
@@ -44,9 +41,7 @@ fn loads_resource_on_first_access() {
     commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
 
     fn sys(mut res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
@@ -70,9 +65,7 @@ fn respects_existing_resource() {
     let (db, _container) = setup();
 
     // Persist a different value in the store.
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.1,
         map_name: "persisted".into(),
@@ -81,9 +74,7 @@ fn respects_existing_resource() {
     commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test already has a local resource that should not be overwritten.
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
     app.insert_resource(GameSettings {
         difficulty: 0.9,
@@ -114,9 +105,7 @@ fn second_read_uses_local_after_mutation() {
     let (db, _container) = setup();
 
     // Persist initial value in the store
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.1,
         map_name: "persisted".into(),
@@ -125,9 +114,7 @@ fn second_read_uses_local_after_mutation() {
     commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(ReadCapture::default());
 
     fn first_load(mut res: PersistentRes<GameSettings>, mut cap: ResMut<ReadCapture>) {
@@ -164,9 +151,7 @@ fn store_override_is_used() {
     let alt_store = "alt_store";
 
     // Seed alt store with a resource
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.7,
         map_name: "alt".into(),
@@ -175,9 +160,7 @@ fn store_override_is_used() {
     commit_sync(&mut seed, db.clone(), alt_store).expect("seed commit failed");
 
     // App under test uses default store unless overridden
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
 
     fn sys(res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
@@ -201,9 +184,7 @@ fn store_override_is_used() {
 fn optional_res_none_when_absent() {
     let (db, _container) = setup();
 
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
 
     fn sys(res: Option<PersistentRes<GameSettings>>, mut cap: ResMut<CaptureSettings>) {
@@ -233,9 +214,7 @@ fn optional_res_none_when_absent() {
 fn optional_resmut_none_when_absent() {
     let (db, _container) = setup();
 
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(DirtyFlag::default());
 
     fn sys(res: Option<PersistentResMut<GameSettings>>, mut dirty: ResMut<DirtyFlag>) {
@@ -259,9 +238,7 @@ fn commit_persists_mutation() {
     let (db, _container) = setup();
 
     // Seed
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.5,
         map_name: "before".into(),
@@ -270,9 +247,7 @@ fn commit_persists_mutation() {
     commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // Mutate via PersistentResMut and commit
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     fn mutate(mut res: PersistentResMut<GameSettings>) {
         if let Some(mut r) = res.get_mut() {
@@ -285,9 +260,7 @@ fn commit_persists_mutation() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("commit failed");
 
     // Load in a fresh app to verify persistence
-    let mut verify = App::new();
-    verify.add_plugins(MinimalPlugins);
-    verify.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut verify = setup_test_app(db.clone(), None);
     verify.insert_resource(CaptureSettings::default());
 
     fn load(mut res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
@@ -311,9 +284,7 @@ fn sets_version_on_load() {
     let (db, _container) = setup();
 
     // Seed
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.11,
         map_name: "v1".into(),
@@ -321,9 +292,7 @@ fn sets_version_on_load() {
     seed.update();
     commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     fn sys(mut res: PersistentRes<GameSettings>) {
         let _ = res.get();
@@ -341,9 +310,7 @@ fn force_refresh_overwrites_local_state() {
     let (db, _container) = setup();
 
     // Seed initial value in store
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.insert_resource(GameSettings {
         difficulty: 0.2,
         map_name: "initial".into(),
@@ -352,9 +319,7 @@ fn force_refresh_overwrites_local_state() {
     commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
 
     // App under test: mutate local copy without committing
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(StepState::default());
 
     fn mutate_local(mut res: PersistentResMut<GameSettings>, mut step: ResMut<StepState>) {
@@ -393,9 +358,7 @@ fn force_refresh_overwrites_local_state() {
         done: bool,
     }
 
-    let mut updater = App::new();
-    updater.add_plugins(MinimalPlugins);
-    updater.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut updater = setup_test_app(db.clone(), None);
     updater.insert_resource(UpdaterState::default());
 
     fn load_and_mutate(mut res: PersistentResMut<GameSettings>, mut state: ResMut<UpdaterState>) {
@@ -427,9 +390,7 @@ fn mixed_query_and_resource_load() {
     let (db, _container) = setup();
 
     // Seed entity + resource
-    let mut seed = App::new();
-    seed.add_plugins(MinimalPlugins);
-    seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut seed = setup_test_app(db.clone(), None);
     seed.world_mut().spawn(Health { value: 7 });
     seed.insert_resource(GameSettings {
         difficulty: 0.33,
@@ -444,9 +405,7 @@ fn mixed_query_and_resource_load() {
         loaded_entities: usize,
     }
 
-    let mut app = App::new();
-    app.add_plugins(MinimalPlugins);
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(MixedState::default());
 
     fn sys(

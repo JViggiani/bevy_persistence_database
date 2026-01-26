@@ -3,7 +3,7 @@ use bevy::prelude::IntoScheduleConfigs;
 use bevy::prelude::*;
 use bevy_persistence_database::{
     PersistentQuery, commit_sync,
-    persistence_plugin::{PersistencePlugins, PersistenceSystemSet},
+    persistence_plugin::PersistenceSystemSet,
 };
 use bevy_persistence_database_derive::db_matrix_test;
 
@@ -13,8 +13,7 @@ fn test_query_lens_transmutation_world_only() {
     let (db, _container) = setup();
 
     // Seed: E1 = H+P (match), E2 = H only (no), E3 = P only (no)
-    let mut app_seed = App::new();
-    app_seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app_seed = setup_test_app(db.clone(), None);
     app_seed
         .world_mut()
         .spawn((Health { value: 10 }, Position { x: 1.0, y: 2.0 })); // match
@@ -24,8 +23,7 @@ fn test_query_lens_transmutation_world_only() {
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
     // App under test
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     #[derive(Resource, Default)]
     struct LensState {
@@ -63,8 +61,7 @@ fn test_query_lens_transmutation_calls_fn() {
     let (db, _container) = setup();
 
     // Seed: two H+P
-    let mut app_seed = App::new();
-    app_seed.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app_seed = setup_test_app(db.clone(), None);
     app_seed
         .world_mut()
         .spawn((Health { value: 7 }, Position { x: 0.0, y: 0.0 }));
@@ -75,8 +72,7 @@ fn test_query_lens_transmutation_calls_fn() {
     commit_sync(&mut app_seed, db.clone(), TEST_STORE).unwrap();
 
     // App under test
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     #[derive(Resource, Default)]
     struct CallState {

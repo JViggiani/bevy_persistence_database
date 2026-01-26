@@ -1,8 +1,6 @@
 use crate::common::*;
 use bevy::prelude::*;
-use bevy_persistence_database::{
-    Guid, PersistentQuery, commit_sync, persistence_plugin::PersistencePlugins,
-};
+use bevy_persistence_database::{Guid, PersistentQuery, commit_sync};
 use bevy_persistence_database_derive::db_matrix_test;
 
 fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
@@ -21,8 +19,7 @@ fn test_persistent_query_system_param() {
     // Use sync setup with a guard that drops inside a runtime
     let (db, _container) = setup();
 
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Create some test data
     let entity_high_health = app
@@ -54,8 +51,7 @@ fn test_persistent_query_system_param() {
         .to_string();
 
     // 2. Create a new app that will use the PersistentQuery
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
 
     // Add system that uses the PersistentQuery
     app2.add_systems(bevy::prelude::Update, test_persistent_query_system);
@@ -98,8 +94,7 @@ fn test_persistent_query_system_param() {
 #[db_matrix_test]
 fn test_persistent_query_with_filter() {
     let (db, _container) = setup();
-    let mut app = App::new();
-    app.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app = setup_test_app(db.clone(), None);
 
     // 1. Create some test data
     app.world_mut()
@@ -112,8 +107,7 @@ fn test_persistent_query_with_filter() {
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("Initial commit failed");
 
     // 2. Create a new app that will use the PersistentQuery with filter
-    let mut app2 = App::new();
-    app2.add_plugins(PersistencePlugins::new(db.clone()));
+    let mut app2 = setup_test_app(db.clone(), None);
 
     // Define a system that will test the filtered query
     fn filtered_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
