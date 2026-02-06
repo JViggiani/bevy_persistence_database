@@ -38,6 +38,7 @@ type ResourceSerializer = Box<
 >;
 type ResourceDeserializer =
     Box<dyn Fn(&mut World, Value) -> Result<(), PersistenceError> + Send + Sync>;
+type ResourceRemover = Box<dyn Fn(&mut World) + Send + Sync>;
 
 /// Manages a "unit of work": local World cache + change tracking + async runtime.
 #[derive(Resource)]
@@ -57,6 +58,7 @@ pub struct PersistenceSession {
     resource_serializers: HashMap<TypeId, ResourceSerializer>,
     resource_deserializers: HashMap<String, ResourceDeserializer>,
     resource_name_to_type_id: HashMap<String, TypeId>,
+    resource_removers: HashMap<TypeId, ResourceRemover>,
 }
 
 pub(crate) struct CommitData {
@@ -148,6 +150,14 @@ impl PersistenceSession {
         );
         self.resource_name_to_type_id
             .insert(de_key.to_string(), type_id);
+        
+        // Register remover function
+        self.resource_removers.insert(
+            type_id,
+            Box::new(|world| {
+                world.remove_resource::<R>();
+            }),
+        );
     }
 
     /// Manually mark a resource as needing persistence.
@@ -164,6 +174,25 @@ impl PersistenceSession {
     /// Lookup the registered `TypeId` for a persisted resource by name.
     pub fn resource_type_id(&self, name: &str) -> Option<TypeId> {
         self.resource_name_to_type_id.get(name).copied()
+    }
+
+    /// Returns an iterator over all registered persisted resource TypeIds.
+    /// Useful for cleanup operations like conflict reprocessing.
+    pub fn persisted_resource_types(&self) -> impl Iterator<Item = TypeId> + '_ {
+        self.resource_serializers.keys().copied()
+    }
+
+    /// Returns the number of registered persisted resources.
+    pub fn persisted_resource_count(&self) -> usize {
+        self.resource_removers.len()
+    }
+
+    /// Removes all persisted resources by calling each registered remover function.
+    /// This method borrows self immutably and calls each remover with the world.
+    pub fn remove_all_persisted_resources(&self, world: &mut World) {
+        for remover in self.resource_removers.values() {
+            remover(world);
+        }
     }
 
     /// Run the registered resource deserializer for a given persisted resource name.
@@ -204,6 +233,7 @@ impl PersistenceSession {
             resource_serializers: HashMap::new(),
             resource_deserializers: HashMap::new(),
             resource_name_to_type_id: HashMap::new(),
+            resource_removers: HashMap::new(),
             dirty_entities: HashSet::new(),
             despawned_entities: HashSet::new(),
             dirty_resources: HashSet::new(),
