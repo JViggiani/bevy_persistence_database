@@ -1,10 +1,9 @@
 use crate::common::*;
 use bevy::prelude::IntoScheduleConfigs;
 use bevy::prelude::*;
-use bevy_persistence_database::{
-    PersistentQuery, commit_sync,
-    persistence_plugin::PersistenceSystemSet,
-};
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::PersistenceSystemSet;
+use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 
 // Load via ensure_loaded, then transmute to a world-only view and verify.

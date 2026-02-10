@@ -1,0 +1,105 @@
+use bevy::prelude::{App, World};
+
+use crate::bevy::world_access::{DeferredWorldOperations, ImmediateWorldPtr};
+
+pub(crate) fn insert_initial_immediate_world_ptr(app: &mut App) {
+    let ptr: *mut World = app.world_mut() as *mut World;
+    bevy::log::trace!(
+        "PersistencePluginCore: inserting initial ImmediateWorldPtr {:p}",
+        ptr
+    );
+    if app.world().get_resource::<ImmediateWorldPtr>().is_none() {
+        app.insert_resource(ImmediateWorldPtr::new(ptr));
+    } else {
+        app.world_mut().resource_mut::<ImmediateWorldPtr>().set(ptr);
+    }
+}
+
+/// Publishes the current world pointer so other systems can materialize results immediately.
+pub(crate) fn publish_immediate_world_ptr(world: &mut World) {
+    let ptr: *mut World = world as *mut World;
+    if world.get_resource::<ImmediateWorldPtr>().is_none() {
+        world.insert_resource(ImmediateWorldPtr::new(ptr));
+    } else {
+        world.resource_mut::<ImmediateWorldPtr>().set(ptr);
+    }
+}
+
+/// Applies queued world mutations (e.g. entity spawns, component inserts) for this frame.
+pub(crate) fn apply_deferred_world_ops(world: &mut World) {
+    let mut pending = world.resource::<DeferredWorldOperations>().drain();
+    for op in pending.drain(..) {
+        op(world);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bevy::params::resource::PersistentRes;
+    use crate::bevy::plugins::persistence_plugin::PersistencePlugins;
+    use crate::core::db::connection::MockDatabaseConnection;
+    use crate::core::session::PersistenceSession;
+    use bevy::prelude::*;
+    use bevy_persistence_database_derive::persist;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    #[persist(resource)]
+    struct TestSettings {
+        difficulty: f32,
+        map_name: String,
+    }
+
+    #[derive(Resource, Default)]
+    struct Capture {
+        loaded: bool,
+        map_name: Option<String>,
+        difficulty: Option<f32>,
+    }
+
+    #[test]
+    fn refreshes_immediate_world_ptr_before_startup_after_app_move() {
+        let mut db = MockDatabaseConnection::new();
+        db.expect_fetch_resource()
+            .returning(|_, _| Box::pin(async {
+                Ok(Some((json!({ "difficulty": 0.3, "map_name": "moved" }), 1)))
+            }));
+        db.expect_document_key_field().return_const("_key");
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.add_plugins(PersistencePlugins::new(Arc::new(db)));
+
+        {
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
+            session.register_resource::<TestSettings>();
+        }
+
+        app.insert_resource(Capture::default());
+
+        // Move the app to a new memory location after plugin construction.
+        let mut relocated = Vec::new();
+        relocated.push(app);
+        let mut app = relocated.pop().expect("relocated app");
+
+        app.add_systems(
+            Update,
+            |mut res: PersistentRes<TestSettings>, mut cap: ResMut<Capture>| {
+                if let Some(gs) = res.get() {
+                    cap.loaded = true;
+                    cap.map_name = Some(gs.map_name.clone());
+                    cap.difficulty = Some(gs.difficulty);
+                }
+            },
+        );
+
+        app.update();
+
+        let cap = app.world().resource::<Capture>();
+        assert!(cap.loaded, "resource should load even after app move");
+        assert_eq!(cap.map_name.as_deref(), Some("moved"));
+        assert_eq!(cap.difficulty, Some(0.3));
+    }
+}

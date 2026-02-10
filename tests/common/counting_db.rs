@@ -1,7 +1,7 @@
-use bevy_persistence_database::query::persistence_query_specification::PersistenceQuerySpecification;
-use bevy_persistence_database::{
+use bevy_persistence_database::core::db::{
     DatabaseConnection, DocumentKind, PersistenceError, TransactionOperation,
 };
+use bevy_persistence_database::core::query::PersistenceQuerySpecification;
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::{

@@ -1,8 +1,8 @@
 use crate::common::*;
 use bevy::prelude::*;
-use bevy_persistence_database::{
-    PersistenceSession, PersistentQuery, PersistentRes, PersistentResMut, commit_sync,
-};
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::bevy::params::resource::{PersistentRes, PersistentResMut};
+use bevy_persistence_database::core::session::{PersistenceSession, commit_sync};
 use bevy_persistence_database_derive::db_matrix_test;
 
 #[derive(Resource, Default)]

@@ -66,15 +66,17 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn #register_fn(app: &mut bevy::app::App) {
                 use bevy::prelude::IntoScheduleConfigs;
                 let type_id = std::any::TypeId::of::<#name>();
-                let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
+                let mut registered = app
+                    .world_mut()
+                    .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
                 if registered.types.insert(type_id) {
                     app.world_mut()
-                        .resource_mut::<#crate_path::PersistenceSession>()
+                        .resource_mut::<#crate_path::core::session::PersistenceSession>()
                         .register_component::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
-                        #crate_path::persistence_plugin::auto_dirty_tracking_entity_system::<#name>
-                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::ChangeDetection),
+                        #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_entity_system::<#name>
+                            .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
                     );
                 }
             }
@@ -85,15 +87,17 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             fn #register_fn(app: &mut bevy::app::App) {
                 use bevy::prelude::IntoScheduleConfigs;
                 let type_id = std::any::TypeId::of::<#name>();
-                let mut registered = app.world_mut().resource_mut::<#crate_path::persistence_plugin::RegisteredPersistTypes>();
+                let mut registered = app
+                    .world_mut()
+                    .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
                 if registered.types.insert(type_id) {
                     app.world_mut()
-                        .resource_mut::<#crate_path::PersistenceSession>()
+                        .resource_mut::<#crate_path::core::session::PersistenceSession>()
                         .register_resource::<#name>();
                     app.add_systems(
                         bevy::app::PostUpdate,
-                        #crate_path::persistence_plugin::auto_dirty_tracking_resource_system::<#name>
-                            .in_set(#crate_path::persistence_plugin::PersistenceSystemSet::ChangeDetection),
+                        #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_resource_system::<#name>
+                            .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
                     );
                 }
             }
@@ -104,7 +108,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         #[ctor::ctor]
         #[allow(non_snake_case)]
         fn #ctor_fn() {
-            #crate_path::registration::COMPONENT_REGISTRY
+            #crate_path::bevy::registration::COMPONENT_REGISTRY
                 .lock()
                 .unwrap()
                 .push(#register_fn);
@@ -113,7 +117,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Implement the Persist trait, providing the name() method
     let impl_persist = quote! {
-        impl #crate_path::Persist for #name {
+        impl #crate_path::core::persist::Persist for #name {
             fn name() -> &'static str {
                 stringify!(#name)
             }
@@ -126,8 +130,8 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         let methods = s.fields.iter().filter_map(|f| f.ident.as_ref()).map(|ident| {
             let field_str = LitStr::new(&ident.to_string(), proc_macro2::Span::call_site());
             quote! {
-                pub fn #ident() -> #crate_path::query::filter_expression::FilterExpression {
-                    #crate_path::query::filter_expression::FilterExpression::field(<Self as #crate_path::Persist>::name(), #field_str)
+                pub fn #ident() -> #crate_path::core::query::filter_expression::FilterExpression {
+                    #crate_path::core::query::filter_expression::FilterExpression::field(<Self as #crate_path::core::persist::Persist>::name(), #field_str)
                 }
             }
         });

@@ -1,10 +1,11 @@
 use crate::common::CountingDbConnection;
 use crate::common::*;
 use bevy::prelude::*;
-use bevy_persistence_database::{
-    DatabaseConnection, Guid, PersistentQuery, commit_sync,
-    db::connection::DatabaseConnectionResource,
-};
+use bevy_persistence_database::bevy::components::Guid;
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::core::db::DatabaseConnection;
+use bevy_persistence_database::core::db::connection::DatabaseConnectionResource;
+use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::{
     Arc,

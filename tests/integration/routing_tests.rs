@@ -1,9 +1,10 @@
 use crate::common::*;
 use bevy::prelude::*;
-use bevy_persistence_database::db::connection::MockDatabaseConnection;
-use bevy_persistence_database::{
-    CommitStatus, Guid, Persist, PersistenceError, PersistenceSession, commit_sync,
-};
+use bevy_persistence_database::bevy::components::Guid;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::CommitStatus;
+use bevy_persistence_database::core::db::{MockDatabaseConnection, PersistenceError};
+use bevy_persistence_database::core::persist::Persist;
+use bevy_persistence_database::core::session::{PersistenceSession, commit_sync};
 use bevy_persistence_database_derive::{db_matrix_test, persist};
 use serde_json;
 

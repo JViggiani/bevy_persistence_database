@@ -1,5 +1,7 @@
 use bevy::prelude::*;
-use bevy_persistence_database::{Guid, Persist, commit_sync};
+use bevy_persistence_database::bevy::components::Guid;
+use bevy_persistence_database::core::persist::Persist;
+use bevy_persistence_database::core::session::commit_sync;
 
 use crate::common::components::Health;
 use crate::common::{TestBackend, run_async, setup_backend, setup_test_app};

@@ -1,13 +1,17 @@
 use crate::common::{Health, TEST_STORE, make_app, run_async, setup_test_app};
 use bevy::prelude::With;
 use bevy::prelude::*;
-use bevy_persistence_database::PersistentQuery;
-use bevy_persistence_database::{
-    BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, CommitStatus, DocumentKind, Guid,
-    MockDatabaseConnection, PersistenceError, TransactionOperation, commit_sync,
-    persistence_plugin::PersistencePluginConfig,
+use bevy_persistence_database::bevy::components::Guid;
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::{
+    CommitStatus, PersistencePluginConfig,
 };
+use bevy_persistence_database::core::db::{
+    BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DocumentKind, MockDatabaseConnection,
+    PersistenceError, TransactionOperation,
+};
+use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -270,9 +274,9 @@ fn test_atomic_multi_batch_commit() {
 
 #[test]
 fn test_batches_respect_config_max_ops() {
-    use bevy_persistence_database::{
-        MockDatabaseConnection, commit_sync, persistence_plugin::PersistencePluginConfig,
-    };
+    use bevy_persistence_database::bevy::plugins::persistence_plugin::PersistencePluginConfig;
+    use bevy_persistence_database::core::db::MockDatabaseConnection;
+    use bevy_persistence_database::core::session::commit_sync;
     use std::sync::Arc;
 
     // Configure a non-trivial batch size and entity count

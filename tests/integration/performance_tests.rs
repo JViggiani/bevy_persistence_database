@@ -1,7 +1,8 @@
 use crate::common::*;
 use bevy::prelude::With;
-use bevy_persistence_database::PersistentQuery;
-use bevy_persistence_database::{commit_sync, persistence_plugin::PersistencePluginConfig};
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::PersistencePluginConfig;
+use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 use std::time::Instant;
 // Add imports for CSV output, timestamp, and git hash

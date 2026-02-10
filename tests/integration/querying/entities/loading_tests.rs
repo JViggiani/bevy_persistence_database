@@ -1,6 +1,8 @@
 use crate::common::*;
 use bevy::prelude::With;
-use bevy_persistence_database::{Guid, PersistentQuery, commit_sync};
+use bevy_persistence_database::bevy::components::Guid;
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 
 #[db_matrix_test]

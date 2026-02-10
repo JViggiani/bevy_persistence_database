@@ -1,9 +1,13 @@
 use crate::common::*;
 use bevy::prelude::{IntoScheduleConfigs, Messages};
-use bevy_persistence_database::{
-    CommitCompleted, CommitStatus, Guid, MockDatabaseConnection, Persist, PersistentQuery,
-    TriggerCommit, commit_sync, persistence_plugin::PersistenceSystemSet,
+use bevy_persistence_database::bevy::components::Guid;
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::{
+    CommitCompleted, CommitStatus, PersistenceSystemSet, TriggerCommit,
 };
+use bevy_persistence_database::core::db::MockDatabaseConnection;
+use bevy_persistence_database::core::persist::Persist;
+use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 use std::sync::Arc;
 

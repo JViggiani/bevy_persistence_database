@@ -1,9 +1,11 @@
 use bevy::prelude::{App, MinimalPlugins};
-use bevy_persistence_database::PersistencePluginCore;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::PersistencePluginCore;
 #[cfg(feature = "postgres")]
-use bevy_persistence_database::PostgresDbConnection;
-use bevy_persistence_database::persistence_plugin::{PersistencePluginConfig, PersistencePlugins};
-use bevy_persistence_database::{
+use bevy_persistence_database::core::db::PostgresDbConnection;
+use bevy_persistence_database::bevy::plugins::persistence_plugin::{
+    PersistencePluginConfig, PersistencePlugins,
+};
+use bevy_persistence_database::core::db::{
     ArangoAuthMode, ArangoAuthRefresh, ArangoConnectionConfig, ArangoDbConnection,
     DatabaseConnection,
 };
