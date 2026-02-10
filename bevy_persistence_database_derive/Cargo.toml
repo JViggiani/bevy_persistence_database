@@ -1,6 +1,6 @@
 [package]
 name = "bevy_persistence_database_derive"
-version = "0.2.6"
+version = "0.2.9"
 edition.workspace = true
 description = "Derive macros for bevy_persistence_database"
 license-file = "LICENSE"
