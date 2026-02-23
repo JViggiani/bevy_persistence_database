@@ -6,7 +6,7 @@ use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 
 fn system_without_creature(mut pq: PersistentQuery<&Guid, Without<Creature>>) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -53,7 +53,7 @@ fn system_type_driven_presence(
     >,
 ) {
     // Load entities that have Health but do NOT have Creature
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -100,7 +100,7 @@ fn system_type_driven_or_presence(
     >,
 ) {
     // Load entities that have Health OR Creature
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -144,7 +144,7 @@ fn system_nested_tuple_presence(
         ),
     >,
 ) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -195,7 +195,7 @@ fn system_and_or_mix_with_without(
         ),
     >,
 ) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -237,7 +237,7 @@ fn test_and_or_mix_with_without_filters() {
 fn system_optional_q_with_without(
     mut pq: PersistentQuery<(Option<&Creature>, &Health), bevy::prelude::Without<Creature>>,
 ) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -279,7 +279,7 @@ fn system_or_three_arms(
         )>,
     >,
 ) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -361,7 +361,7 @@ fn test_presence_expression_complex_and_or_not() {
             ),
         >,
     ) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app.add_systems(bevy::prelude::Update, sys);
     app.update();

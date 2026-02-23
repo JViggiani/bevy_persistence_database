@@ -182,7 +182,7 @@ fn test_conflict_strategy_last_write_wins() {
         pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>,
         key: bevy::prelude::Res<KeyRes>,
     ) {
-        let _ = pq.filter(Guid::key_field().eq(&key.0)).ensure_loaded();
+        let _ = pq.filter(Guid::key_field().eq(&key.0)).load();
     }
     app.insert_resource(KeyRes(key.clone()));
     app.add_systems(bevy::prelude::Update, reload_by_key);

@@ -6,7 +6,7 @@ use bevy_persistence_database::bevy::plugins::persistence_plugin::PersistenceSys
 use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 
-// Load via ensure_loaded, then transmute to a world-only view and verify.
+// Load via load(), then transmute to a world-only view and verify.
 #[db_matrix_test]
 fn test_query_lens_transmutation_world_only() {
     let (db, _container) = setup();
@@ -32,7 +32,7 @@ fn test_query_lens_transmutation_world_only() {
 
     // Update: load original query set (&Health, &Position)
     fn sys_load(mut pq: PersistentQuery<(&Health, &Position)>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app.add_systems(Update, sys_load);
 
@@ -93,7 +93,7 @@ fn test_query_lens_transmutation_calls_fn() {
 
     // Update: load original set
     fn sys_load(mut pq: PersistentQuery<(&Health, &Position)>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app.add_systems(Update, sys_load);
 

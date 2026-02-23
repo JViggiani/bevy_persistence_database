@@ -31,6 +31,62 @@ pub fn auto_dirty_tracking_resource_system<T: Resource + Persist>(
     }
 }
 
+/// Automatically marks entities whose built-in Bevy relationship component changed as dirty.
+/// Used when the `bevy_many_relationship_edges` feature is disabled.
+#[cfg(not(feature = "bevy_many_relationship_edges"))]
+pub fn auto_dirty_tracking_bevy_relationship_system<
+    R: Component + bevy::ecs::relationship::Relationship,
+>(
+    mut session: ResMut<PersistenceSession>,
+    changed_query: Query<Entity, Or<(Added<R>, Changed<R>)>>,
+    mut removed: RemovedComponents<R>,
+) {
+    for entity in changed_query.iter() {
+        bevy::log::debug!(
+            "Marking entity {:?} as relationship-dirty due to Relationship<{}>",
+            entity,
+            std::any::type_name::<R>()
+        );
+        session.mark_relationship_entity_dirty(entity);
+    }
+    // Also mark entities whose relationship component was removed entirely.
+    for entity in removed.read() {
+        bevy::log::debug!(
+            "Marking entity {:?} as relationship-dirty due to removal of Relationship<{}>",
+            entity,
+            std::any::type_name::<R>()
+        );
+        session.mark_relationship_entity_dirty(entity);
+    }
+}
+
+/// Automatically marks entities with changed outgoing many-relationships as dirty.
+#[cfg(feature = "bevy_many_relationship_edges")]
+pub fn auto_dirty_tracking_relationship_system<R: Send + Sync + 'static>(
+    mut session: ResMut<PersistenceSession>,
+    query: Query<Entity, Changed<bevy_many_relationships::OutgoingRelationships<R>>>,
+    mut removed: RemovedComponents<bevy_many_relationships::OutgoingRelationships<R>>,
+) {
+    for entity in query.iter() {
+        bevy::log::debug!(
+            "Marking entity {:?} as relationship-dirty due to OutgoingRelationships<{}>",
+            entity,
+            std::any::type_name::<R>()
+        );
+        session.mark_relationship_entity_dirty(entity);
+    }
+    // When the last relationship is removed the OutgoingRelationships component
+    // is dropped entirely — that fires RemovedComponents, not Changed.
+    for entity in removed.read() {
+        bevy::log::debug!(
+            "Marking entity {:?} as relationship-dirty due to removal of OutgoingRelationships<{}>",
+            entity,
+            std::any::type_name::<R>()
+        );
+        session.mark_relationship_entity_dirty(entity);
+    }
+}
+
 /// Detects removal of persisted resources and marks them for deletion.
 pub(crate) fn auto_despawn_tracking_resource_system(ecs: &mut World) {
     let presence_snapshot = {

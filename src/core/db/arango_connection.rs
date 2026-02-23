@@ -4,11 +4,13 @@
 use crate::core::db::DatabaseConnection;
 use crate::core::db::connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DocumentKind, PersistenceError,
+    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DocumentKind, EdgeDocument, PersistenceError,
     TransactionOperation, read_kind, read_version,
 };
-use crate::core::db::shared::{GroupedOperations, OperationType, check_operation_success};
-use crate::core::query::{BinaryOperator, FilterExpression, PersistenceQuerySpecification};
+use crate::core::db::shared::{GroupedOperations, OperationType, check_operation_success, extract_keys};
+use crate::core::query::{
+    BinaryOperator, EdgeQuerySpecification, FilterExpression, PersistenceQuerySpecification,
+};
 use arangors::{
     AqlQuery, ClientError, Connection, Database,
     client::reqwest::ReqwestClient,
@@ -18,7 +20,7 @@ use futures::FutureExt;
 use futures::future::BoxFuture;
 use once_cell::sync::Lazy;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
@@ -222,6 +224,25 @@ impl ArangoDbConnection {
             Ok(_) => Ok(()),
             Err(e) => {
                 if let ClientError::Arango(arango_error) = &e {
+                    if arango_error.error_num() == 1207 {
+                        return Ok(());
+                    }
+                }
+                Err(PersistenceError::new(e.to_string()))
+            }
+        }
+    }
+
+    /// Ensure an edge collection (type 3) exists in ArangoDB.
+    async fn ensure_edge_collection(
+        db: &Database<ReqwestClient>,
+        name: &str,
+    ) -> Result<(), PersistenceError> {
+        match db.create_edge_collection(name).await {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let ClientError::Arango(arango_error) = &e {
+                    // 1207 = duplicate name (already exists)
                     if arango_error.error_num() == 1207 {
                         return Ok(());
                     }
@@ -654,7 +675,7 @@ impl DatabaseConnection for ArangoDbConnection {
         operations: Vec<TransactionOperation>,
     ) -> BoxFuture<'static, Result<Vec<String>, PersistenceError>> {
         // The DB-level key attribute (e.g., `_key`) for returns
-        let key_attr = self.document_key_field();
+        let _key_attr = self.document_key_field();
         self.with_reauth(move |db| {
             let operations = operations.clone();
             async move {
@@ -675,8 +696,22 @@ impl DatabaseConnection for ArangoDbConnection {
 
                 ArangoDbConnection::ensure_collection(&db, &store).await?;
 
+                let groups = GroupedOperations::from_operations(operations, JSON_KEY_FIELD);
+
+                // If there are edge operations, also ensure the edge collection
+                let edge_collection = format!("{}__edges", store);
+                let has_edge_ops = !groups.edges.upserts.is_empty() || !groups.edges.deletes.is_empty();
+                if has_edge_ops {
+                    ArangoDbConnection::ensure_edge_collection(&db, &edge_collection).await?;
+                }
+
+                let mut write_collections = vec![store.clone()];
+                if has_edge_ops {
+                    write_collections.push(edge_collection.clone());
+                }
+
                 let collections = TransactionCollections::builder()
-                    .write(vec![store.clone()])
+                    .write(write_collections)
                     .build();
                 let settings = TransactionSettings::builder()
                     .collections(collections)
@@ -687,22 +722,20 @@ impl DatabaseConnection for ArangoDbConnection {
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
 
-                let groups = GroupedOperations::from_operations(operations, JSON_KEY_FIELD);
-                let mut new_keys: Vec<String> = Vec::new();
+                let new_keys: Vec<String> = Vec::new();
 
                 // 1) Entity creates
-                if !groups.entity_creates.is_empty() {
+                if !groups.entities.creates.is_empty() {
                     let aql = format!(
-                        "FOR d IN @{bind} INSERT d INTO @@{col} RETURN NEW.`{key}`",
+                        "FOR d IN @{bind} INSERT d INTO @@{col}",
                         bind = AQL_BIND_DOCS,
-                        col = AQL_BIND_STORE,
-                        key = key_attr
+                        col = AQL_BIND_STORE
                     );
                     let mut bind_vars: std::collections::HashMap<String, Value> =
                         std::collections::HashMap::new();
                     bind_vars.insert(
                         AQL_BIND_DOCS.into(),
-                        Value::Array(groups.entity_creates.clone()),
+                        Value::Array(groups.entities.creates.clone()),
                     );
                     insert_store_bind(&mut bind_vars, &store);
                     let query = AqlQuery::builder()
@@ -714,16 +747,15 @@ impl DatabaseConnection for ArangoDbConnection {
                                 .collect(),
                         )
                         .build();
-                    let keys: Vec<String> = trx
+                    let _: Vec<Value> = trx
                         .aql_query(query)
                         .await
                         .map_err(|e| PersistenceError::new(e.to_string()))?;
-                    new_keys.extend(keys);
                 }
 
                 // 2) Entity updates
-                if !groups.entity_updates.is_empty() {
-                    let requested = groups.extract_keys(&groups.entity_updates, JSON_KEY_FIELD);
+                if !groups.entities.updates.is_empty() {
+                    let requested = extract_keys(&groups.entities.updates, JSON_KEY_FIELD);
                     let aql = format!(
                         "FOR p IN @{patches}
                        LET doc = DOCUMENT(@@{col}, p.{key})
@@ -743,7 +775,7 @@ impl DatabaseConnection for ArangoDbConnection {
                         std::collections::HashMap::new();
                     bind_vars.insert(
                         AQL_BIND_PATCHES.into(),
-                        Value::Array(groups.entity_updates.clone()),
+                        Value::Array(groups.entities.updates.clone()),
                     );
                     bind_vars.insert(
                         AQL_BIND_KIND.into(),
@@ -772,8 +804,8 @@ impl DatabaseConnection for ArangoDbConnection {
                 }
 
                 // 3) Entity deletes
-                if !groups.entity_deletes.is_empty() {
-                    let requested = groups.extract_keys(&groups.entity_deletes, JSON_KEY_FIELD);
+                if !groups.entities.deletes.is_empty() {
+                    let requested = extract_keys(&groups.entities.deletes, JSON_KEY_FIELD);
                     let aql = format!(
                         "FOR p IN @{deletes}
                        LET doc = DOCUMENT(@@{col}, p.{key})
@@ -793,7 +825,7 @@ impl DatabaseConnection for ArangoDbConnection {
                         std::collections::HashMap::new();
                     bind_vars.insert(
                         AQL_BIND_DELETES.into(),
-                        Value::Array(groups.entity_deletes.clone()),
+                        Value::Array(groups.entities.deletes.clone()),
                     );
                     bind_vars.insert(
                         AQL_BIND_KIND.into(),
@@ -822,7 +854,7 @@ impl DatabaseConnection for ArangoDbConnection {
                 }
 
                 // 4) Resource creates
-                if !groups.resource_creates.is_empty() {
+                if !groups.resources.creates.is_empty() {
                     let aql = format!(
                         "FOR d IN @{bind} INSERT d INTO @@{col}",
                         bind = AQL_BIND_DOCS,
@@ -832,7 +864,7 @@ impl DatabaseConnection for ArangoDbConnection {
                         std::collections::HashMap::new();
                     bind_vars.insert(
                         AQL_BIND_DOCS.into(),
-                        Value::Array(groups.resource_creates.clone()),
+                        Value::Array(groups.resources.creates.clone()),
                     );
                     insert_store_bind(&mut bind_vars, &store);
                     let query = AqlQuery::builder()
@@ -851,8 +883,8 @@ impl DatabaseConnection for ArangoDbConnection {
                 }
 
                 // 5) Resource updates
-                if !groups.resource_updates.is_empty() {
-                    let requested = groups.extract_keys(&groups.resource_updates, JSON_KEY_FIELD);
+                if !groups.resources.updates.is_empty() {
+                    let requested = extract_keys(&groups.resources.updates, JSON_KEY_FIELD);
                     let aql = format!(
                         "FOR p IN @{patches}
                        LET doc = DOCUMENT(@@{col}, p.{key})
@@ -872,7 +904,7 @@ impl DatabaseConnection for ArangoDbConnection {
                         std::collections::HashMap::new();
                     bind_vars.insert(
                         AQL_BIND_PATCHES.into(),
-                        Value::Array(groups.resource_updates.clone()),
+                        Value::Array(groups.resources.updates.clone()),
                     );
                     bind_vars.insert(
                         AQL_BIND_KIND.into(),
@@ -901,8 +933,8 @@ impl DatabaseConnection for ArangoDbConnection {
                 }
 
                 // 6) Resource deletes
-                if !groups.resource_deletes.is_empty() {
-                    let requested = groups.extract_keys(&groups.resource_deletes, JSON_KEY_FIELD);
+                if !groups.resources.deletes.is_empty() {
+                    let requested = extract_keys(&groups.resources.deletes, JSON_KEY_FIELD);
                     let aql = format!(
                         "FOR p IN @{deletes}
                        LET doc = DOCUMENT(@@{col}, p.{key})
@@ -922,7 +954,7 @@ impl DatabaseConnection for ArangoDbConnection {
                         std::collections::HashMap::new();
                     bind_vars.insert(
                         AQL_BIND_DELETES.into(),
-                        Value::Array(groups.resource_deletes.clone()),
+                        Value::Array(groups.resources.deletes.clone()),
                     );
                     bind_vars.insert(
                         AQL_BIND_KIND.into(),
@@ -948,6 +980,79 @@ impl DatabaseConnection for ArangoDbConnection {
                         &OperationType::Delete,
                         store.as_str(),
                     )?;
+                }
+
+                // 7) Edge upserts
+                if !groups.edges.upserts.is_empty() {
+                    let edge_docs: Vec<Value> = groups.edges.upserts.iter().map(|edge| {
+                        let mut doc = serde_json::json!({
+                            "_key": &edge.key,
+                            "relationship_type": &edge.relationship_type,
+                            "_from": format!("{}/{}", store, &edge.from_guid),
+                            "_to": format!("{}/{}", store, &edge.to_guid),
+                            "from_guid": &edge.from_guid,
+                            "to_guid": &edge.to_guid,
+                        });
+                        if let Some(payload) = &edge.payload {
+                            doc.as_object_mut().unwrap().insert("payload".to_string(), payload.clone());
+                        }
+                        doc
+                    }).collect();
+
+                    let aql = format!(
+                        "FOR d IN @docs UPSERT {{ _key: d._key }} INSERT d UPDATE d IN @@col",
+                    );
+                    let mut bind_vars: std::collections::HashMap<String, Value> =
+                        std::collections::HashMap::new();
+                    bind_vars.insert("docs".into(), Value::Array(edge_docs));
+                    bind_vars.insert(
+                        format!("@{}", "col"),
+                        Value::String(edge_collection.clone()),
+                    );
+                    let query = AqlQuery::builder()
+                        .query(&aql)
+                        .bind_vars(
+                            bind_vars
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.clone()))
+                                .collect(),
+                        )
+                        .build();
+                    let _: Vec<Value> = trx
+                        .aql_query(query)
+                        .await
+                        .map_err(|e| PersistenceError::new(e.to_string()))?;
+                }
+
+                // 8) Edge deletes
+                if !groups.edges.deletes.is_empty() {
+                    let keys: Vec<Value> = groups.edges.deletes.iter()
+                        .map(|k| Value::String(k.clone()))
+                        .collect();
+
+                    let aql = format!(
+                        "FOR k IN @keys LET doc = DOCUMENT(@@col, k) FILTER doc != null REMOVE doc IN @@col",
+                    );
+                    let mut bind_vars: std::collections::HashMap<String, Value> =
+                        std::collections::HashMap::new();
+                    bind_vars.insert("keys".into(), Value::Array(keys));
+                    bind_vars.insert(
+                        format!("@{}", "col"),
+                        Value::String(edge_collection.clone()),
+                    );
+                    let query = AqlQuery::builder()
+                        .query(&aql)
+                        .bind_vars(
+                            bind_vars
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.clone()))
+                                .collect(),
+                        )
+                        .build();
+                    let _: Vec<Value> = trx
+                        .aql_query(query)
+                        .await
+                        .map_err(|e| PersistenceError::new(e.to_string()))?;
                 }
 
                 trx.commit()
@@ -996,6 +1101,126 @@ impl DatabaseConnection for ArangoDbConnection {
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
 
                 Ok(result.first().copied().unwrap_or(0))
+            }
+        })
+    }
+
+    fn query_edges(
+        &self,
+        spec: &EdgeQuerySpecification,
+    ) -> BoxFuture<'static, Result<Vec<EdgeDocument>, PersistenceError>> {
+        let spec = spec.clone();
+        self.with_reauth(move |db| {
+            let spec = spec.clone();
+            async move {
+                if spec.store.is_empty() || spec.depth == 0 {
+                    return Ok(Vec::new());
+                }
+
+                let edge_collection = format!("{}__edges", spec.store);
+                ArangoDbConnection::ensure_edge_collection(&db, &edge_collection).await?;
+
+                if spec.from_guids.is_empty() {
+                    let aql = "FOR e IN @@col
+  FILTER LENGTH(@types) == 0 OR e.relationship_type IN @types
+  FILTER LENGTH(@to_guids) == 0 OR e.to_guid IN @to_guids
+  RETURN { key: e._key, relationship_type: e.relationship_type, from_guid: e.from_guid, to_guid: e.to_guid, payload: e.payload }";
+
+                    let mut bind_vars: HashMap<String, Value> = HashMap::new();
+                    bind_vars.insert("@col".into(), Value::String(edge_collection.clone()));
+                    bind_vars.insert(
+                        "types".into(),
+                        Value::Array(
+                            spec.relationship_types
+                                .iter()
+                                .cloned()
+                                .map(Value::String)
+                                .collect(),
+                        ),
+                    );
+                    bind_vars.insert(
+                        "to_guids".into(),
+                        Value::Array(spec.to_guids.iter().cloned().map(Value::String).collect()),
+                    );
+
+                    let query = AqlQuery::builder()
+                        .query(aql)
+                        .bind_vars(
+                            bind_vars
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.clone()))
+                                .collect(),
+                        )
+                        .build();
+
+                    let edges: Vec<EdgeDocument> = db
+                        .aql_query(query)
+                        .await
+                        .map_err(|e| PersistenceError::new(e.to_string()))?;
+                    return Ok(edges);
+                }
+
+                let mut all_edges: Vec<EdgeDocument> = Vec::new();
+                let mut seen_keys: HashSet<String> = HashSet::new();
+                let mut frontier: Vec<String> = spec.from_guids.clone();
+
+                for _ in 0..spec.depth {
+                    if frontier.is_empty() {
+                        break;
+                    }
+
+                    let aql = "FOR e IN @@col
+  FILTER LENGTH(@types) == 0 OR e.relationship_type IN @types
+  FILTER e.from_guid IN @from_guids
+  FILTER LENGTH(@to_guids) == 0 OR e.to_guid IN @to_guids
+  RETURN { key: e._key, relationship_type: e.relationship_type, from_guid: e.from_guid, to_guid: e.to_guid, payload: e.payload }";
+
+                    let mut bind_vars: HashMap<String, Value> = HashMap::new();
+                    bind_vars.insert("@col".into(), Value::String(edge_collection.clone()));
+                    bind_vars.insert(
+                        "types".into(),
+                        Value::Array(
+                            spec.relationship_types
+                                .iter()
+                                .cloned()
+                                .map(Value::String)
+                                .collect(),
+                        ),
+                    );
+                    bind_vars.insert(
+                        "from_guids".into(),
+                        Value::Array(frontier.iter().cloned().map(Value::String).collect()),
+                    );
+                    bind_vars.insert(
+                        "to_guids".into(),
+                        Value::Array(spec.to_guids.iter().cloned().map(Value::String).collect()),
+                    );
+
+                    let query = AqlQuery::builder()
+                        .query(aql)
+                        .bind_vars(
+                            bind_vars
+                                .iter()
+                                .map(|(k, v)| (k.as_str(), v.clone()))
+                                .collect(),
+                        )
+                        .build();
+
+                    let edges: Vec<EdgeDocument> = db
+                        .aql_query(query)
+                        .await
+                        .map_err(|e| PersistenceError::new(e.to_string()))?;
+                    let mut next_frontier = Vec::new();
+                    for edge in edges {
+                        if seen_keys.insert(edge.key.clone()) {
+                            next_frontier.push(edge.to_guid.clone());
+                            all_edges.push(edge);
+                        }
+                    }
+                    frontier = next_frontier;
+                }
+
+                Ok(all_edges)
             }
         })
     }

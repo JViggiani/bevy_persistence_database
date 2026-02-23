@@ -1,34 +1,53 @@
 //! Shared utilities for database connection implementations
 
-use crate::core::db::connection::{DocumentKind, PersistenceError, TransactionOperation};
+use crate::core::db::connection::{DocumentKind, EdgeDocument, PersistenceError, TransactionOperation};
 use serde_json::Value;
 
-/// Groups transaction operations by type and collection
+/// Document CRUD operations for a single document kind (entity or resource).
+pub struct DocumentOperations {
+    pub creates: Vec<Value>,
+    /// `{ key_field: key, "expected": version, "patch": patch }`
+    pub updates: Vec<Value>,
+    /// `{ key_field: key, "expected": version }`
+    pub deletes: Vec<Value>,
+}
+
+/// Edge upserts and deletes extracted from a transaction's operations.
+pub struct EdgeOperations {
+    pub upserts: Vec<EdgeDocument>,
+    pub deletes: Vec<String>,
+}
+
+/// Transaction operations grouped by kind so each database backend can process
+/// them in whatever order / batching strategy it needs.
 pub struct GroupedOperations {
-    pub entity_creates: Vec<Value>,
-    pub entity_updates: Vec<Value>, // { key/id, expected, patch }
-    pub entity_deletes: Vec<Value>, // { key/id, expected }
-    pub resource_creates: Vec<Value>,
-    pub resource_updates: Vec<Value>,
-    pub resource_deletes: Vec<Value>,
+    pub entities: DocumentOperations,
+    pub resources: DocumentOperations,
+    pub edges: EdgeOperations,
 }
 
 impl GroupedOperations {
     pub fn from_operations(operations: Vec<TransactionOperation>, key_field: &str) -> Self {
-        let mut result = Self {
-            entity_creates: Vec::new(),
-            entity_updates: Vec::new(),
-            entity_deletes: Vec::new(),
-            resource_creates: Vec::new(),
-            resource_updates: Vec::new(),
-            resource_deletes: Vec::new(),
+        let mut entities = DocumentOperations {
+            creates: Vec::new(),
+            updates: Vec::new(),
+            deletes: Vec::new(),
+        };
+        let mut resources = DocumentOperations {
+            creates: Vec::new(),
+            updates: Vec::new(),
+            deletes: Vec::new(),
+        };
+        let mut edge_ops = EdgeOperations {
+            upserts: Vec::new(),
+            deletes: Vec::new(),
         };
 
         for op in operations {
             match op {
                 TransactionOperation::CreateDocument { kind, data, .. } => match kind {
-                    DocumentKind::Entity => result.entity_creates.push(data),
-                    DocumentKind::Resource => result.resource_creates.push(data),
+                    DocumentKind::Entity => entities.creates.push(data),
+                    DocumentKind::Resource => resources.creates.push(data),
                 },
                 TransactionOperation::UpdateDocument {
                     kind,
@@ -43,8 +62,8 @@ impl GroupedOperations {
                         "patch": patch
                     });
                     match kind {
-                        DocumentKind::Entity => result.entity_updates.push(obj),
-                        DocumentKind::Resource => result.resource_updates.push(obj),
+                        DocumentKind::Entity => entities.updates.push(obj),
+                        DocumentKind::Resource => resources.updates.push(obj),
                     }
                 }
                 TransactionOperation::DeleteDocument {
@@ -58,26 +77,37 @@ impl GroupedOperations {
                         "expected": expected_current_version,
                     });
                     match kind {
-                        DocumentKind::Entity => result.entity_deletes.push(obj),
-                        DocumentKind::Resource => result.resource_deletes.push(obj),
+                        DocumentKind::Entity => entities.deletes.push(obj),
+                        DocumentKind::Resource => resources.deletes.push(obj),
                     }
+                }
+                TransactionOperation::UpsertEdges { edges, .. } => {
+                    edge_ops.upserts.extend(edges);
+                }
+                TransactionOperation::DeleteEdges { keys, .. } => {
+                    edge_ops.deletes.extend(keys);
                 }
             }
         }
 
-        result
+        Self {
+            entities,
+            resources,
+            edges: edge_ops,
+        }
     }
+}
 
-    pub fn extract_keys(&self, values: &[Value], key_field: &str) -> Vec<String> {
-        values
-            .iter()
-            .filter_map(|v| {
-                v.get(key_field)
-                    .and_then(|k| k.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect()
-    }
+/// Extracts the value of `key_field` as a String from each JSON object in `values`.
+pub fn extract_keys(values: &[Value], key_field: &str) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|v| {
+            v.get(key_field)
+                .and_then(|k| k.as_str())
+                .map(|s| s.to_string())
+        })
+        .collect()
 }
 
 pub enum OperationType {

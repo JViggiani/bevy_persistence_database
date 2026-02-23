@@ -1,7 +1,10 @@
 use bevy_persistence_database::core::db::{
     DatabaseConnection, DocumentKind, PersistenceError, TransactionOperation,
 };
-use bevy_persistence_database::core::query::PersistenceQuerySpecification;
+use bevy_persistence_database::core::db::connection::EdgeDocument;
+use bevy_persistence_database::core::query::{
+    EdgeQuerySpecification, PersistenceQuerySpecification,
+};
 use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::{
@@ -98,5 +101,13 @@ impl DatabaseConnection for CountingDbConnection {
 
         // Forward the call to the inner connection
         self.inner.count_documents(spec)
+    }
+
+    fn query_edges(
+        &self,
+        spec: &EdgeQuerySpecification,
+    ) -> BoxFuture<'static, Result<Vec<EdgeDocument>, PersistenceError>> {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        self.inner.query_edges(spec)
     }
 }

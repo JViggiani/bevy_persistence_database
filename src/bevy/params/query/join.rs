@@ -6,7 +6,9 @@ use super::cache::CachePolicy;
 use super::persistence_query_system_param::PersistentQuery;
 use super::presence_spec::{FilterSupported, ToPresenceSpec, collect_presence_components};
 use super::query_data_to_components::QueryDataToComponents;
-use super::query_thread_local::take_filter;
+use super::query_thread_local::{
+    take_filter, take_relationship_load_spec,
+};
 
 impl<'w, 's, Q, F> PersistentQuery<'w, 's, Q, F>
 where
@@ -84,6 +86,7 @@ where
             (None, None) => None,
         };
         let tls_expr = take_filter();
+        let relationship_spec = take_relationship_load_spec();
         let store = super::query_thread_local::take_store()
             .unwrap_or_else(|| self.config.default_store.clone());
         let combined_expr = match (presence_expr, tls_expr) {
@@ -115,6 +118,7 @@ where
             &[std::any::type_name::<Q2>()],
             true,
             store.clone(),
+            relationship_spec,
         );
 
         // Warm-up using fresh QueryStates so counts reflect immediate inserts this tick.

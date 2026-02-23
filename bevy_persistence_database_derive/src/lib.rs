@@ -16,9 +16,12 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
     let is_res = metas
         .iter()
         .any(|m| matches!(m, Meta::Path(p) if p.is_ident("resource")));
+    let is_rel = metas
+        .iter()
+        .any(|m| matches!(m, Meta::Path(p) if p.is_ident("relationship")));
 
     // No effect if neither
-    if !is_comp && !is_res {
+    if !is_comp && !is_res && !is_rel {
         return item;
     }
 
@@ -27,25 +30,49 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Derive Component/Resource and serde for non-unit types, skip serde for unit structs to allow manual impls
     if let Item::Struct(s) = &mut ast {
-        let derive_list = if is_comp {
-            quote! { ::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize }
+        if is_comp {
+            s.attrs.push(syn::parse_quote!(
+                #[derive(::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize)]
+            ));
+            // Add `#[serde(transparent)]` to single-field tuple structs
+            if let syn::Fields::Unnamed(fields) = &s.fields {
+                if fields.unnamed.len() == 1 {
+                    s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
+                }
+            }
+        } else if is_res {
+            s.attrs.push(syn::parse_quote!(
+                #[derive(::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize)]
+            ));
+            if let syn::Fields::Unnamed(fields) = &s.fields {
+                if fields.unnamed.len() == 1 {
+                    s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
+                }
+            }
         } else {
-            quote! { ::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize }
-        };
-        s.attrs.push(syn::parse_quote!(#[derive(#derive_list)]));
-
-        // Add `#[serde(transparent)]` to single-field tuple structs
-        if let syn::Fields::Unnamed(fields) = &s.fields {
-            if fields.unnamed.len() == 1 {
-                s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
+            // Relationship: Serialize/Deserialize only needed for the bevy_many_relationship_edges
+            // payload path. The native Bevy relationship path (feature off) uses structs that
+            // contain Entity and must NOT derive serde.
+            s.attrs.push(syn::parse_quote!(
+                #[cfg_attr(feature = "bevy_many_relationship_edges", derive(::serde::Serialize, ::serde::Deserialize))]
+            ));
+            // #[serde(transparent)] is likewise only valid in the payload path
+            if let syn::Fields::Unnamed(fields) = &s.fields {
+                if fields.unnamed.len() == 1 {
+                    s.attrs.push(syn::parse_quote!(
+                        #[cfg_attr(feature = "bevy_many_relationship_edges", serde(transparent))]
+                    ));
+                }
             }
         }
     } else if let Item::Enum(e) = &mut ast {
         // enums always derive serde
         let derive_list = if is_comp {
             quote! { ::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize }
-        } else {
+        } else if is_res {
             quote! { ::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize }
+        } else {
+            quote! { ::serde::Serialize, ::serde::Deserialize }
         };
         e.attrs.push(syn::parse_quote!(#[derive(#derive_list)]));
     }
@@ -81,7 +108,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
-    } else {
+    } else if is_res {
         quote! {
             #[allow(non_snake_case)]
             fn #register_fn(app: &mut bevy::app::App) {
@@ -102,6 +129,48 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         }
+    } else {
+        quote! {
+            #[allow(non_snake_case)]
+            fn #register_fn(app: &mut bevy::app::App) {
+                #[cfg(feature = "bevy_many_relationship_edges")]
+                {
+                    use bevy::prelude::IntoScheduleConfigs;
+                    let type_id = std::any::TypeId::of::<#name>();
+                    let mut registered = app
+                        .world_mut()
+                        .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
+                    if registered.types.insert(type_id) {
+                        app.world_mut()
+                            .resource_mut::<#crate_path::core::session::PersistenceSession>()
+                            .register_many_relationship::<#name>(stringify!(#name));
+                        app.add_systems(
+                            bevy::app::PostUpdate,
+                            #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_relationship_system::<#name>
+                                .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
+                        );
+                    }
+                }
+                #[cfg(not(feature = "bevy_many_relationship_edges"))]
+                {
+                    use bevy::prelude::IntoScheduleConfigs;
+                    let type_id = std::any::TypeId::of::<#name>();
+                    let mut registered = app
+                        .world_mut()
+                        .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
+                    if registered.types.insert(type_id) {
+                        app.world_mut()
+                            .resource_mut::<#crate_path::core::session::PersistenceSession>()
+                            .register_bevy_relationship::<#name>(stringify!(#name));
+                        app.add_systems(
+                            bevy::app::PostUpdate,
+                            #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_bevy_relationship_system::<#name>
+                                .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
+                        );
+                    }
+                }
+            }
+        }
     };
 
     let ctor_registration = quote! {
@@ -115,16 +184,29 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    // Implement the Persist trait, providing the name() method
-    let impl_persist = quote! {
-        impl #crate_path::core::persist::Persist for #name {
-            fn name() -> &'static str {
-                stringify!(#name)
+    // Implement the Persist trait, providing the name() method.
+    // For native Bevy relationships (non-feature path), the struct contains Entity and cannot
+    // implement Serialize/Deserialize, so we skip the Persist impl (which has serde supertraits).
+    let impl_persist = if is_rel {
+        quote! {
+            #[cfg(feature = "bevy_many_relationship_edges")]
+            impl #crate_path::core::persist::Persist for #name {
+                fn name() -> &'static str {
+                    stringify!(#name)
+                }
+            }
+        }
+    } else {
+        quote! {
+            impl #crate_path::core::persist::Persist for #name {
+                fn name() -> &'static str {
+                    stringify!(#name)
+                }
             }
         }
     };
 
-    // Generate field accessor methods for structs
+    // Generate field accessor methods for structs (only meaningful for payload types that have Persist).
     let mut field_methods = quote! {};
     if let Item::Struct(ref s) = ast {
         let methods = s.fields.iter().filter_map(|f| f.ident.as_ref()).map(|ident| {
@@ -135,10 +217,18 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
                 }
             }
         });
-        field_methods = quote! {
+        let methods_body = quote! {
             impl #name {
                 #(#methods)*
             }
+        };
+        field_methods = if is_rel {
+            quote! {
+                #[cfg(feature = "bevy_many_relationship_edges")]
+                #methods_body
+            }
+        } else {
+            methods_body
         };
     }
 

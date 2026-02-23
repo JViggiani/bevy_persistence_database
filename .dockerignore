@@ -7,3 +7,7 @@ target/
 **/*.rmeta
 **/*.d
 perf_results.csv
+
+Cargo.lock
+**/.idea/
+**/.vscode/

@@ -416,7 +416,7 @@ fn mixed_query_and_resource_load() {
         if let Some(_s) = res.get() {
             state.loaded_resource = true;
         }
-        pq.ensure_loaded();
+        pq.load();
         state.loaded_entities = pq.iter().count();
     }
     app.add_systems(Update, sys);

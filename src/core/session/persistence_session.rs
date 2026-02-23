@@ -1,7 +1,6 @@
 //! Core ECS‐to‐Arango bridge: defines `PersistenceSession`.
 //! Handles local cache, change tracking, and commit logic (create/update/delete).
 
-use crate::bevy::plugins::persistence_plugin::{TokioRuntime, TriggerCommit, register_commit_listener};
 use crate::core::db::connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
     BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DatabaseConnection, DocumentKind, PersistenceError,
@@ -9,23 +8,16 @@ use crate::core::db::connection::{
 };
 use crate::core::persist::Persist;
 use crate::core::versioning::version_manager::{VersionKey, VersionManager};
-use bevy::prelude::{App, Component, Entity, Resource, World, info};
+use bevy::prelude::{Component, Entity, Resource, World, info};
 use rayon::ThreadPoolBuilder;
 use rayon::prelude::*;
+#[cfg(feature = "bevy_many_relationship_edges")]
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::{
     any::TypeId,
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
 };
-use tokio::sync::oneshot;
-use tokio::time::timeout;
-
-/// A unique ID generator for correlating commit requests and responses.
-static NEXT_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
 type ComponentSerializer =
     Box<dyn Fn(Entity, &World) -> Result<Option<(String, Value)>, PersistenceError> + Send + Sync>;
@@ -40,12 +32,30 @@ type ResourceDeserializer =
     Box<dyn Fn(&mut World, Value) -> Result<(), PersistenceError> + Send + Sync>;
 type ResourceRemover = Box<dyn Fn(&mut World) + Send + Sync>;
 
+/// Extracts all edge documents for a given relationship type from the world.
+/// The third parameter is a map of client-side preassigned keys for entities that are new in the
+/// current commit (not yet in the session's entity-key cache); it enables entity + relationship
+/// to be persisted in a single commit.
+type RelationshipSerializer = Box<
+    dyn Fn(&World, &PersistenceSession, &HashMap<Entity, String>) -> Result<Vec<crate::core::db::connection::EdgeDocument>, PersistenceError>
+        + Send
+        + Sync,
+>;
+
+type RelationshipDeserializer = Box<
+    dyn Fn(&mut World, Entity, Vec<(Entity, Option<Value>)>) -> Result<(), PersistenceError>
+        + Send
+        + Sync,
+>;
+
 #[derive(Default)]
 struct ChangeTracking {
     dirty_entity_components: HashMap<Entity, HashSet<TypeId>>,
     despawned_entities: HashSet<Entity>,
     dirty_resources: HashSet<TypeId>,
     despawned_resources: HashSet<TypeId>,
+    /// Entities whose relationships have been marked dirty.
+    dirty_relationship_entities: HashSet<Entity>,
 }
 
 #[derive(Default)]
@@ -68,16 +78,34 @@ struct ResourceRegistry {
     last_seen_present: HashMap<TypeId, bool>,
 }
 
+#[derive(Default)]
+struct RelationshipRegistry {
+    /// One serializer per relationship TypeId. Extracts edge documents.
+    serializers: HashMap<TypeId, RelationshipSerializer>,
+    /// One deserializer per relationship TypeId. Applies edge payloads to ECS state.
+    deserializers: HashMap<TypeId, RelationshipDeserializer>,
+    /// Maps relationship type name → TypeId.
+    name_to_type_id: HashMap<String, TypeId>,
+    /// Maps TypeId → relationship type name.
+    type_id_to_name: HashMap<TypeId, &'static str>,
+}
+
 struct PersistenceCache {
     entity_keys: HashMap<Entity, String>,
+    guid_to_entity: HashMap<String, Entity>,
     version_manager: VersionManager,
+    /// Last-committed edge snapshot, keyed by deterministic edge key.
+    /// Used for diffing to determine upserts and deletes.
+    edge_snapshot: HashSet<String>,
 }
 
 impl Default for PersistenceCache {
     fn default() -> Self {
         Self {
             entity_keys: HashMap::new(),
+            guid_to_entity: HashMap::new(),
             version_manager: VersionManager::new(),
+            edge_snapshot: HashSet::new(),
         }
     }
 }
@@ -87,6 +115,7 @@ pub(crate) struct DirtyState {
     despawned_entities: HashSet<Entity>,
     dirty_resources: HashSet<TypeId>,
     despawned_resources: HashSet<TypeId>,
+    dirty_relationship_entities: HashSet<Entity>,
 }
 
 impl DirtyState {
@@ -101,6 +130,23 @@ impl DirtyState {
             despawned_entities,
             dirty_resources,
             despawned_resources,
+            dirty_relationship_entities: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn from_parts_with_relationships(
+        dirty_entity_components: HashMap<Entity, HashSet<TypeId>>,
+        despawned_entities: HashSet<Entity>,
+        dirty_resources: HashSet<TypeId>,
+        despawned_resources: HashSet<TypeId>,
+        dirty_relationship_entities: HashSet<Entity>,
+    ) -> Self {
+        Self {
+            dirty_entity_components,
+            despawned_entities,
+            dirty_resources,
+            despawned_resources,
+            dirty_relationship_entities,
         }
     }
 
@@ -111,12 +157,14 @@ impl DirtyState {
         HashSet<Entity>,
         HashSet<TypeId>,
         HashSet<TypeId>,
+        HashSet<Entity>,
     ) {
         (
             self.dirty_entity_components,
             self.despawned_entities,
             self.dirty_resources,
             self.despawned_resources,
+            self.dirty_relationship_entities,
         )
     }
 }
@@ -127,12 +175,17 @@ pub struct PersistenceSession {
     tracking: ChangeTracking,
     components: ComponentRegistry,
     resources: ResourceRegistry,
+    relationships: RelationshipRegistry,
     cache: PersistenceCache,
 }
 
 pub(crate) struct CommitData {
     pub(crate) operations: Vec<TransactionOperation>,
     pub(crate) new_entities: Vec<Entity>,
+    /// Updated edge snapshot to apply on successful commit.
+    pub(crate) new_edge_snapshot: HashSet<String>,
+    /// Client-side preassigned keys for new entities.
+    pub(crate) preassigned_keys: HashMap<Entity, String>,
 }
 
 impl PersistenceSession {
@@ -259,6 +312,188 @@ impl PersistenceSession {
             .insert(component);
     }
 
+    /// Mark an entity's relationships as dirty.
+    pub(crate) fn mark_relationship_entity_dirty(&mut self, entity: Entity) {
+        self.tracking.dirty_relationship_entities.insert(entity);
+    }
+
+    /// Register a relationship type for edge persistence.
+    /// The serializer closure extracts all edge documents for this relationship type.
+    pub fn register_relationship(
+        &mut self,
+        type_id: TypeId,
+        name: &'static str,
+        serializer: RelationshipSerializer,
+    ) {
+        self.relationships.type_id_to_name.insert(type_id, name);
+        self.relationships
+            .name_to_type_id
+            .insert(name.to_string(), type_id);
+        self.relationships.serializers.insert(type_id, serializer);
+    }
+
+    /// Register a built-in Bevy `Relationship` component for edge persistence.
+    ///
+    /// This iterates all entities that have `R` and a cached GUID, extracting
+    /// each relationship target to build `EdgeDocument`s. Disabled when the
+    /// `bevy_many_relationship_edges` feature is enabled.
+    #[allow(deprecated)]
+    #[cfg(not(feature = "bevy_many_relationship_edges"))]
+    pub fn register_bevy_relationship<R: Component + bevy::ecs::relationship::Relationship>(
+        &mut self,
+        name: &'static str,
+    ) {
+        use crate::core::db::connection::EdgeDocument;
+        let type_id = TypeId::of::<R>();
+        self.register_relationship(
+            type_id,
+            name,
+            Box::new(move |world, session, preassigned: &HashMap<Entity, String>| {
+                let mut edges = Vec::new();
+                #[allow(deprecated)]
+                for entity_ref in world.iter_entities() {
+                    let from_entity = entity_ref.id();
+                    if let Some(rel) = entity_ref.get::<R>() {
+                        let target = rel.get();
+                        let from_guid = session
+                            .entity_key(from_entity)
+                            .cloned()
+                            .or_else(|| preassigned.get(&from_entity).cloned());
+                        let to_guid = session
+                            .entity_key(target)
+                            .cloned()
+                            .or_else(|| preassigned.get(&target).cloned());
+                        if let (Some(from_guid), Some(to_guid)) = (from_guid, to_guid) {
+                            edges.push(EdgeDocument {
+                                key: EdgeDocument::make_key(name, &from_guid, &to_guid),
+                                relationship_type: name.to_string(),
+                                from_guid,
+                                to_guid,
+                                payload: None,
+                            });
+                        }
+                    }
+                }
+                Ok(edges)
+            }),
+        );
+    }
+
+    /// Register a built-in Bevy `Relationship` component for edge persistence AND loading.
+    ///
+    /// Unlike `register_bevy_relationship`, this also registers a deserializer so that
+    /// `PersistentQuery::with_relationship_depth` and the hydrator can reconstruct the
+    /// relationship component on entities loaded from the database.
+    ///
+    /// Requires `R: From<Entity>` — all standard single-field tuple-struct relationships
+    /// (e.g. `struct MemberOf(Entity)`) satisfy this trivially.
+    #[cfg(not(feature = "bevy_many_relationship_edges"))]
+    pub fn register_bevy_relationship_loader<
+        R: Component + bevy::ecs::relationship::Relationship + From<Entity> + 'static,
+    >(
+        &mut self,
+        _name: &'static str,
+    ) {
+        let type_id = TypeId::of::<R>();
+        self.relationships.deserializers.insert(
+            type_id,
+            Box::new(|world, source_entity, targets| {
+                for (target, _payload) in targets {
+                    world.entity_mut(source_entity).insert(<R as From<Entity>>::from(target));
+                }
+                Ok(())
+            }),
+        );
+    }
+
+    /// Register a `bevy_many_relationships` relationship type for edge persistence.
+    ///
+    /// This iterates all entities that have `OutgoingRelationships<R>` and a
+    /// cached GUID, extracting each outgoing edge (with optional serialised
+    /// payload) to build `EdgeDocument`s. Only available when the
+    /// `bevy_many_relationship_edges` feature is enabled.
+    #[allow(deprecated)]
+    #[cfg(feature = "bevy_many_relationship_edges")]
+    pub fn register_many_relationship<R: serde::Serialize + DeserializeOwned + Send + Sync + 'static>(
+        &mut self,
+        name: &'static str,
+    ) {
+        use crate::core::db::connection::EdgeDocument;
+        let type_id = TypeId::of::<R>();
+        self.register_relationship(
+            type_id,
+            name,
+            Box::new(move |world, session, preassigned: &HashMap<Entity, String>| {
+                let mut edges = Vec::new();
+                #[allow(deprecated)]
+                for entity_ref in world.iter_entities() {
+                    let from_entity = entity_ref.id();
+                    if let Some(outgoing) =
+                        entity_ref.get::<bevy_many_relationships::OutgoingRelationships<R>>()
+                    {
+                        let Some(from_guid) = session
+                            .entity_key(from_entity)
+                            .cloned()
+                            .or_else(|| preassigned.get(&from_entity).cloned())
+                        else {
+                            continue;
+                        };
+                        for (target, payload) in outgoing.iter() {
+                            let Some(to_guid) = session
+                                .entity_key(target)
+                                .cloned()
+                                .or_else(|| preassigned.get(&target).cloned())
+                            else {
+                                continue;
+                            };
+                            let serialized_payload = serde_json::to_value(payload).ok();
+                            edges.push(EdgeDocument {
+                                key: EdgeDocument::make_key(name, &from_guid, &to_guid),
+                                relationship_type: name.to_string(),
+                                from_guid: from_guid.clone(),
+                                to_guid,
+                                payload: serialized_payload,
+                            });
+                        }
+                    }
+                }
+                Ok(edges)
+            }),
+        );
+        self.relationships.deserializers.insert(
+            type_id,
+            Box::new(|world, source_entity, targets| {
+                if let Some(existing) = world.get::<bevy_many_relationships::OutgoingRelationships<R>>(source_entity) {
+                    let existing_targets: Vec<Entity> = existing.targets().copied().collect();
+                    for target in existing_targets {
+                        bevy_many_relationships::remove_many_relationship::<R>(world, source_entity, target);
+                    }
+                }
+
+                for (target, payload_json) in targets {
+                    let Some(payload_json) = payload_json else {
+                        return Err(PersistenceError::new("Missing relationship payload"));
+                    };
+                    let payload: R = serde_json::from_value(payload_json)
+                        .map_err(|e| PersistenceError::new(e.to_string()))?;
+                    bevy_many_relationships::set_many_relationship::<R>(
+                        world,
+                        source_entity,
+                        target,
+                        payload,
+                    );
+                }
+
+                Ok(())
+            }),
+        );
+    }
+
+    /// Replace the edge snapshot cache with a new set of keys.
+    pub(crate) fn set_edge_snapshot(&mut self, snapshot: HashSet<String>) {
+        self.cache.edge_snapshot = snapshot;
+    }
+
     /// Return the tracked version for a persisted resource type, if cached.
     pub fn resource_version<R: Resource + 'static>(&self) -> Option<u64> {
         self.cache
@@ -317,6 +552,7 @@ impl PersistenceSession {
             despawned_entities: std::mem::take(&mut self.tracking.despawned_entities),
             dirty_resources: std::mem::take(&mut self.tracking.dirty_resources),
             despawned_resources: std::mem::take(&mut self.tracking.despawned_resources),
+            dirty_relationship_entities: std::mem::take(&mut self.tracking.dirty_relationship_entities),
         }
     }
 
@@ -335,6 +571,9 @@ impl PersistenceSession {
         self.tracking
             .despawned_resources
             .extend(state.despawned_resources);
+        self.tracking
+            .dirty_relationship_entities
+            .extend(state.dirty_relationship_entities);
     }
 
     pub(crate) fn resource_presence_snapshot(&self, world: &World) -> Vec<(TypeId, bool)> {
@@ -369,7 +608,41 @@ impl PersistenceSession {
     }
 
     pub(crate) fn insert_entity_key(&mut self, entity: Entity, key: String) {
-        self.cache.entity_keys.insert(entity, key);
+        if let Some(existing) = self.cache.entity_keys.insert(entity, key.clone()) {
+            if existing != key {
+                self.cache.guid_to_entity.remove(&existing);
+            }
+        }
+        self.cache.guid_to_entity.insert(key, entity);
+    }
+
+    pub(crate) fn entity_by_key(&self, key: &str) -> Option<Entity> {
+        self.cache.guid_to_entity.get(key).copied()
+    }
+
+    pub(crate) fn relationship_type_name(&self, type_id: &TypeId) -> Option<&'static str> {
+        self.relationships.type_id_to_name.get(type_id).copied()
+    }
+
+    pub(crate) fn relationship_type_entries(&self) -> Vec<(TypeId, &'static str)> {
+        self.relationships
+            .type_id_to_name
+            .iter()
+            .map(|(type_id, name)| (*type_id, *name))
+            .collect()
+    }
+
+    pub(crate) fn apply_relationship_targets(
+        &self,
+        type_id: TypeId,
+        world: &mut World,
+        source: Entity,
+        targets: Vec<(Entity, Option<Value>)>,
+    ) -> Result<(), PersistenceError> {
+        if let Some(deserializer) = self.relationships.deserializers.get(&type_id) {
+            deserializer(world, source, targets)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn component_deserializer(
@@ -427,6 +700,7 @@ impl PersistenceSession {
             tracking: ChangeTracking::default(),
             components: ComponentRegistry::default(),
             resources: ResourceRegistry::default(),
+            relationships: RelationshipRegistry::default(),
             cache: PersistenceCache::default(),
         }
     }
@@ -505,6 +779,10 @@ impl PersistenceSession {
 
     /// Prepare all operations (deletions, creations, updates of entities and resources)
     /// using a Rayon pool of `thread_count` threads.
+    ///
+    /// **Client-side GUID generation**: new entities that don't yet have a cached
+    /// key are assigned a UUID v4 *before* the CreateDocument is built, and the
+    /// key is included in the document payload under `key_field`.
     pub(crate) fn _prepare_commit(
         session: &PersistenceSession,
         world: &World,
@@ -512,6 +790,7 @@ impl PersistenceSession {
         despawned_entities: &HashSet<Entity>,
         dirty_resources: &HashSet<TypeId>,
         despawned_resources: &HashSet<TypeId>,
+        dirty_relationship_entities: &HashSet<Entity>,
         thread_count: usize,
         key_field: &str,
         store: &str,
@@ -520,7 +799,22 @@ impl PersistenceSession {
             return Err(PersistenceError::new("store must be provided for commit"));
         }
         let mut operations = Vec::new();
-        let mut newly_created_entities = Vec::new();
+
+        // Pre-compute client-side GUIDs for new entities.
+        // Entities in dirty_entity_components that don't have a cached key need one.
+        let mut preassigned_keys: HashMap<Entity, String> = HashMap::new();
+        for &entity in dirty_entity_components.keys() {
+            if session.cache.entity_keys.get(&entity).is_none() {
+                // Check if the entity already has a Guid component
+                let guid = world.get::<crate::bevy::components::Guid>(entity);
+                let key = if let Some(guid) = guid {
+                    guid.id().to_string()
+                } else {
+                    uuid::Uuid::new_v4().to_string()
+                };
+                preassigned_keys.insert(entity, key);
+            }
+        }
 
         fn insert_meta(
             data: &mut serde_json::Map<String, Value>,
@@ -577,7 +871,6 @@ impl PersistenceSession {
             .map_err(|e| PersistenceError::new(format!("ThreadPool error: {}", e)))?;
 
         // 2) Creations & Updates (entities)
-        // Fix: Handle errors properly in the closure
         let entity_ops_result: Result<Vec<_>, PersistenceError> = pool.install(|| {
             dirty_entity_components
                 .par_iter()
@@ -622,8 +915,9 @@ impl PersistenceSession {
                             },
                             None,
                         )))
-                    } else {
-                        // create new document
+                    } else if let Some(key) = preassigned_keys.get(&entity) {
+                        // create new document with client-side GUID
+                        data_map.insert(key_field.to_string(), Value::String(key.clone()));
                         insert_meta(&mut data_map, DocumentKind::Entity, 1);
                         let document = Value::Object(data_map);
                         Ok(Some((
@@ -633,6 +927,12 @@ impl PersistenceSession {
                                 data: document,
                             },
                             Some(entity),
+                        )))
+                    } else {
+                        // Shouldn't happen - entity should have a cached key or preassigned key
+                        Err(PersistenceError::new(format!(
+                            "Entity {:?} has no cached key and no preassigned key",
+                            entity
                         )))
                     }
                 })
@@ -647,7 +947,7 @@ impl PersistenceSession {
             };
 
         operations.extend(entity_ops);
-        newly_created_entities.extend(created.into_iter().flatten());
+        let newly_created_entities: Vec<Entity> = created.into_iter().flatten().collect();
 
         // 3) Resources (in parallel)
         let resource_ops_result: Result<Vec<_>, PersistenceError> = pool.install(|| {
@@ -702,6 +1002,59 @@ impl PersistenceSession {
         let resource_ops = resource_ops_result?;
         operations.extend(resource_ops);
 
+        // 4) Relationship edge operations (diff-based)
+        // Only run if there are registered relationships and dirty entities
+        let has_relationships = !session.relationships.serializers.is_empty();
+        let has_dirty_rels = !dirty_relationship_entities.is_empty() || !despawned_entities.is_empty();
+        let mut new_edge_snapshot: HashSet<String> = session.cache.edge_snapshot.clone();
+
+        if has_relationships && has_dirty_rels {
+            use crate::core::db::connection::EdgeDocument;
+
+            // Build the current desired edge set from all relationship serializers
+            let mut current_edges: HashMap<String, EdgeDocument> = HashMap::new();
+            for (_type_id, serializer) in session.relationships.serializers.iter() {
+                let edges = serializer(world, session, &preassigned_keys)?;
+                for edge in edges {
+                    current_edges.insert(edge.key.clone(), edge);
+                }
+            }
+
+            // Compute diff against snapshot
+            let current_keys: HashSet<String> = current_edges.keys().cloned().collect();
+
+            // Edges to upsert: in current but not in snapshot (new edges)
+            let to_upsert: Vec<EdgeDocument> = current_keys
+                .difference(&session.cache.edge_snapshot)
+                .filter_map(|k| current_edges.get(k).cloned())
+                .collect();
+
+            // Edges to delete: in snapshot but not in current (removed edges)
+            let to_delete: Vec<String> = session
+                .cache
+                .edge_snapshot
+                .difference(&current_keys)
+                .cloned()
+                .collect();
+
+            if !to_upsert.is_empty() {
+                operations.push(TransactionOperation::UpsertEdges {
+                    store: store.to_string(),
+                    edges: to_upsert,
+                });
+            }
+
+            if !to_delete.is_empty() {
+                operations.push(TransactionOperation::DeleteEdges {
+                    store: store.to_string(),
+                    keys: to_delete,
+                });
+            }
+
+            // Update the snapshot for post-commit
+            new_edge_snapshot = current_keys;
+        }
+
         info!(
             "[_prepare_commit] Prepared {} operations.",
             operations.len()
@@ -709,77 +1062,18 @@ impl PersistenceSession {
         Ok(CommitData {
             operations,
             new_entities: newly_created_entities,
+            new_edge_snapshot,
+            preassigned_keys,
         })
     }
 }
 
-/// Awaitable commit that uses the supplied connection for this request.
-pub async fn commit(
-    app: &mut App,
-    connection: Arc<dyn DatabaseConnection>,
-    store: impl Into<String>,
-) -> Result<(), PersistenceError> {
-    let store = store.into();
-    if store.is_empty() {
-        return Err(PersistenceError::new("commit store must be provided"));
-    }
-    let correlation_id = NEXT_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
-    let (tx, mut rx) = oneshot::channel();
-
-    // Insert the sender into the world so the listener system can find it.
-    register_commit_listener(app.world_mut(), correlation_id, tx);
-
-    // Send the message to trigger the commit.
-    app.world_mut().write_message(TriggerCommit {
-        correlation_id: Some(correlation_id),
-        target_connection: connection,
-        store: store.clone(),
-    });
-
-    // The timeout is applied to the entire commit-and-wait process.
-    timeout(std::time::Duration::from_secs(60), async {
-        // Loop, calling app.update() and checking the receiver.
-        // Yield to the executor each time to avoid blocking.
-        loop {
-            app.update();
-
-            // Check if the receiver has a value without blocking.
-            match rx.try_recv() {
-                Ok(result) => {
-                    info!("Received commit result for correlation ID {}", correlation_id);
-                    return result;
-                }
-                Err(oneshot::error::TryRecvError::Empty) => {
-                    // No result yet, yield and try again on the next loop iteration.
-                    tokio::task::yield_now().await;
-                }
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    // The sender was dropped, which indicates an error.
-                    return Err(PersistenceError::new(
-                        "Commit channel closed unexpectedly. The commit listener might have panicked.",
-                    ));
-                }
-            }
-        }
-    })
-    .await
-    .map_err(|_| PersistenceError::new("Commit timed out after 60 seconds"))?
-}
-
-// Add synchronous conveniences that use the plugin’s runtime
-pub fn commit_sync(
-    app: &mut App,
-    connection: Arc<dyn DatabaseConnection>,
-    store: impl Into<String>,
-) -> Result<(), PersistenceError> {
-    let rt = { app.world().resource::<TokioRuntime>().runtime.clone() };
-    rt.block_on(commit(app, connection, store))
-}
 
 #[cfg(test)]
 mod arango_session {
     use super::*;
     use crate::core::persist::Persist;
+    use crate::core::db::connection::EdgeDocument;
     use crate::bevy::registration::COMPONENT_REGISTRY;
     use bevy::prelude::World;
     use bevy_persistence_database_derive::persist;
@@ -856,6 +1150,7 @@ mod arango_session {
         let dirty_resources = HashSet::new();
         let mut despawned_resources = HashSet::new();
         despawned_resources.insert(tid);
+        let dirty_relationship_entities = HashSet::new();
 
         let data = PersistenceSession::_prepare_commit(
             &session,
@@ -864,6 +1159,7 @@ mod arango_session {
             &despawned_entities,
             &dirty_resources,
             &despawned_resources,
+            &dirty_relationship_entities,
             1,
             "_key",
             "store",
@@ -885,5 +1181,281 @@ mod arango_session {
             }
             other => panic!("expected resource delete operation, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn prepare_commit_preassigns_guid_for_new_entity() {
+        setup();
+        let mut world = World::new();
+
+        let mut session = PersistenceSession::new();
+        session.register_component::<MyComp>();
+
+        let entity = world.spawn(MyComp { value: 7 }).id();
+        let tid = TypeId::of::<MyComp>();
+        let mut dirty_entity_components: HashMap<Entity, HashSet<TypeId>> = HashMap::new();
+        dirty_entity_components.insert(entity, [tid].into_iter().collect());
+
+        let data = PersistenceSession::_prepare_commit(
+            &session,
+            &world,
+            &dirty_entity_components,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            1,
+            "_key",
+            "store",
+        )
+        .unwrap();
+
+        // Should have exactly one operation (CreateDocument)
+        assert_eq!(data.operations.len(), 1);
+        assert!(matches!(
+            &data.operations[0],
+            TransactionOperation::CreateDocument { .. }
+        ));
+
+        // The CreateDocument data should include a preassigned key field
+        if let TransactionOperation::CreateDocument { data: doc, .. } = &data.operations[0] {
+            let key = doc
+                .get("_key")
+                .and_then(|v| v.as_str())
+                .expect("document should contain a preassigned _key");
+            assert!(!key.is_empty(), "preassigned key should be non-empty UUID");
+
+            // CommitData.preassigned_keys should also contain this entity→key mapping
+            assert_eq!(data.preassigned_keys.get(&entity).map(|s| s.as_str()), Some(key));
+        }
+    }
+
+    #[test]
+    fn prepare_commit_uses_existing_guid_component_for_new_entity() {
+        setup();
+        let mut world = World::new();
+
+        let mut session = PersistenceSession::new();
+        session.register_component::<MyComp>();
+
+        // Spawn entity with a pre-existing Guid component
+        let entity = world
+            .spawn((
+                MyComp { value: 7 },
+                crate::bevy::components::Guid::new("my-custom-guid".to_string()),
+            ))
+            .id();
+        let tid = TypeId::of::<MyComp>();
+        let mut dirty_entity_components: HashMap<Entity, HashSet<TypeId>> = HashMap::new();
+        dirty_entity_components.insert(entity, [tid].into_iter().collect());
+
+        let data = PersistenceSession::_prepare_commit(
+            &session,
+            &world,
+            &dirty_entity_components,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            1,
+            "_key",
+            "store",
+        )
+        .unwrap();
+
+        // The document should use the Guid we manually set
+        if let TransactionOperation::CreateDocument { data: doc, .. } = &data.operations[0] {
+            assert_eq!(
+                doc.get("_key").and_then(|v| v.as_str()),
+                Some("my-custom-guid"),
+                "document should use the pre-existing Guid component value"
+            );
+
+            // CommitData.preassigned_keys should also reflect this
+            assert_eq!(data.preassigned_keys.get(&entity).map(|s| s.as_str()), Some("my-custom-guid"));
+        } else {
+            panic!("expected CreateDocument operation");
+        }
+    }
+
+    #[test]
+    fn prepare_commit_edge_diff_adds_new_edges() {
+        setup();
+        let mut world = World::new();
+
+        let mut session = PersistenceSession::new();
+        // Register a relationship serializer that always returns two fixed edges
+        let tid = TypeId::of::<MyComp>(); // reuse type id for testing
+        session.register_relationship(
+            tid,
+            "TestRel",
+            Box::new(|_world, _session, _preassigned| {
+                use crate::core::db::connection::EdgeDocument;
+                Ok(vec![
+                    EdgeDocument {
+                        key: EdgeDocument::make_key("TestRel", "guid_a", "guid_b"),
+                        relationship_type: "TestRel".to_string(),
+                        from_guid: "guid_a".to_string(),
+                        to_guid: "guid_b".to_string(),
+                        payload: None,
+                    },
+                    EdgeDocument {
+                        key: EdgeDocument::make_key("TestRel", "guid_c", "guid_d"),
+                        relationship_type: "TestRel".to_string(),
+                        from_guid: "guid_c".to_string(),
+                        to_guid: "guid_d".to_string(),
+                        payload: None,
+                    },
+                ])
+            }),
+        );
+
+        // Start with empty snapshot, mark some entity as having dirty relationships
+        let dummy_entity = world.spawn_empty().id();
+        let mut dirty_relationship_entities = HashSet::new();
+        dirty_relationship_entities.insert(dummy_entity);
+
+        let data = PersistenceSession::_prepare_commit(
+            &session,
+            &world,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &dirty_relationship_entities,
+            1,
+            "_key",
+            "store",
+        )
+        .unwrap();
+
+        // Should have one UpsertEdges operation with 2 edges
+        let upsert_ops: Vec<_> = data
+            .operations
+            .iter()
+            .filter(|op| matches!(op, TransactionOperation::UpsertEdges { .. }))
+            .collect();
+        assert_eq!(upsert_ops.len(), 1);
+        if let TransactionOperation::UpsertEdges { edges, .. } = upsert_ops[0] {
+            assert_eq!(edges.len(), 2);
+        }
+
+        // new_edge_snapshot should contain both edge keys
+        assert_eq!(data.new_edge_snapshot.len(), 2);
+        assert!(data
+            .new_edge_snapshot
+            .contains(&EdgeDocument::make_key("TestRel", "guid_a", "guid_b")));
+        assert!(data
+            .new_edge_snapshot
+            .contains(&EdgeDocument::make_key("TestRel", "guid_c", "guid_d")));
+    }
+
+    #[test]
+    fn prepare_commit_edge_diff_deletes_removed_edges() {
+        setup();
+        let mut world = World::new();
+
+        let mut session = PersistenceSession::new();
+        // Register a serializer that returns NO edges (they've all been removed)
+        let tid = TypeId::of::<MyComp>();
+        session.register_relationship(
+            tid,
+            "TestRel",
+            Box::new(|_world, _session, _preassigned| Ok(vec![])),
+        );
+
+        // Pre-populate snapshot with edges that should be deleted
+        let old_key = EdgeDocument::make_key("TestRel", "guid_a", "guid_b");
+        session.set_edge_snapshot([old_key.clone()].into_iter().collect());
+
+        let dummy_entity = world.spawn_empty().id();
+        let mut dirty_relationship_entities = HashSet::new();
+        dirty_relationship_entities.insert(dummy_entity);
+
+        let data = PersistenceSession::_prepare_commit(
+            &session,
+            &world,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &dirty_relationship_entities,
+            1,
+            "_key",
+            "store",
+        )
+        .unwrap();
+
+        // Should have one DeleteEdges operation with 1 key
+        let delete_ops: Vec<_> = data
+            .operations
+            .iter()
+            .filter(|op| matches!(op, TransactionOperation::DeleteEdges { .. }))
+            .collect();
+        assert_eq!(delete_ops.len(), 1);
+        if let TransactionOperation::DeleteEdges { keys, .. } = delete_ops[0] {
+            assert_eq!(keys.len(), 1);
+            assert_eq!(keys[0], old_key);
+        }
+
+        // new_edge_snapshot should be empty (all edges removed)
+        assert!(data.new_edge_snapshot.is_empty());
+    }
+
+    #[test]
+    fn edge_document_make_key_is_deterministic() {
+        use crate::core::db::connection::EdgeDocument;
+        let k1 = EdgeDocument::make_key("ChildOf", "aaa", "bbb");
+        let k2 = EdgeDocument::make_key("ChildOf", "aaa", "bbb");
+        assert_eq!(k1, k2);
+        assert_eq!(k1, "ChildOf:aaa:bbb");
+    }
+
+    #[test]
+    fn no_edge_ops_when_relationships_not_dirty() {
+        setup();
+        let world = World::new();
+
+        let mut session = PersistenceSession::new();
+        let tid = TypeId::of::<MyComp>();
+        session.register_relationship(
+            tid,
+            "TestRel",
+            Box::new(|_world, _session, _preassigned| {
+                use crate::core::db::connection::EdgeDocument;
+                Ok(vec![EdgeDocument {
+                    key: EdgeDocument::make_key("TestRel", "a", "b"),
+                    relationship_type: "TestRel".to_string(),
+                    from_guid: "a".to_string(),
+                    to_guid: "b".to_string(),
+                    payload: None,
+                }])
+            }),
+        );
+
+        // Empty dirty_relationship_entities → no edge ops
+        let data = PersistenceSession::_prepare_commit(
+            &session,
+            &world,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(), // no dirty relationships
+            1,
+            "_key",
+            "store",
+        )
+        .unwrap();
+
+        // Should have no edge operations
+        assert!(data
+            .operations
+            .iter()
+            .all(|op| !matches!(
+                op,
+                TransactionOperation::UpsertEdges { .. }
+                    | TransactionOperation::DeleteEdges { .. }
+            )));
     }
 }

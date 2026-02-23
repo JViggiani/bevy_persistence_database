@@ -22,7 +22,7 @@ fn test_load_specific_entities_into_new_session() {
     // Session 2: load (Health AND Position) with Health > 100
     let mut app2 = setup_test_app(db.clone(), None);
     fn sys(pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
-        let _ = pq.filter(Health::value().gt(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().gt(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, sys);
     app2.update();
@@ -55,7 +55,7 @@ fn test_load_into_world_with_existing_entities() {
 
     // WHEN we query for A and load it into app2 via a system
     fn load_a(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().eq(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().eq(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, load_a);
     app2.update();
@@ -103,7 +103,7 @@ fn test_fetch_ids_only() {
     // Use a system to load Health where value > 75, then collect keys from world
     let mut app2 = setup_test_app(db.clone(), None);
     fn load_health_gt_75(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().gt(75)).ensure_loaded();
+        let _ = pq.filter(Health::value().gt(75)).load();
     }
     app2.add_systems(bevy::prelude::Update, load_health_gt_75);
     app2.update();
@@ -124,7 +124,7 @@ fn test_fetch_ids_only() {
     // Health AND Position: load via presence, then collect keys
     let mut app3 = setup_test_app(db.clone(), None);
     fn load_h_and_p(mut pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app3.add_systems(bevy::prelude::Update, load_h_and_p);
     app3.update();
@@ -139,7 +139,7 @@ fn test_fetch_ids_only() {
 
 // System: Duplicate component in Q should be deduped in fetch list
 fn system_duplicate_q_components(mut pq: PersistentQuery<(&Health, Option<&Health>)>) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -167,7 +167,7 @@ fn test_duplicate_q_entries_are_deduped_and_work() {
 // System: Optional in Q with type-driven Without in F
 fn system_optional_component_fetch(mut pq: PersistentQuery<(&Health, Option<&Position>)>) {
     // Request Health and optionally Position via Q; no explicit presence filter needed.
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]
@@ -207,7 +207,7 @@ fn test_optional_component_in_q_is_fetched_if_present() {
 fn system_no_presence_optional_fetch(
     mut pq: PersistentQuery<(Option<&Health>, Option<&Position>)>,
 ) {
-    let _ = pq.ensure_loaded();
+    let _ = pq.load();
 }
 
 #[db_matrix_test]

@@ -26,7 +26,7 @@ fn test_value_filters_equality_operator() {
     // Health == 100
     let mut app2 = setup_test_app(db.clone(), None);
     fn s1(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().eq(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().eq(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, s1);
     app2.update();
@@ -40,7 +40,7 @@ fn test_value_filters_equality_operator() {
     // Creature.is_screaming == true
     app2.world_mut().clear_entities();
     fn s2(pq: PersistentQuery<&Creature>) {
-        let _ = pq.filter(Creature::is_screaming().eq(true)).ensure_loaded();
+        let _ = pq.filter(Creature::is_screaming().eq(true)).load();
     }
     app2.add_systems(bevy::prelude::Update, s2);
     app2.update();
@@ -54,7 +54,7 @@ fn test_value_filters_equality_operator() {
     // PlayerName == "Alice"
     app2.world_mut().clear_entities();
     fn s3(pq: PersistentQuery<&PlayerName>) {
-        let _ = pq.filter(PlayerName::name().eq("Alice")).ensure_loaded();
+        let _ = pq.filter(PlayerName::name().eq("Alice")).load();
     }
     app2.add_systems(bevy::prelude::Update, s3);
     app2.update();
@@ -81,7 +81,7 @@ fn test_value_filters_relational_operators() {
     // gt(100) -> 1
     let mut app2 = setup_test_app(db.clone(), None);
     fn gt(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().gt(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().gt(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, gt);
     app2.update();
@@ -96,7 +96,7 @@ fn test_value_filters_relational_operators() {
     // gte(100) -> 2
     app2.world_mut().clear_entities();
     fn gte(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().gte(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().gte(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, gte);
     app2.update();
@@ -111,7 +111,7 @@ fn test_value_filters_relational_operators() {
     // lt(100) -> 1
     app2.world_mut().clear_entities();
     fn lt(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().lt(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().lt(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, lt);
     app2.update();
@@ -126,7 +126,7 @@ fn test_value_filters_relational_operators() {
     // lte(100) -> 2
     app2.world_mut().clear_entities();
     fn lte(pq: PersistentQuery<&Health>) {
-        let _ = pq.filter(Health::value().lte(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().lte(100)).load();
     }
     app2.add_systems(bevy::prelude::Update, lte);
     app2.update();
@@ -160,11 +160,11 @@ fn test_value_filters_logical_combinations() {
 
     fn and_sys(pq: PersistentQuery<(&Health, &Position)>) {
         let expr = Health::value().gt(100).and(Position::x().lt(100.0));
-        let _ = pq.filter(expr).ensure_loaded();
+        let _ = pq.filter(expr).load();
     }
     fn or_sys(pq: PersistentQuery<(&Health, &Position)>) {
         let expr = Health::value().gt(100).or(Position::x().lt(100.0));
-        let _ = pq.filter(expr).ensure_loaded();
+        let _ = pq.filter(expr).load();
     }
 
     app2.add_systems(bevy::prelude::Update, and_sys);
@@ -216,7 +216,7 @@ fn test_presence_value_combination_and_or() {
             )>,
         >,
     ) {
-        let _ = pq.filter(Health::value().gte(100)).ensure_loaded();
+        let _ = pq.filter(Health::value().gte(100)).load();
     }
     app.add_systems(bevy::prelude::Update, sys);
     app.update();

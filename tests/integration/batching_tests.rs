@@ -40,7 +40,7 @@ fn test_successful_batch_commit_of_new_entities() {
     // loading back from DB
     let mut app2 = setup_test_app(db.clone(), None);
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();
@@ -77,7 +77,7 @@ fn test_batch_commit_with_updates_and_deletes() {
 
     let mut app2 = setup_test_app(db.clone(), None);
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();

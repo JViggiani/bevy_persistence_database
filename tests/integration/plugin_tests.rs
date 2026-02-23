@@ -174,7 +174,7 @@ fn test_postupdate_load_applies_next_frame() {
     // WHEN: load is triggered from PostUpdate
     let mut app2 = setup_test_app(db.clone(), None);
     fn postupdate_load(mut pq: PersistentQuery<(&Health, &Position)>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     // Ensure the loader runs before PreCommit so ops are applied in the same frame.
     app2.add_systems(

@@ -1,6 +1,7 @@
 // declare tests in here to ensure they are compiled and run in a single binary
 
 pub mod querying;
+pub mod relationships;
 
 #[cfg(feature = "arango")]
 pub mod arango_collection_name_tests;

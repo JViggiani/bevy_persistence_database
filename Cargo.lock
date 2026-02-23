@@ -367,6 +367,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_many_relationships"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "204d34d5acff9cf13dd5f8792de7538090420053cba2f26e60cbfdbe2365e36d"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_math"
 version = "0.17.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -391,6 +400,7 @@ version = "0.2.10"
 dependencies = [
  "arangors",
  "bevy",
+ "bevy_many_relationships",
  "bevy_persistence_database_derive",
  "ctor",
  "downcast-rs",

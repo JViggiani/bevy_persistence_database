@@ -21,7 +21,7 @@ fn test_load_resources_alongside_entities() {
     // WHEN any query is fetched into a new app
     let mut app2 = setup_test_app(db.clone(), None);
     fn sys(mut pq: PersistentQuery<&Guid>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app2.add_systems(bevy::prelude::Update, sys);
     app2.update();

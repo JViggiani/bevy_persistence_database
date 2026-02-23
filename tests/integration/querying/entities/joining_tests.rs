@@ -43,7 +43,7 @@ fn test_query_lens_join_filtered_world_only() {
 
     // Update: load (&Health, &Position)
     fn sys_load(mut pq: PersistentQuery<(&Health, &Position)>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app.add_systems(Update, sys_load);
 

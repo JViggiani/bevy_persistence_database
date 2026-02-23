@@ -18,17 +18,17 @@ fn test_cached_query_system(
     mut query2: PersistentQuery<&Health>,
 ) {
     // First query execution - should hit database
-    let _ = query1.ensure_loaded();
+    let _ = query1.load();
 
     // Second execution of equivalent query - should use cache
-    let _ = query2.ensure_loaded();
+    let _ = query2.load();
 }
 
 // System that tests force refresh
 fn test_force_refresh_system(mut query: PersistentQuery<&Health>) {
     // Use force refresh to bypass cache
     query = query.force_refresh();
-    let _ = query.ensure_loaded();
+    let _ = query.load();
 }
 
 #[db_matrix_test]
@@ -87,7 +87,7 @@ fn system_load_and_capture(
     mut pq: PersistentQuery<&Health>,
     mut state: bevy::prelude::ResMut<TestState>,
 ) {
-    pq.ensure_loaded();
+    pq.load();
     for (e, _) in pq.iter() {
         if state.entity.is_none() {
             state.entity = Some(e);
@@ -120,7 +120,7 @@ fn system_second_load(
 ) {
     if let Some(e) = state.entity {
         if let Ok(g) = q_guid.get(e) {
-            let _ = pq.filter(Guid::key_field().eq(g.id())).ensure_loaded();
+            let _ = pq.filter(Guid::key_field().eq(g.id())).load();
         }
     }
 }
@@ -168,7 +168,7 @@ fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res
     let _ = query
         .filter(Guid::key_field().eq(key.0.as_str()))
         .force_refresh()
-        .ensure_loaded();
+        .load();
 }
 
 #[db_matrix_test]
@@ -183,7 +183,7 @@ fn test_force_refresh_overwrites() {
     // Load into app2 via system, then mutate locally
     let mut app2 = setup_test_app(db.clone(), None);
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app2.add_systems(bevy::prelude::Update, load);
     app2.update();

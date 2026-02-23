@@ -7,7 +7,7 @@ use bevy_persistence_database_derive::db_matrix_test;
 
 fn test_persistent_query_system(mut query: PersistentQuery<(&Health, &Position)>) {
     // This will load entities from the database
-    query.ensure_loaded();
+    query.load();
     for (entity, (health, position)) in query.iter() {
         println!(
             "Entity {:?} has health {} and position ({}, {})",
@@ -117,7 +117,7 @@ fn test_persistent_query_with_filter() {
         query = query.filter(Health::value().gt(100));
 
         // This will load entities from the database
-        query.ensure_loaded();
+        query.load();
         for (_entity, (health, position)) in query.iter() {
             println!(
                 "Entity has health {} and position ({}, {})",

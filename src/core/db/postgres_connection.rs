@@ -3,15 +3,18 @@
 
 use crate::core::db::connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DatabaseConnection, DocumentKind, PersistenceError,
-    TransactionOperation, read_version,
+    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DatabaseConnection, DocumentKind, EdgeDocument,
+    PersistenceError, TransactionOperation, read_version,
 };
-use crate::core::db::shared::{GroupedOperations, OperationType, check_operation_success};
-use crate::core::query::{BinaryOperator, FilterExpression, PersistenceQuerySpecification};
+use crate::core::db::shared::{GroupedOperations, OperationType, check_operation_success, extract_keys};
+use crate::core::query::{
+    BinaryOperator, EdgeQuerySpecification, FilterExpression, PersistenceQuerySpecification,
+};
 use bevy::log::{debug, error, info};
 use futures::FutureExt;
 use futures::future::BoxFuture;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -135,8 +138,6 @@ impl PostgresDbConnection {
             return Err(PersistenceError::new("store must be provided"));
         }
         let table = quote_ident(store);
-        let doc_index = quote_ident(&format!("{}_doc_gin", store));
-        let type_index = quote_ident(&format!("{}_type_idx", store));
         let client = self.client.lock().await;
         debug!("[pg] ensuring store table {}", table);
         let stmt = format!(
@@ -147,17 +148,38 @@ impl PostgresDbConnection {
                 bevy_persistence_version BIGINT NOT NULL,
                 doc JSONB NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS {doc_idx} ON {table} USING GIN (doc jsonb_path_ops);
-            CREATE INDEX IF NOT EXISTS {type_idx} ON {table} (bevy_type);
             "#,
             table = table,
-            doc_idx = doc_index,
-            type_idx = type_index
         );
         client
             .batch_execute(&stmt)
             .await
             .map_err(|e| PersistenceError::new(format!("pg ensure store table failed: {:?}", e)))?;
+        Ok(table)
+    }
+
+    /// Ensure the edge table `{store}__edges` exists, creating it if needed.
+    async fn ensure_edge_table(&self, store: &str) -> Result<String, PersistenceError> {
+        let table_name = format!("{}__edges", store);
+        let table = quote_ident(&table_name);
+        let client = self.client.lock().await;
+        debug!("[pg] ensuring edge table {}", table);
+        let stmt = format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {table} (
+                id TEXT PRIMARY KEY,
+                relationship_type TEXT NOT NULL,
+                from_guid TEXT NOT NULL,
+                to_guid TEXT NOT NULL,
+                payload JSONB
+            );
+            "#,
+            table = table,
+        );
+        client
+            .batch_execute(&stmt)
+            .await
+            .map_err(|e| PersistenceError::new(format!("pg ensure edge table failed: {:?}", e)))?;
         Ok(table)
     }
 
@@ -639,6 +661,137 @@ impl DatabaseConnection for PostgresDbConnection {
         .boxed()
     }
 
+    fn query_edges(
+        &self,
+        spec: &EdgeQuerySpecification,
+    ) -> BoxFuture<'static, Result<Vec<EdgeDocument>, PersistenceError>> {
+        let spec = spec.clone();
+        let client = self.client.clone();
+        let conn = self.clone();
+        async move {
+            if spec.store.is_empty() || spec.depth == 0 {
+                return Ok(Vec::new());
+            }
+
+            let edge_table = conn.ensure_edge_table(&spec.store).await?;
+
+            // No explicit sources: single pass using the provided filters.
+            if spec.from_guids.is_empty() {
+                let mut clauses: Vec<String> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+
+                if !spec.relationship_types.is_empty() {
+                    params.push(Box::new(spec.relationship_types.clone()));
+                    let idx = params.len();
+                    clauses.push(format!("relationship_type = ANY(${})", idx));
+                }
+
+                if !spec.to_guids.is_empty() {
+                    params.push(Box::new(spec.to_guids.clone()));
+                    let idx = params.len();
+                    clauses.push(format!("to_guid = ANY(${})", idx));
+                }
+
+                let where_sql = if clauses.is_empty() {
+                    "TRUE".to_string()
+                } else {
+                    clauses.join(" AND ")
+                };
+
+                let sql = format!(
+                    "SELECT id, relationship_type, from_guid, to_guid, payload FROM {} WHERE {}",
+                    edge_table, where_sql
+                );
+
+                let client = client.lock().await;
+                let param_refs: Vec<&(dyn ToSql + Sync)> =
+                    params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
+                let rows = client
+                    .query(&sql, param_refs.as_slice())
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg query_edges failed: {}", e)))?;
+
+                let mut edges = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let payload: Option<Value> = row.get("payload");
+                    edges.push(EdgeDocument {
+                        key: row.get("id"),
+                        relationship_type: row.get("relationship_type"),
+                        from_guid: row.get("from_guid"),
+                        to_guid: row.get("to_guid"),
+                        payload,
+                    });
+                }
+                return Ok(edges);
+            }
+
+            let mut all_edges: Vec<EdgeDocument> = Vec::new();
+            let mut seen_keys: HashSet<String> = HashSet::new();
+            let mut frontier: Vec<String> = spec.from_guids.clone();
+
+            for _ in 0..spec.depth {
+                if frontier.is_empty() {
+                    break;
+                }
+
+                let mut clauses: Vec<String> = Vec::new();
+                let mut params: Vec<Box<dyn ToSql + Sync + Send>> = Vec::new();
+
+                if !spec.relationship_types.is_empty() {
+                    params.push(Box::new(spec.relationship_types.clone()));
+                    let idx = params.len();
+                    clauses.push(format!("relationship_type = ANY(${})", idx));
+                }
+
+                params.push(Box::new(frontier.clone()));
+                let from_idx = params.len();
+                clauses.push(format!("from_guid = ANY(${})", from_idx));
+
+                if !spec.to_guids.is_empty() {
+                    params.push(Box::new(spec.to_guids.clone()));
+                    let idx = params.len();
+                    clauses.push(format!("to_guid = ANY(${})", idx));
+                }
+
+                let where_sql = clauses.join(" AND ");
+                let sql = format!(
+                    "SELECT id, relationship_type, from_guid, to_guid, payload FROM {} WHERE {}",
+                    edge_table, where_sql
+                );
+                let client = client.lock().await;
+                let param_refs: Vec<&(dyn ToSql + Sync)> =
+                    params.iter().map(|p| &**p as &(dyn ToSql + Sync)).collect();
+                let rows = client
+                    .query(&sql, param_refs.as_slice())
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg query_edges failed: {}", e)))?;
+
+                let mut edges = Vec::with_capacity(rows.len());
+                for row in rows {
+                    let payload: Option<Value> = row.get("payload");
+                    edges.push(EdgeDocument {
+                        key: row.get("id"),
+                        relationship_type: row.get("relationship_type"),
+                        from_guid: row.get("from_guid"),
+                        to_guid: row.get("to_guid"),
+                        payload,
+                    });
+                }
+                let mut next_frontier: Vec<String> = Vec::new();
+                for edge in edges {
+                    if seen_keys.insert(edge.key.clone()) {
+                        next_frontier.push(edge.to_guid.clone());
+                        all_edges.push(edge);
+                    }
+                }
+                frontier = next_frontier;
+            }
+
+            Ok(all_edges)
+        }
+        .boxed()
+    }
+
     fn execute_transaction(
         &self,
         operations: Vec<TransactionOperation>,
@@ -657,13 +810,22 @@ impl DatabaseConnection for PostgresDbConnection {
 
             let table = conn.ensure_store_table(&store).await?;
 
+            let groups = GroupedOperations::from_operations(operations, KEY_COL);
+
+            // Ensure edge table BEFORE acquiring the client lock to avoid deadlock
+            // (ensure_edge_table also acquires the client lock internally).
+            let has_edge_ops = !groups.edges.upserts.is_empty() || !groups.edges.deletes.is_empty();
+            let edge_table = if has_edge_ops {
+                Some(conn.ensure_edge_table(&store).await?)
+            } else {
+                None
+            };
+
             let mut client = client_arc.lock().await;
             let tx = client
                 .transaction()
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg START TRANSACTION failed: {}", e)))?;
-
-            let groups = GroupedOperations::from_operations(operations, KEY_COL);
             let mut new_entity_ids: Vec<String> = Vec::new();
 
             async fn run_update(
@@ -742,20 +904,31 @@ impl DatabaseConnection for PostgresDbConnection {
             }
 
             // Entity creates
-            if !groups.entity_creates.is_empty() {
-                use uuid::Uuid;
+            if !groups.entities.creates.is_empty() {
+                // Extract client-side keys from the document data (pre-assigned by _prepare_commit).
+                // Fall back to UUID v4 if a document is missing its key (shouldn't happen).
                 let ids: Vec<String> = groups
-                    .entity_creates
+                    .entities.creates
                     .iter()
-                    .map(|_| Uuid::new_v4().to_string())
+                    .map(|doc| {
+                        doc.get(KEY_COL)
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+                    })
                     .collect();
 
                 let input_docs: Vec<serde_json::Value> = groups
-                    .entity_creates
+                    .entities.creates
                     .iter()
                     .cloned()
                     .zip(ids.iter())
-                    .map(|(doc, id)| {
+                    .map(|(mut doc, id)| {
+                        // Strip the key from the doc JSONB — Postgres stores it
+                        // in a dedicated column, not inside the document.
+                        if let Some(obj) = doc.as_object_mut() {
+                            obj.remove(KEY_COL);
+                        }
                         let ver = read_version(&doc).map(|v| v as i64).unwrap_or(1);
                         serde_json::json!({
                             "id": id,
@@ -795,17 +968,17 @@ impl DatabaseConnection for PostgresDbConnection {
             }
 
             // Entity updates/deletes
-            if !groups.entity_updates.is_empty() {
-                let requested = groups.extract_keys(&groups.entity_updates, KEY_COL);
-                let updated = run_update(&tx, &groups.entity_updates, DocumentKind::Entity, &table, &store).await?;
+            if !groups.entities.updates.is_empty() {
+                let requested = extract_keys(&groups.entities.updates, KEY_COL);
+                let updated = run_update(&tx, &groups.entities.updates, DocumentKind::Entity, &table, &store).await?;
                 if let Err(e) = check_operation_success(requested, updated, &OperationType::Update, &store) {
                     let _ = tx.rollback().await;
                     return Err(e);
                 }
             }
-            if !groups.entity_deletes.is_empty() {
-                let requested = groups.extract_keys(&groups.entity_deletes, KEY_COL);
-                let deleted = run_delete(&tx, &groups.entity_deletes, DocumentKind::Entity, &table, &store).await?;
+            if !groups.entities.deletes.is_empty() {
+                let requested = extract_keys(&groups.entities.deletes, KEY_COL);
+                let deleted = run_delete(&tx, &groups.entities.deletes, DocumentKind::Entity, &table, &store).await?;
                 if let Err(e) = check_operation_success(requested, deleted, &OperationType::Delete, &store) {
                     let _ = tx.rollback().await;
                     return Err(e);
@@ -813,17 +986,22 @@ impl DatabaseConnection for PostgresDbConnection {
             }
 
             // Resource creates
-            if !groups.resource_creates.is_empty() {
+            if !groups.resources.creates.is_empty() {
                 let input_docs: Vec<serde_json::Value> = groups
-                    .resource_creates
+                    .resources.creates
                     .iter()
                     .cloned()
-                    .map(|doc| {
+                    .map(|mut doc| {
                         let id = doc
                             .get("id")
                             .and_then(|v| v.as_str())
                             .ok_or_else(|| PersistenceError::new("Resource create missing id"))?
                             .to_string();
+                        // Strip the key from the doc — Postgres stores it in
+                        // a dedicated column, not inside the document.
+                        if let Some(obj) = doc.as_object_mut() {
+                            obj.remove(KEY_COL);
+                        }
                         let ver = read_version(&doc).map(|v| v as i64).unwrap_or(1);
                         Ok(serde_json::json!({
                             "id": id,
@@ -861,21 +1039,74 @@ impl DatabaseConnection for PostgresDbConnection {
             }
 
             // Resource updates/deletes
-            if !groups.resource_updates.is_empty() {
-                let requested = groups.extract_keys(&groups.resource_updates, KEY_COL);
-                let updated = run_update(&tx, &groups.resource_updates, DocumentKind::Resource, &table, &store).await?;
+            if !groups.resources.updates.is_empty() {
+                let requested = extract_keys(&groups.resources.updates, KEY_COL);
+                let updated = run_update(&tx, &groups.resources.updates, DocumentKind::Resource, &table, &store).await?;
                 if let Err(e) = check_operation_success(requested, updated, &OperationType::Update, &store) {
                     let _ = tx.rollback().await;
                     return Err(e);
                 }
             }
-            if !groups.resource_deletes.is_empty() {
-                let requested = groups.extract_keys(&groups.resource_deletes, KEY_COL);
-                let deleted = run_delete(&tx, &groups.resource_deletes, DocumentKind::Resource, &table, &store).await?;
+            if !groups.resources.deletes.is_empty() {
+                let requested = extract_keys(&groups.resources.deletes, KEY_COL);
+                let deleted = run_delete(&tx, &groups.resources.deletes, DocumentKind::Resource, &table, &store).await?;
                 if let Err(e) = check_operation_success(requested, deleted, &OperationType::Delete, &store) {
                     let _ = tx.rollback().await;
                     return Err(e);
                 }
+            }
+
+            // Edge upserts
+            if !groups.edges.upserts.is_empty() {
+                let edge_table = edge_table.as_ref().expect("edge_table must be set when edge_upserts is non-empty");
+                let edge_docs: Vec<serde_json::Value> = groups.edges.upserts.iter().map(|edge| {
+                    let mut doc = serde_json::json!({
+                        "id": &edge.key,
+                        "relationship_type": &edge.relationship_type,
+                        "from_guid": &edge.from_guid,
+                        "to_guid": &edge.to_guid,
+                    });
+                    if let Some(payload) = &edge.payload {
+                        doc.as_object_mut().unwrap().insert("payload".to_string(), payload.clone());
+                    }
+                    doc
+                }).collect();
+
+                let upsert_sql = format!(
+                    r#"
+                    WITH input AS (
+                        SELECT (x->>'id')::text                AS id,
+                               (x->>'relationship_type')::text AS relationship_type,
+                               (x->>'from_guid')::text         AS from_guid,
+                               (x->>'to_guid')::text           AS to_guid,
+                               (x->'payload')::jsonb           AS payload
+                        FROM jsonb_array_elements($1::jsonb) AS x
+                    )
+                    INSERT INTO {edge_table} (id, relationship_type, from_guid, to_guid, payload)
+                    SELECT id, relationship_type, from_guid, to_guid, payload FROM input
+                    ON CONFLICT (id) DO UPDATE SET
+                        relationship_type = EXCLUDED.relationship_type,
+                        from_guid = EXCLUDED.from_guid,
+                        to_guid = EXCLUDED.to_guid,
+                        payload = EXCLUDED.payload
+                    "#,
+                    edge_table = edge_table
+                );
+                tx.execute(&upsert_sql, &[&serde_json::Value::Array(edge_docs)])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg edge upsert ({}) failed: {}", store, e)))?;
+            }
+
+            // Edge deletes
+            if !groups.edges.deletes.is_empty() {
+                let edge_table = edge_table.as_ref().expect("edge_table must be set when edge_deletes is non-empty");
+                let del_sql = format!(
+                    "DELETE FROM {edge_table} WHERE id = ANY($1::text[])",
+                    edge_table = edge_table
+                );
+                tx.execute(&del_sql, &[&groups.edges.deletes])
+                    .await
+                    .map_err(|e| PersistenceError::new(format!("pg edge delete ({}) failed: {}", store, e)))?;
             }
 
             tx.commit()

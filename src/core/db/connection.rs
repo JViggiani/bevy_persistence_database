@@ -1,6 +1,6 @@
 //! Defines the abstract `DatabaseConnection` trait.
 
-use crate::core::query::PersistenceQuerySpecification;
+use crate::core::query::{EdgeQuerySpecification, PersistenceQuerySpecification};
 use bevy::prelude::Resource;
 use futures::future::BoxFuture;
 use mockall::automock;
@@ -102,6 +102,40 @@ pub enum TransactionOperation {
         key: String,
         expected_current_version: u64,
     },
+    /// Upsert a batch of edge documents into `{store}__edges`.
+    /// Each edge has a deterministic key `{relationship_type}:{from_guid}:{to_guid}`.
+    UpsertEdges {
+        store: String,
+        edges: Vec<EdgeDocument>,
+    },
+    /// Delete a batch of edges by their deterministic keys from `{store}__edges`.
+    DeleteEdges {
+        store: String,
+        keys: Vec<String>,
+    },
+}
+
+/// A single edge document for relationship persistence.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct EdgeDocument {
+    /// Deterministic key: `{relationship_type}:{from_guid}:{to_guid}`
+    pub key: String,
+    /// The relationship type name (e.g. `"ChildOf"`)
+    pub relationship_type: String,
+    /// GUID of the source entity
+    pub from_guid: String,
+    /// GUID of the target entity
+    pub to_guid: String,
+    /// Optional serialized payload (for payload-bearing edges)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
+}
+
+impl EdgeDocument {
+    /// Build the deterministic edge key.
+    pub fn make_key(relationship_type: &str, from_guid: &str, to_guid: &str) -> String {
+        format!("{}:{}:{}", relationship_type, from_guid, to_guid)
+    }
 }
 
 impl TransactionOperation {
@@ -110,7 +144,9 @@ impl TransactionOperation {
         match self {
             TransactionOperation::CreateDocument { store, .. }
             | TransactionOperation::UpdateDocument { store, .. }
-            | TransactionOperation::DeleteDocument { store, .. } => store,
+            | TransactionOperation::DeleteDocument { store, .. }
+            | TransactionOperation::UpsertEdges { store, .. }
+            | TransactionOperation::DeleteEdges { store, .. } => store,
         }
     }
 }
@@ -178,6 +214,12 @@ pub trait DatabaseConnection: Send + Sync + std::fmt::Debug {
         &self,
         spec: &PersistenceQuerySpecification,
     ) -> BoxFuture<'static, Result<usize, PersistenceError>>;
+
+    /// Query relationship edge documents from `{store}__edges`.
+    fn query_edges(
+        &self,
+        spec: &EdgeQuerySpecification,
+    ) -> BoxFuture<'static, Result<Vec<EdgeDocument>, PersistenceError>>;
 }
 
 /// A resource wrapper around the DatabaseConnection

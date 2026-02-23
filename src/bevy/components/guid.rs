@@ -30,9 +30,16 @@ impl<'de> Deserialize<'de> for Guid {
 }
 
 impl Guid {
-    /// Creates a new `Guid`. This is intended for modification in the internal library, but is available to read externally.
+    /// Creates a new `Guid` with the given ID string.
     pub fn new(id: String) -> Self {
         Self { value: id }
+    }
+
+    /// Generates a new `Guid` with a random UUID v4.
+    pub fn generate() -> Self {
+        Self {
+            value: uuid::Uuid::new_v4().to_string(),
+        }
     }
 
     /// Returns the underlying global ID

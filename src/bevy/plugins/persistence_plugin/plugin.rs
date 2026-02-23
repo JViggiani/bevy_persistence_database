@@ -9,7 +9,7 @@ use super::ecs_plumbing::{
 };
 use super::listeners::{commit_event_listener, init_commit_listeners};
 use super::runtime::{TokioRuntime, ensure_task_pools};
-use crate::bevy::params::query::PersistenceQueryCache;
+use crate::bevy::params::query::{InFlightQueries, PersistenceQueryCache};
 use crate::bevy::world_access::DeferredWorldOperations;
 use crate::core::db::connection::DatabaseConnectionResource;
 use crate::core::db::DatabaseConnection;
@@ -107,6 +107,7 @@ impl Plugin for PersistencePluginCore {
         app.insert_resource(TokioRuntime::shared());
 
         app.init_resource::<PersistenceQueryCache>();
+        app.init_resource::<InFlightQueries>();
         app.init_resource::<DeferredWorldOperations>();
 
         insert_initial_immediate_world_ptr(app);

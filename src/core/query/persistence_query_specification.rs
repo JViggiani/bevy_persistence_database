@@ -21,6 +21,21 @@ pub struct PersistenceQuerySpecification {
     pub pagination: Option<PaginationConfig>,
 }
 
+/// Specification for querying relationship edge documents.
+#[derive(Debug, Clone, Default)]
+pub struct EdgeQuerySpecification {
+    /// Store name; edges are stored in `{store}__edges`.
+    pub store: String,
+    /// Relationship type names to include. Empty includes all types.
+    pub relationship_types: Vec<String>,
+    /// Source GUID filters. Empty includes all sources.
+    pub from_guids: Vec<String>,
+    /// Target GUID filters. Empty includes all targets.
+    pub to_guids: Vec<String>,
+    /// Traversal depth. `0` disables traversal.
+    pub depth: usize,
+}
+
 impl Default for PersistenceQuerySpecification {
     fn default() -> Self {
         Self {

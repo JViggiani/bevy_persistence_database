@@ -395,3 +395,71 @@ fn test_persist_component_with_option_none() {
         "The fetched data should be None"
     );
 }
+
+/// Verifies that when an entity is spawned without a `Guid` component, the
+/// library automatically assigns a UUID-based GUID after the first commit and
+/// inserts it as a `Guid` component on the entity.
+#[db_matrix_test]
+fn test_entity_guid_auto_assigned_on_commit() {
+    let (db, _container) = setup();
+    let mut app = setup_test_app(db.clone(), None);
+
+    // Spawn with NO explicit Guid
+    let entity = app.world_mut().spawn(Health { value: 42 }).id();
+
+    // No Guid before commit
+    assert!(
+        app.world().get::<Guid>(entity).is_none(),
+        "Entity should not have a Guid before commit"
+    );
+
+    app.update();
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("commit failed");
+
+    // Guid should be inserted automatically after commit
+    let guid = app
+        .world()
+        .get::<Guid>(entity)
+        .expect("library should auto-assign a Guid after commit")
+        .id();
+
+    // The auto-assigned GUID should be a valid UUID
+    uuid::Uuid::parse_str(guid).expect("auto-assigned Guid should be a valid UUID");
+
+    // Entity should be persisted under that GUID
+    let stored = run_async(db.fetch_component(TEST_STORE, guid, Health::name()))
+        .expect("fetch failed")
+        .expect("component should exist in DB");
+    let health: Health = serde_json::from_value(stored).expect("deserialize failed");
+    assert_eq!(health.value, 42);
+}
+
+/// When an entity is spawned with an explicit `Guid`, that value must survive the
+/// commit unchanged — the library must not overwrite it with a generated UUID.
+#[db_matrix_test]
+fn test_preexisting_guid_is_preserved() {
+    let (db, _container) = setup();
+    let mut app = setup_test_app(db.clone(), None);
+
+    let custom_guid = "my-custom-id-12345";
+    let entity = app
+        .world_mut()
+        .spawn((Health { value: 77 }, Guid::new(custom_guid.to_string())))
+        .id();
+
+    app.update();
+    commit_sync(&mut app, db.clone(), TEST_STORE).expect("commit failed");
+
+    let guid = app
+        .world()
+        .get::<Guid>(entity)
+        .expect("entity should still have a Guid after commit");
+    assert_eq!(guid.id(), custom_guid, "pre-existing GUID should be preserved");
+
+    // Verify the document exists in DB under the custom key
+    let health_json = run_async(db.fetch_component(TEST_STORE, custom_guid, Health::name()))
+        .expect("fetch failed")
+        .expect("component should exist under custom key");
+    let fetched: Health = serde_json::from_value(health_json).expect("deserialize failed");
+    assert_eq!(fetched.value, 77);
+}

@@ -13,7 +13,7 @@ use std::sync::{
 };
 
 #[db_matrix_test]
-fn test_ensure_loaded_then_pass_through() {
+fn test_load_then_pass_through() {
     let (real_db, _container) = setup();
 
     // Seed DB with one entity having Health+Position.
@@ -33,7 +33,7 @@ fn test_ensure_loaded_then_pass_through() {
 
     // 1) Update system: explicitly load once; call twice to validate cache later.
     fn sys_load(mut pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>) {
-        let _ = pq.ensure_loaded().ensure_loaded();
+        let _ = pq.load().load();
     }
     app.add_systems(Update, sys_load);
     app.update(); // triggers DB load and schedules world ops
@@ -80,8 +80,8 @@ fn test_cache_prevents_duplicate_loads_in_same_frame() {
 
     // Single system issuing two identical loads in the same frame
     fn sys_twice(mut pq: PersistentQuery<&Health, With<Health>>) {
-        pq.ensure_loaded();
-        pq.ensure_loaded(); // should hit cache
+        pq.load();
+        pq.load(); // should hit cache
     }
     app.add_systems(Update, sys_twice);
     app.update();
@@ -114,7 +114,7 @@ fn test_deref_forwards_bevy_query_methods() {
 
     // Frame 1: load
     fn load(mut pq: PersistentQuery<(&Health, &Position)>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     app.add_systems(Update, load);
     app.update();
@@ -170,7 +170,7 @@ fn test_immediate_pass_through() {
     // System with load and immediate query in the same function
     fn test_immediate_system(mut pq: PersistentQuery<&Health>, mut results: ResMut<TestResults>) {
         // Load with immediate apply
-        pq.ensure_loaded();
+        pq.load();
 
         // Test immediate iter
         let entities: Vec<Entity> = pq.iter().map(|(e, _)| e).collect();
@@ -245,7 +245,7 @@ fn test_query_contains_method() {
 
     fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntity>) {
         // Load health entities
-        pq.ensure_loaded();
+        pq.load();
 
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
@@ -306,7 +306,7 @@ fn test_query_get_method() {
 
     fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntity>) {
         // Load health entities
-        pq.ensure_loaded();
+        pq.load();
 
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
@@ -364,7 +364,7 @@ fn test_query_get_mut_method() {
 
     fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntity>) {
         // Load health entities
-        pq.ensure_loaded();
+        pq.load();
 
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
@@ -426,7 +426,7 @@ fn test_query_get_many_method() {
 
     fn load_health(mut pq: PersistentQuery<&Health>, mut res: ResMut<LoadedEntities>) {
         // Load health entities
-        pq.ensure_loaded();
+        pq.load();
 
         // Capture entities
         for (e, _) in pq.iter() {
@@ -501,7 +501,7 @@ fn test_query_single_method() {
         mut result: ResMut<SingleResult>,
     ) {
         // Load and immediately use single
-        pq.ensure_loaded();
+        pq.load();
 
         match pq.single() {
             Ok((_e, health)) => {
@@ -556,7 +556,7 @@ fn test_query_iter_combinations_method() {
 
     fn test_combinations(mut pq: PersistentQuery<&Health>, mut result: ResMut<CombinationsResult>) {
         // Load and immediately use iter_combinations
-        pq.ensure_loaded();
+        pq.load();
 
         // Count combinations of 2 entities
         result.count = pq.iter_combinations::<2>().count();

@@ -11,7 +11,7 @@ use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use tokio::sync::oneshot;
 
@@ -25,6 +25,11 @@ pub(super) struct MultiBatchCommitTracker {
     correlation_id: u64,
     remaining_batches: Arc<AtomicUsize>,
     result_sender: Arc<Mutex<Option<oneshot::Sender<Result<(), PersistenceError>>>>>,
+    /// Metas from batches that completed successfully, held until all batches finish.
+    /// On full success we apply them all; on any failure we restore dirty state for all.
+    pending_metas: Arc<Mutex<Vec<CommitMeta>>>,
+    /// Set to true when any batch in the group fails.
+    failed: Arc<AtomicBool>,
 }
 
 /// Message emitted when a background commit task is complete.
@@ -68,6 +73,10 @@ pub(super) struct CommitMeta {
     despawned_resources: HashSet<TypeId>,
     connection: Arc<dyn DatabaseConnection>,
     store: String,
+    /// Updated edge snapshot to apply on success.
+    new_edge_snapshot: HashSet<String>,
+    /// Client-side preassigned keys for new entities.
+    preassigned_keys: HashMap<Entity, String>,
 }
 
 pub(super) fn handle_commit_trigger(ecs: &mut World) {
@@ -145,7 +154,7 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
     let plugin_config = ecs.resource::<PersistencePluginConfig>().clone();
 
     // 1) isolate dirty sets from the session
-    let (dirty_entity_components, despawned_entities, dirty_resources, despawned_resources) = {
+    let (dirty_entity_components, despawned_entities, dirty_resources, despawned_resources, dirty_relationship_entities) = {
         let mut session = ecs.resource_mut::<PersistenceSession>();
         session.take_dirty_state().into_parts()
     };
@@ -158,6 +167,7 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
         &despawned_entities,
         &dirty_resources,
         &despawned_resources,
+        &dirty_relationship_entities,
         plugin_config.thread_count,
         connection.document_key_field(),
         &store,
@@ -169,11 +179,12 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
                 correlation_id,
             });
             let mut session = ecs.resource_mut::<PersistenceSession>();
-            session.restore_dirty_state(DirtyState::from_parts(
+            session.restore_dirty_state(DirtyState::from_parts_with_relationships(
                 dirty_entity_components,
                 despawned_entities,
                 dirty_resources,
                 despawned_resources,
+                dirty_relationship_entities,
             ));
             return;
         }
@@ -185,11 +196,12 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
                 correlation_id,
             });
             let mut session = ecs.resource_mut::<PersistenceSession>();
-            session.restore_dirty_state(DirtyState::from_parts(
+            session.restore_dirty_state(DirtyState::from_parts_with_relationships(
                 dirty_entity_components,
                 despawned_entities,
                 dirty_resources,
                 despawned_resources,
+                dirty_relationship_entities,
             ));
             return;
         }
@@ -202,43 +214,38 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
 
     let all_operations = commit_data.operations;
     let new_entities = commit_data.new_entities;
+    let new_edge_snapshot = commit_data.new_edge_snapshot;
+    let preassigned_keys = commit_data.preassigned_keys;
 
-    if plugin_config.batching_enabled && all_operations.len() > plugin_config.commit_batch_size {
-        spawn_batched_commit_tasks(
-            ecs,
-            correlation_id,
-            plugin_config.commit_batch_size,
-            &plugin_config,
-            runtime,
-            db,
-            store,
-            all_operations,
-            new_entities,
-            dirty_entity_components,
-            despawned_entities,
-            dirty_resources,
-            despawned_resources,
-        );
+    let use_batching =
+        plugin_config.batching_enabled && all_operations.len() > plugin_config.commit_batch_size;
+    let batch_size = plugin_config.commit_batch_size;
+
+    let request = CommitRequest {
+        correlation_id,
+        runtime,
+        db,
+        store,
+        operations: all_operations,
+        new_entities,
+        dirty_entity_components,
+        despawned_entities,
+        dirty_resources,
+        despawned_resources,
+        new_edge_snapshot,
+        preassigned_keys,
+    };
+
+    if use_batching {
+        spawn_batched_commit_tasks(ecs, batch_size, &plugin_config, request);
     } else {
-        spawn_single_commit_task(
-            ecs,
-            correlation_id,
-            runtime,
-            db,
-            store,
-            all_operations,
-            new_entities,
-            dirty_entity_components,
-            despawned_entities,
-            dirty_resources,
-            despawned_resources,
-        );
+        spawn_single_commit_task(ecs, request);
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn spawn_single_commit_task(
-    ecs: &mut World,
+/// Bundles all per-commit data so that the spawn helpers have a clean two-argument
+/// signature instead of a long positional argument list.
+struct CommitRequest {
     correlation_id: Option<u64>,
     runtime: Arc<tokio::runtime::Runtime>,
     db: Arc<dyn DatabaseConnection>,
@@ -249,7 +256,25 @@ fn spawn_single_commit_task(
     despawned_entities: HashSet<Entity>,
     dirty_resources: HashSet<TypeId>,
     despawned_resources: HashSet<TypeId>,
-) {
+    new_edge_snapshot: HashSet<String>,
+    preassigned_keys: HashMap<Entity, String>,
+}
+
+fn spawn_single_commit_task(ecs: &mut World, request: CommitRequest) {
+    let CommitRequest {
+        correlation_id,
+        runtime,
+        db,
+        store,
+        operations,
+        new_entities,
+        dirty_entity_components,
+        despawned_entities,
+        dirty_resources,
+        despawned_resources,
+        new_edge_snapshot,
+        preassigned_keys,
+    } = request;
     let db_for_task = db.clone();
     let (tx, rx) = oneshot::channel();
     runtime.spawn(async move {
@@ -272,6 +297,8 @@ fn spawn_single_commit_task(
             despawned_resources,
             connection: db,
             store,
+            new_edge_snapshot,
+            preassigned_keys,
         },
     ));
 }
@@ -283,22 +310,26 @@ struct CommitBatch {
     new_entities: Vec<Entity>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_batched_commit_tasks(
     ecs: &mut World,
-    correlation_id: Option<u64>,
     batch_size: usize,
     _plugin_config: &PersistencePluginConfig,
-    runtime: Arc<tokio::runtime::Runtime>,
-    db: Arc<dyn DatabaseConnection>,
-    store: String,
-    operations: Vec<TransactionOperation>,
-    new_entities: Vec<Entity>,
-    dirty_entity_components: HashMap<Entity, HashSet<TypeId>>,
-    despawned_entities: HashSet<Entity>,
-    dirty_resources: HashSet<TypeId>,
-    despawned_resources: HashSet<TypeId>,
+    request: CommitRequest,
 ) {
+    let CommitRequest {
+        correlation_id,
+        runtime,
+        db,
+        store,
+        operations,
+        new_entities,
+        dirty_entity_components,
+        despawned_entities,
+        dirty_resources,
+        despawned_resources,
+        new_edge_snapshot,
+        preassigned_keys,
+    } = request;
     let session = ecs.resource::<PersistenceSession>();
 
     let mut key_to_entity: HashMap<String, Entity> = HashMap::new();
@@ -390,6 +421,8 @@ fn spawn_batched_commit_tasks(
             correlation_id: cid,
             remaining_batches: Arc::new(AtomicUsize::new(num_batches)),
             result_sender: Arc::new(Mutex::new(Some(listener))),
+            pending_metas: Arc::new(Mutex::new(Vec::new())),
+            failed: Arc::new(AtomicBool::new(false)),
         });
     }
 
@@ -427,6 +460,14 @@ fn spawn_batched_commit_tasks(
             }
         }
 
+        // Preassigned keys for this batch's new entities only
+        let mut batch_preassigned_keys: HashMap<Entity, String> = HashMap::new();
+        for entity in &batch.new_entities {
+            if let Some(key) = preassigned_keys.get(entity) {
+                batch_preassigned_keys.insert(*entity, key.clone());
+            }
+        }
+
         let meta = CommitMeta {
             dirty_entity_components: batch_dirty_entities,
             despawned_entities: if i == 0 {
@@ -442,6 +483,13 @@ fn spawn_batched_commit_tasks(
             },
             connection: db.clone(),
             store: store.clone(),
+            // Only the first batch carries the edge snapshot
+            new_edge_snapshot: if i == 0 {
+                new_edge_snapshot.clone()
+            } else {
+                HashSet::new()
+            },
+            preassigned_keys: batch_preassigned_keys,
         };
 
         ecs.spawn((
@@ -489,6 +537,8 @@ pub(super) fn handle_commit_completed(
             let mut commit_connection: Option<Arc<dyn DatabaseConnection>> = None;
             let mut commit_store: Option<String> = None;
             let mut tracker_found = false;
+            let mut group_failed = false;
+            let mut pending_metas_arc: Option<Arc<Mutex<Vec<CommitMeta>>>> = None;
 
             if result.is_err() {
                 had_error = true;
@@ -499,22 +549,33 @@ pub(super) fn handle_commit_completed(
                     trackers.iter_mut().find(|(_, t)| t.correlation_id == correlation_id)
                 {
                     tracker_found = true;
+                    pending_metas_arc = Some(tracker.pending_metas.clone());
+                    group_failed = tracker.failed.load(Ordering::SeqCst);
                     let remaining = tracker.remaining_batches.fetch_sub(1, Ordering::SeqCst) - 1;
                     is_final_batch = remaining == 0;
 
-                    if result.is_err() || is_final_batch {
+                    if result.is_err() && !group_failed {
+                        // First failure in the group — mark failed and send error
+                        tracker.failed.store(true, Ordering::SeqCst);
+                        group_failed = true;
                         if let Some(sender) = tracker.result_sender.lock().unwrap().take() {
-                            if let Err(err) = &result {
-                                let _ = sender.send(Err(err.clone()));
-                            } else if is_final_batch {
-                                let _ = sender.send(Ok(()));
-                            }
+                            let _ = sender.send(Err(result.as_ref().unwrap_err().clone()));
                         }
+                    } else if is_final_batch && !group_failed {
+                        // All batches completed successfully
+                        if let Some(sender) = tracker.result_sender.lock().unwrap().take() {
+                            let _ = sender.send(Ok(()));
+                        }
+                    }
 
+                    if is_final_batch {
                         commands
                             .entity(tracker_entity)
                             .remove::<MultiBatchCommitTracker>();
-                    } else {
+                    }
+
+                    // Only emit events for the first error or the successful final batch
+                    if !is_final_batch && result.is_ok() {
                         should_send_result = false;
                     }
                 }
@@ -541,29 +602,86 @@ pub(super) fn handle_commit_completed(
                 commit_connection = Some(meta.connection.clone());
                 commit_store = Some(meta.store.clone());
 
-                let event_res = match &result {
-                    Ok((new_keys, new_entities)) => {
-                        apply_commit_success(&mut commands, &mut session, &meta, new_keys, new_entities);
-                        Ok(new_keys.clone())
-                    }
-                    Err(err) => {
+                let event_res = if tracker_found {
+                    // Atomic multi-batch: defer success until all batches complete
+                    if group_failed {
+                        // Group has failed — restore dirty state for all deferred metas + this one
+                        if is_final_batch {
+                            if let Some(ref pending) = pending_metas_arc {
+                                let mut deferred = pending.lock().unwrap();
+                                for deferred_meta in deferred.iter_mut() {
+                                    restore_dirty_state_on_failure(&mut session, deferred_meta);
+                                }
+                                deferred.clear();
+                            }
+                        }
+                        let err_for_event = if let Err(err) = &result {
+                            Some(err.clone())
+                        } else {
+                            None
+                        };
                         restore_dirty_state_on_failure(&mut session, &mut meta);
-                        Err(err.clone())
+                        // Only emit event for the first error batch
+                        err_for_event.map(Err)
+                    } else if !is_final_batch {
+                        // Stash this meta for later; don't apply yet
+                        if let Some(ref pending) = pending_metas_arc {
+                            let connection = meta.connection.clone();
+                            let store = meta.store.clone();
+                            let taken_meta = std::mem::replace(&mut *meta, CommitMeta {
+                                dirty_entity_components: HashMap::new(),
+                                despawned_entities: HashSet::new(),
+                                dirty_resources: HashSet::new(),
+                                despawned_resources: HashSet::new(),
+                                connection,
+                                store,
+                                new_edge_snapshot: HashSet::new(),
+                                preassigned_keys: HashMap::new(),
+                            });
+                            pending.lock().unwrap().push(taken_meta);
+                        }
+                        None // No event to emit for intermediate batches
+                    } else {
+                        // Final batch succeeded and no failures — apply ALL deferred metas + this one
+                        let deferred = if let Some(ref pending) = pending_metas_arc {
+                            std::mem::take(&mut *pending.lock().unwrap())
+                        } else {
+                            Vec::new()
+                        };
+                        for deferred_meta in &deferred {
+                            apply_commit_success(&mut commands, &mut session, deferred_meta);
+                        }
+                        apply_commit_success(&mut commands, &mut session, &meta);
+                        Some(Ok(vec![]))
+                    }
+                } else {
+                    // Single batch (non-atomic): apply immediately
+                    match &result {
+                        Ok(_) => {
+                            apply_commit_success(&mut commands, &mut session, &meta);
+                            Some(Ok(vec![]))
+                        }
+                        Err(err) => {
+                            restore_dirty_state_on_failure(&mut session, &mut meta);
+                            Some(Err(err.clone()))
+                        }
                     }
                 };
 
-                if should_send_result && (is_final_batch || result.is_err()) {
-                    bevy::log::debug!(
-                        "emitting CommitCompleted for cid={:?} final_batch={} err={}",
-                        cid,
-                        is_final_batch,
-                        result.is_err()
-                    );
-                    completed.write(CommitCompleted {
-                        result: event_res,
-                        dirty_entities: vec![],
-                        correlation_id: cid,
-                    });
+                if let Some(event_res) = event_res {
+                    if should_send_result && (is_final_batch || result.is_err()) {
+                        bevy::log::debug!(
+                            "emitting CommitCompleted for cid={:?} final_batch={} err={}",
+                            cid,
+                            is_final_batch,
+                            result.is_err()
+                        );
+                        completed.write(CommitCompleted {
+                            result: event_res,
+                            dirty_entities: vec![],
+                            correlation_id: cid,
+                        });
+                    }
                 }
             } else if let Err(e) = &result {
                 if should_send_result {
@@ -609,12 +727,13 @@ fn apply_commit_success(
     commands: &mut Commands,
     session: &mut PersistenceSession,
     meta: &CommitMeta,
-    new_keys: &[String],
-    new_entities: &[Entity],
 ) {
-    for (e, key) in new_entities.iter().zip(new_keys.iter()) {
-        commands.entity(*e).insert(Guid::new(key.clone()));
-        session.insert_entity_key(*e, key.clone());
+    // Assign GUIDs using the client-side preassigned keys.
+    // These keys were embedded in the documents sent to the DB, so the DB
+    // already has them — we just need to reflect them in the ECS world.
+    for (entity, key) in &meta.preassigned_keys {
+        commands.entity(*entity).insert(Guid::new(key.clone()));
+        session.insert_entity_key(*entity, key.clone());
         session
             .version_manager_mut()
             .set_version(VersionKey::Entity(key.clone()), 1);
@@ -636,7 +755,7 @@ fn apply_commit_success(
     }
 
     for &entity in meta.dirty_entity_components.keys() {
-        if new_entities.contains(&entity) {
+        if meta.preassigned_keys.contains_key(&entity) {
             continue;
         }
         if let Some(key) = session.entity_key(entity) {
@@ -653,6 +772,11 @@ fn apply_commit_success(
                 .version_manager_mut()
                 .remove_version(&VersionKey::Entity(key));
         }
+    }
+
+    // Apply the edge snapshot on successful commit
+    if !meta.new_edge_snapshot.is_empty() {
+        session.set_edge_snapshot(meta.new_edge_snapshot.clone());
     }
 }
 

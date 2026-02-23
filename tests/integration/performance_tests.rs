@@ -56,7 +56,7 @@ fn test_persist_many_entities() {
     let mut app2 = setup_test_app(db.clone(), None);
 
     fn load(mut pq: PersistentQuery<&Health, With<Health>>) {
-        let _ = pq.ensure_loaded();
+        let _ = pq.load();
     }
     let start_fetch = Instant::now();
     app2.add_systems(bevy::prelude::Update, load);

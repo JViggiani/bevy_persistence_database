@@ -1,3 +1,5 @@
+pub mod commit;
 pub mod persistence_session;
 
-pub use persistence_session::{PersistenceSession, commit, commit_sync};
+pub use commit::{commit, commit_sync};
+pub use persistence_session::PersistenceSession;

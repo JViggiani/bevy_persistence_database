@@ -201,9 +201,6 @@ pub fn initialize_tests() {
                 .with_test_writer()
                 .init();
         }
-
-        // Ensure the shared test backend container is ready before tests run.
-        let _ = ensure_global();
     });
 }
 
@@ -262,6 +259,9 @@ static PG_GLOBAL: OnceLock<PgGlobalContainerState> = OnceLock::new();
 #[cfg(feature = "postgres")]
 async fn start_postgres_container() -> (ContainerAsync<GenericImage>, String, u16, String) {
     let image = GenericImage::new("postgres", "16")
+        .with_wait_for(WaitFor::message_on_stderr(
+            "database system is ready to accept connections",
+        ))
         .with_env_var("POSTGRES_PASSWORD", "password")
         .with_env_var("POSTGRES_USER", "postgres");
     let container = image

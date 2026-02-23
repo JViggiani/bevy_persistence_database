@@ -1,14 +1,17 @@
 use crate::bevy::components::Guid;
 use crate::core::db::read_version;
-use crate::core::query::{FilterExpression, PaginationConfig, PersistenceQuerySpecification};
+use crate::core::query::{
+    EdgeQuerySpecification, FilterExpression, PaginationConfig, PersistenceQuerySpecification,
+};
 use crate::core::session::PersistenceSession;
 use crate::core::versioning::version_manager::VersionKey;
 use super::cache::CachePolicy;
 use super::persistence_query_system_param::PersistentQuery;
-use super::query_thread_local::take_pagination_config;
+use super::query_thread_local::{RelationshipLoadSpec, take_pagination_config};
 use bevy::ecs::query::{QueryData, QueryFilter};
 use bevy::prelude::{Entity, Mut, World};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'w, 's, Q, F> {
@@ -197,6 +200,7 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
         hash_salts: &[&'static str],
         force_full_docs: bool,
         store: String,
+        relationship_spec: RelationshipLoadSpec,
     ) {
         if store.is_empty() {
             bevy::log::error!("PQ::execute_combined_load: store is required");
@@ -219,6 +223,13 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
         }
         if let Some(expr) = &value_filters {
             format!("{:?}", expr).hash(&mut hasher);
+        }
+        for (type_id, depth) in relationship_spec.per_type.iter() {
+            type_id.hash(&mut hasher);
+            depth.hash(&mut hasher);
+        }
+        if let Some(depth) = relationship_spec.all {
+            depth.hash(&mut hasher);
         }
         let query_hash = hasher.finish();
 
@@ -270,6 +281,16 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                     .block_on(self.db.connection.execute_documents(&spec))
                 {
                     Ok(documents) => {
+                        let key_field = self.db.connection.document_key_field();
+                        let loaded_keys: Vec<String> = documents
+                            .iter()
+                            .filter_map(|doc| {
+                                doc.get(key_field)
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect();
+
                         bevy::log::debug!(
                             "PQ::execute_combined_load: backend returned {} documents; immediate_world_ptr={} ",
                             documents.len(),
@@ -288,7 +309,6 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                         if let Some(ptr_res) = &self.world_ptr {
                             let world: &mut World = ptr_res.as_world_mut();
 
-                            let key_field = self.db.connection.document_key_field();
                             // Apply all documents in a single scope to minimize world locking overhead.
                             world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
                                 for doc in &documents {
@@ -314,6 +334,18 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                                 )
                                 .ok();
                             });
+
+                            if !relationship_spec.is_empty() {
+                                world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                                    self.load_relationships_for_keys(
+                                        world,
+                                        &mut session,
+                                        &store,
+                                        &loaded_keys,
+                                        relationship_spec,
+                                    );
+                                });
+                            }
 
                             bevy::log::trace!("PQ::immediate_apply: world.flush()");
                             world.flush();
@@ -358,6 +390,12 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                                     rt.block_on(session.fetch_and_insert_resources(&*db, &store, world)).ok();
                                 });
                             }));
+
+                            if !relationship_spec.is_empty() {
+                                bevy::log::warn!(
+                                    "PersistentQuery relationship loading requested without ImmediateWorldPtr; deferred relationship loading is not yet supported for this path"
+                                );
+                            }
                         }
                     }
                     Err(e) => {
@@ -439,6 +477,120 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
                 Err(e) => {
                     bevy::log::error!("Error fetching documents page {}: {}", page, e);
                     break;
+                }
+            }
+        }
+    }
+
+    fn ensure_entity_loaded_by_key(
+        &self,
+        world: &mut World,
+        session: &mut PersistenceSession,
+        store: &str,
+        key_field: &str,
+        key: &str,
+    ) -> Option<Entity> {
+        if let Some(existing) = session.entity_by_key(key) {
+            if world.get_entity(existing).is_ok() {
+                return Some(existing);
+            }
+        }
+
+        match self.runtime.block_on(self.db.connection.fetch_document(store, key)) {
+            Ok(Some((doc, _))) => {
+                Self::apply_one_document(world, session, &doc, &[], true, key_field);
+                session.entity_by_key(key)
+            }
+            Ok(None) => None,
+            Err(e) => {
+                bevy::log::error!("Failed to fetch relationship target doc {}: {}", key, e);
+                None
+            }
+        }
+    }
+
+    fn load_relationships_for_keys(
+        &self,
+        world: &mut World,
+        session: &mut PersistenceSession,
+        store: &str,
+        source_keys: &[String],
+        relationship_spec: RelationshipLoadSpec,
+    ) {
+        if source_keys.is_empty() {
+            return;
+        }
+
+        let requested_depths = relationship_spec.resolve(session.relationship_type_entries());
+        if requested_depths.is_empty() {
+            return;
+        }
+
+        let key_field = self.db.connection.document_key_field();
+
+        for (type_id, depth) in requested_depths {
+            let Some(rel_name) = session.relationship_type_name(&type_id) else {
+                continue;
+            };
+
+            let spec = EdgeQuerySpecification {
+                store: store.to_string(),
+                relationship_types: vec![rel_name.to_string()],
+                from_guids: source_keys.to_vec(),
+                to_guids: Vec::new(),
+                depth,
+            };
+
+            let edges = match self.runtime.block_on(self.db.connection.query_edges(&spec)) {
+                Ok(edges) => edges,
+                Err(e) => {
+                    bevy::log::error!(
+                        "Failed loading relationship edges for {}: {}",
+                        rel_name,
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            let mut grouped: HashMap<String, Vec<(String, Option<serde_json::Value>)>> =
+                HashMap::new();
+            for edge in edges {
+                grouped
+                    .entry(edge.from_guid)
+                    .or_default()
+                    .push((edge.to_guid, edge.payload));
+            }
+
+            for source_key in source_keys {
+                let Some(source_entity) =
+                    self.ensure_entity_loaded_by_key(world, session, store, key_field, source_key)
+                else {
+                    continue;
+                };
+
+                let raw_targets = grouped.remove(source_key).unwrap_or_default();
+                let mut resolved_targets = Vec::with_capacity(raw_targets.len());
+                for (target_key, payload) in raw_targets {
+                    if let Some(target_entity) =
+                        self.ensure_entity_loaded_by_key(world, session, store, key_field, &target_key)
+                    {
+                        resolved_targets.push((target_entity, payload));
+                    }
+                }
+
+                if let Err(e) = session.apply_relationship_targets(
+                    type_id,
+                    world,
+                    source_entity,
+                    resolved_targets,
+                ) {
+                    bevy::log::error!(
+                        "Failed to materialize relationship {} on {:?}: {}",
+                        rel_name,
+                        source_entity,
+                        e
+                    );
                 }
             }
         }
