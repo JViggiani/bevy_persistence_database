@@ -13,7 +13,6 @@ use crate::bevy::params::query::{InFlightQueries, PersistenceQueryCache};
 use crate::bevy::world_access::DeferredWorldOperations;
 use crate::core::db::connection::DatabaseConnectionResource;
 use crate::core::db::DatabaseConnection;
-use crate::bevy::registration::COMPONENT_REGISTRY;
 use crate::core::session::PersistenceSession;
 use bevy::app::PluginGroupBuilder;
 use bevy::prelude::*;
@@ -21,7 +20,7 @@ use std::any::TypeId;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-/// A `SystemSet` for grouping the core persistence systems into ordered phases.
+/// A Bevy `SystemSet` for grouping the core persistence systems into ordered phases.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PersistenceSystemSet {
     /// Systems that run first to apply deferred operations and detect changes.
@@ -30,6 +29,20 @@ pub enum PersistenceSystemSet {
     PreCommit,
     /// The system that finalizes the commit.
     Commit,
+}
+
+/// A scoped Rayon thread pool used exclusively by the persistence plugin.
+///
+/// Stored as a Bevy resource so it does not interfere with the global Rayon
+/// pool used by Bevy or other libraries. Only inserted when `thread_count > 1`;
+/// when absent, commit preparation and document loading run serially.
+#[derive(Resource)]
+pub struct PersistenceThreadPool(rayon::ThreadPool);
+
+impl PersistenceThreadPool {
+    pub fn get(&self) -> &rayon::ThreadPool {
+        &self.0
+    }
 }
 
 /// A resource used to track which `Persist` types have been registered with an `App`.
@@ -87,6 +100,14 @@ impl Plugin for PersistencePluginCore {
     fn build(&self, app: &mut App) {
         ensure_task_pools(app);
 
+        if self.config.thread_count > 1 {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(self.config.thread_count)
+                .build()
+                .expect("failed to build persistence thread pool");
+            app.insert_resource(PersistenceThreadPool(pool));
+        }
+
         let db_conn = match &self.backend {
             PersistenceBackend::Static(db) => db.clone(),
         };
@@ -115,20 +136,6 @@ impl Plugin for PersistencePluginCore {
         // Publish the pointer before any Startup systems and at the start of each frame.
         app.add_systems(Startup, publish_immediate_world_ptr);
         app.add_systems(First, publish_immediate_world_ptr);
-
-        let registry = COMPONENT_REGISTRY.lock().unwrap();
-        let registrations = registry.len();
-        if registrations == 0 {
-            bevy::log::warn!(
-                "No #[persist] registrations detected; components/resources will not be persisted"
-            );
-        } else {
-            bevy::log::debug!(registrations, "Applying #[persist] registrations");
-        }
-
-        for reg_fn in registry.iter() {
-            reg_fn(app);
-        }
 
         app.configure_sets(
             PostUpdate,

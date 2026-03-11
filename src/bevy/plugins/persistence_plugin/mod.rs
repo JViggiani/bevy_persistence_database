@@ -14,6 +14,6 @@ pub use dirty_tracking::auto_dirty_tracking_bevy_relationship_system;
 #[doc(hidden)]
 pub use dirty_tracking::auto_dirty_tracking_relationship_system;
 pub use listeners::{register_commit_listener, take_commit_listener};
-pub use plugin::{PersistencePluginConfig, PersistencePluginCore, PersistencePlugins, PersistenceSystemSet};
+pub use plugin::{PersistencePluginConfig, PersistencePluginCore, PersistencePlugins, PersistenceSystemSet, PersistenceThreadPool};
 pub use plugin::RegisteredPersistTypes;
 pub use runtime::TokioRuntime;

@@ -727,7 +727,11 @@ impl DatabaseConnection for ArangoDbConnection {
                 // 1) Entity creates
                 if !groups.entities.creates.is_empty() {
                     let aql = format!(
-                        "FOR d IN @{bind} INSERT d INTO @@{col}",
+                        // overwriteMode 'ignore' makes this idempotent: if the engine
+                        // re-processes the same job after a crash the second INSERT is silently skipped rather than
+                        // failing with a duplicate-key error or clobbering data that
+                        // may have been mutated by subsequent jobs since first creation.
+                        "FOR d IN @{bind} INSERT d INTO @@{col} OPTIONS {{ overwriteMode: 'ignore' }}",
                         bind = AQL_BIND_DOCS,
                         col = AQL_BIND_STORE
                     );
@@ -856,7 +860,8 @@ impl DatabaseConnection for ArangoDbConnection {
                 // 4) Resource creates
                 if !groups.resources.creates.is_empty() {
                     let aql = format!(
-                        "FOR d IN @{bind} INSERT d INTO @@{col}",
+                        // overwriteMode 'ignore' for the same idempotency reason as entity creates.
+                        "FOR d IN @{bind} INSERT d INTO @@{col} OPTIONS {{ overwriteMode: 'ignore' }}",
                         bind = AQL_BIND_DOCS,
                         col = AQL_BIND_STORE
                     );

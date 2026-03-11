@@ -54,12 +54,14 @@ pub struct Ownership {
 #[persist(relationship)]
 #[derive(Component)]
 #[relationship(relationship_target = TeamMembers)]
-pub struct MemberOf(pub Entity);
+pub struct MemberOf {
+    pub team: Entity,
+}
 
 #[cfg(not(feature = "bevy_many_relationship_edges"))]
 impl From<bevy::prelude::Entity> for MemberOf {
     fn from(entity: bevy::prelude::Entity) -> Self {
-        MemberOf(entity)
+        Self { team: entity }
     }
 }
 
@@ -67,4 +69,6 @@ impl From<bevy::prelude::Entity> for MemberOf {
 #[cfg(not(feature = "bevy_many_relationship_edges"))]
 #[derive(Component, Default)]
 #[relationship_target(relationship = MemberOf)]
-pub struct TeamMembers(Vec<Entity>);
+pub struct TeamMembers {
+    members: Vec<Entity>,
+}

@@ -162,11 +162,13 @@ fn test_entity_not_overwritten_on_second_query_without_refresh() {
 }
 
 #[derive(bevy::prelude::Resource, Clone)]
-struct TestKey(String);
+struct TestKey {
+    key: String,
+}
 
 fn force_refresh_system(query: PersistentQuery<&Health>, key: bevy::prelude::Res<TestKey>) {
     let _ = query
-        .filter(Guid::key_field().eq(key.0.as_str()))
+        .filter(Guid::key_field().eq(key.key.as_str()))
         .force_refresh()
         .load();
 }
@@ -200,7 +202,7 @@ fn test_force_refresh_overwrites() {
     app2.update();
 
     // WHEN we run a system-param PersistentQuery with force_refresh
-    app2.insert_resource(TestKey(g.clone()));
+    app2.insert_resource(TestKey { key: g.clone() });
     app2.add_systems(bevy::prelude::Update, force_refresh_system);
     app2.update();
 

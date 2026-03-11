@@ -1,19 +1,20 @@
 //! A manual builder for creating and executing database queries that load results into a Bevy `World`.
 
 use crate::bevy::components::Guid;
-use crate::core::db::connection::DocumentKind;
+use crate::bevy::plugins::persistence_plugin::{PersistencePluginConfig, TokioRuntime};
+use crate::core::db::connection::{DatabaseConnectionResource, DocumentKind};
 use crate::core::db::{DatabaseConnection, read_version};
 use crate::core::persist::Persist;
 use crate::core::query::{FilterExpression, PersistenceQuerySpecification};
 use crate::core::session::PersistenceSession;
 use crate::core::versioning::version_manager::VersionKey;
-use bevy::prelude::{Component, World};
+use bevy::prelude::{Component, Entity, World};
 use std::sync::Arc;
 
 /// Query builder: select which components and filters to apply.
 pub struct PersistenceQuery {
-    db: Arc<dyn DatabaseConnection>,
-    store: String,
+    db: Option<Arc<dyn DatabaseConnection>>,
+    store: Option<String>,
     pub component_names: Vec<&'static str>,
     filter_expr: Option<FilterExpression>,
 
@@ -28,11 +29,17 @@ pub struct PersistenceQuery {
 }
 
 impl PersistenceQuery {
-    /// Start a new query backed by a shared database connection.
-    pub fn new(db: Arc<dyn DatabaseConnection>, store: impl Into<String>) -> Self {
+    /// Create a new query. The database connection and store are resolved from the
+    /// world's resources when [`run`](Self::run) is called, so no arguments are needed
+    /// for the common case.
+    ///
+    /// Use [`with_db`](Self::with_db) and [`store`](Self::store) to override either
+    /// value explicitly (required when calling [`fetch_into`](Self::fetch_into) or
+    /// [`fetch_ids`](Self::fetch_ids) directly without going through `run`).
+    pub fn new() -> Self {
         Self {
-            db,
-            store: store.into(),
+            db: None,
+            store: None,
             component_names: Vec::new(),
             filter_expr: None,
             without_component_names: Vec::new(),
@@ -41,9 +48,20 @@ impl PersistenceQuery {
         }
     }
 
+    /// Explicitly supply the database connection instead of reading it from the world.
+    ///
+    /// Required when calling [`fetch_into`](Self::fetch_into) or
+    /// [`fetch_ids`](Self::fetch_ids) directly (i.e. outside of [`run`](Self::run)).
+    pub fn with_db(mut self, db: Arc<dyn DatabaseConnection>) -> Self {
+        self.db = Some(db);
+        self
+    }
+
     /// Override the store to query against.
+    ///
+    /// Defaults to `PersistencePluginConfig::default_store` when not set.
     pub fn store(mut self, store: impl Into<String>) -> Self {
-        self.store = store.into();
+        self.store = Some(store.into());
         self
     }
 
@@ -72,6 +90,47 @@ impl PersistenceQuery {
             None => expression,
         });
         self
+    }
+
+    /// Filter results to only documents whose primary key is in `guids`.
+    ///
+    /// Issues a single batched query — does not fire one query per key.
+    /// Combines with any existing filter using AND.
+    pub fn by_guids(mut self, guids: Vec<String>) -> Self {
+        let key_filter = FilterExpression::DocumentKey.in_(guids);
+        self.filter_expr = Some(match self.filter_expr.take() {
+            Some(existing) => existing.and(key_filter),
+            None => key_filter,
+        });
+        self
+    }
+
+    /// Execute this query synchronously against a live Bevy world.
+    ///
+    /// Reads the database connection and default store from the world's
+    /// `DatabaseConnectionResource` and `PersistencePluginConfig` resources if not
+    /// explicitly set via [`with_db`](Self::with_db) and [`store`](Self::store).
+    ///
+    /// Intended for use inside exclusive systems (`fn my_system(world: &mut World)`).
+    pub fn run(mut self, world: &mut World) -> Vec<Entity> {
+        if self.db.is_none() {
+            self.db = Some(
+                world
+                    .resource::<DatabaseConnectionResource>()
+                    .connection
+                    .clone(),
+            );
+        }
+        if self.store.is_none() {
+            self.store = Some(
+                world
+                    .resource::<PersistencePluginConfig>()
+                    .default_store
+                    .clone(),
+            );
+        }
+        let runtime = world.resource::<TokioRuntime>().runtime.clone();
+        runtime.block_on(self.fetch_into(world))
     }
 
     /// Sets the filter for the query using a `FilterExpression`.
@@ -120,7 +179,7 @@ impl PersistenceQuery {
         let force_full_docs = self.force_full_docs;
 
         let spec = PersistenceQuerySpecification {
-            store: self.store.clone(),
+            store: self.store.clone().unwrap_or_default(),
             kind: DocumentKind::Entity,
             presence_with: presence_with.clone(),
             presence_without: presence_without.clone(),
@@ -145,24 +204,35 @@ impl PersistenceQuery {
 
     /// Run the query for keys only.
     pub async fn fetch_ids(&self) -> Vec<String> {
+        let db = self
+            .db
+            .as_ref()
+            .expect("PersistenceQuery: call with_db() before fetch_ids()");
         let spec = self.build_spec();
-        self.db.execute_keys(&spec).await.expect("query failed")
+        db.execute_keys(&spec).await.expect("query failed")
     }
 
     /// Load matching entities into the World.
     pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
+        let db = self
+            .db
+            .as_ref()
+            .expect("PersistenceQuery: call with_db() or use run() before fetch_into()");
+        let store = self
+            .store
+            .as_deref()
+            .expect("PersistenceQuery: call store() or use run() before fetch_into()");
+
         let mut session = world
             .remove_resource::<PersistenceSession>()
-            .expect("PersistenceSession missing")
-            ;
+            .expect("PersistenceSession missing");
 
         let mut query_with_full_docs = self.clone();
         query_with_full_docs.force_full_docs = true;
         let spec = query_with_full_docs.build_spec();
 
         bevy::log::debug!("[builder] fetch_into issuing execute_documents");
-        let documents = self
-            .db
+        let documents = db
             .execute_documents(&spec)
             .await
             .expect("Batch document fetch failed");
@@ -182,8 +252,26 @@ impl PersistenceQuery {
                 existing.insert(guid.id().to_string(), e);
             }
 
+            // Determine which components to deserialize. Computed once for the batch.
+            // When no components are explicitly requested the query is unconstrained;
+            // apply every registered component type found in each document.
+            let to_deser: Vec<String> = {
+                let mut explicit: Vec<&'static str> = self.component_names.clone();
+                explicit.extend(self.fetch_only_component_names.iter().copied());
+                explicit.sort_unstable();
+                explicit.dedup();
+                if explicit.is_empty() {
+                    session
+                        .component_deserializers()
+                        .map(|(name, _)| name.clone())
+                        .collect()
+                } else {
+                    explicit.iter().map(|s| s.to_string()).collect()
+                }
+            };
+
             for doc in documents {
-                let key_field = self.db.document_key_field();
+                let key_field = db.document_key_field();
                 let key = doc[key_field].as_str().unwrap_or_default().to_string();
                 if key.is_empty() {
                     bevy::log::debug!(
@@ -208,17 +296,13 @@ impl PersistenceQuery {
                     .version_manager_mut()
                     .set_version(VersionKey::Entity(key.clone()), version);
 
-                let mut to_deser = self.component_names.clone();
-                to_deser.extend(self.fetch_only_component_names.iter().copied());
-                to_deser.sort_unstable();
-                to_deser.dedup();
                 bevy::log::trace!(
                     "[builder] deserializing {:?} for key={}",
                     to_deser,
                     key
                 );
-                for &comp in &to_deser {
-                    if let Some(val) = doc.get(comp) {
+                for comp in &to_deser {
+                    if let Some(val) = doc.get(comp.as_str()) {
                         if let Some(deser) = session.component_deserializer(comp) {
                             deser(world, entity, val.clone())
                                 .expect("component deserialization failed");
@@ -231,7 +315,7 @@ impl PersistenceQuery {
         }
 
         session
-            .fetch_and_insert_resources(&*self.db, &self.store, world)
+            .fetch_and_insert_resources(&**db, store, world)
             .await
             .expect("resource deserialization failed");
 
@@ -255,6 +339,12 @@ impl Clone for PersistenceQuery {
             fetch_only_component_names: self.fetch_only_component_names.clone(),
             force_full_docs: self.force_full_docs,
         }
+    }
+}
+
+impl Default for PersistenceQuery {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -314,7 +404,9 @@ mod tests {
     #[test]
     fn build_spec_with_dsl() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let query = PersistenceQuery::new(db, TEST_STORE)
+        let query = PersistenceQuery::new()
+            .with_db(db)
+            .store(TEST_STORE)
             .with::<A>()
             .filter(A::value().gt(10).and(B::name().eq("test")));
 
@@ -328,7 +420,9 @@ mod tests {
     #[test]
     fn build_spec_with_or_combiner() {
         let db = Arc::new(MockDatabaseConnection::new());
-        let query = PersistenceQuery::new(db, TEST_STORE)
+        let query = PersistenceQuery::new()
+            .with_db(db)
+            .store(TEST_STORE)
             .filter(A::value().gt(10))
             .or(B::name().eq("foo"));
         let spec = query.build_spec();
@@ -395,7 +489,9 @@ mod tests {
             session.register_component::<Position>();
         }
 
-        let query = PersistenceQuery::new(db, TEST_STORE)
+        let query = PersistenceQuery::new()
+            .with_db(db)
+            .store(TEST_STORE)
             .with::<Health>()
             .with::<Position>();
         let loaded = query.fetch_into(app.world_mut()).await;
@@ -409,7 +505,7 @@ mod tests {
         struct Comp1;
 
         let db = Arc::new(MockDatabaseConnection::new());
-        let query = PersistenceQuery::new(db, TEST_STORE).for_component::<Comp1>();
+        let query = PersistenceQuery::new().with_db(db).store(TEST_STORE).for_component::<Comp1>();
         let spec = query.build_spec();
 
         assert!(!spec.presence_with.is_empty());
@@ -426,7 +522,7 @@ mod tests {
             Box::pin(async { Err(PersistenceError::General("db error".into())) })
         });
         let db = Arc::new(mock_db);
-        let query = PersistenceQuery::new(db, TEST_STORE);
+        let query = PersistenceQuery::new().with_db(db).store(TEST_STORE);
         block_on(query.fetch_ids());
     }
 }

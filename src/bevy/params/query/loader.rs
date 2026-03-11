@@ -128,42 +128,45 @@ impl<'w, 's, Q: QueryData + 'static, F: QueryFilter + 'static> PersistentQuery<'
             allow_overwrite
         );
 
-        // For large document sets, use parallel processing with chunks
+        // For large document sets, use parallel processing with chunks if a pool is available.
         if documents.len() > 1000 {
-            // Process documents in parallel chunks
-            const CHUNK_SIZE: usize = 250;
-            let chunks: Vec<Vec<serde_json::Value>> = documents
-                .chunks(CHUNK_SIZE)
-                .map(|chunk| chunk.to_vec())
-                .collect();
+            if let Some(pool) = self.thread_pool.as_ref().map(|p| p.get()) {
+                const CHUNK_SIZE: usize = 250;
+                let chunks: Vec<Vec<serde_json::Value>> = documents
+                    .chunks(CHUNK_SIZE)
+                    .map(|chunk| chunk.to_vec())
+                    .collect();
 
-            chunks.into_par_iter().for_each(|chunk| {
-                // Create a single operation that processes a chunk of documents
-                let comps = explicit_components.clone();
-                let allow = allow_overwrite;
-                let key_field = key_field.to_string();
+                pool.install(|| {
+                    chunks.into_par_iter().for_each(|chunk| {
+                        let comps = explicit_components.clone();
+                        let allow = allow_overwrite;
+                        let key_field = key_field.to_string();
 
-                self.ops.push(Box::new(move |world: &mut World| {
-                    bevy::log::trace!(
-                        "PQ::process_documents/op: applying deferred chunk of {} documents",
-                        chunk.len()
-                    );
-                    world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
-                        for doc in &chunk {
-                            Self::apply_one_document(
-                                world,
-                                &mut session,
-                                doc,
-                                &comps,
-                                allow,
-                                &key_field,
+                        self.ops.push(Box::new(move |world: &mut World| {
+                            bevy::log::trace!(
+                                "PQ::process_documents/op: applying deferred chunk of {} documents",
+                                chunk.len()
                             );
-                        }
+                            world.resource_scope(|world, mut session: Mut<PersistenceSession>| {
+                                for doc in &chunk {
+                                    Self::apply_one_document(
+                                        world,
+                                        &mut session,
+                                        doc,
+                                        &comps,
+                                        allow,
+                                        &key_field,
+                                    );
+                                }
+                            });
+                        }));
                     });
-                }));
-            });
-        } else {
-            // Batch the entire small set in a single scope to avoid per-doc locking
+                });
+                return;
+            }
+        }
+        {
             let docs = documents;
             let comps = explicit_components.clone();
             let allow = allow_overwrite;

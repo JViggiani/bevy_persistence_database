@@ -177,14 +177,16 @@ fn test_conflict_strategy_last_write_wins() {
     // 5. Implement "last write wins" strategy:
     // Reload the entity by key inside the same app using a system-param PersistentQuery.
     #[derive(bevy::prelude::Resource)]
-    struct KeyRes(String);
+    struct KeyRes {
+        key: String,
+    }
     fn reload_by_key(
         pq: PersistentQuery<(&Health, &Position), (With<Health>, With<Position>)>,
         key: bevy::prelude::Res<KeyRes>,
     ) {
-        let _ = pq.filter(Guid::key_field().eq(&key.0)).load();
+        let _ = pq.filter(Guid::key_field().eq(&key.key)).load();
     }
-    app.insert_resource(KeyRes(key.clone()));
+    app.insert_resource(KeyRes { key: key.clone() });
     app.add_systems(bevy::prelude::Update, reload_by_key);
     app.update();
 
@@ -292,7 +294,9 @@ fn test_conflict_strategy_three_way_merge() {
     // 5. Conflict Resolution: Perform a three-way merge.
     // Fetch the latest version from the DB ("Theirs").
     let loaded = run_async(
-        PersistenceQuery::new(db.clone(), TEST_STORE)
+        PersistenceQuery::new()
+            .with_db(db.clone())
+            .store(TEST_STORE)
             .with::<Health>()
             .with::<Position>()
             .filter(Guid::key_field().eq(&key))

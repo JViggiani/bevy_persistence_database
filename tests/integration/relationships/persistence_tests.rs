@@ -327,7 +327,7 @@ mod bevy_native {
 
         // Insert the relationship immediately — dirty tracking fires on the first update.
         // Both entities and the edge are committed together in a single call.
-        app.world_mut().entity_mut(source).insert(MemberOf(target));
+        app.world_mut().entity_mut(source).insert(MemberOf { team: target });
         app.update();
         commit_sync(&mut app, db.clone(), TEST_STORE).expect("commit failed");
 
@@ -364,7 +364,7 @@ mod bevy_native {
         let target = app.world_mut().spawn(Health { value: 20 }).id();
 
         // Insert entities and relationship in a single commit.
-        app.world_mut().entity_mut(source).insert(MemberOf(target));
+        app.world_mut().entity_mut(source).insert(MemberOf { team: target });
         app.update();
         commit_sync(&mut app, db.clone(), TEST_STORE).expect("insert commit failed");
 
@@ -424,7 +424,7 @@ mod bevy_native {
         ) {
             let source = source_q.single().unwrap();
             let target = target_q.single().unwrap();
-            commands.entity(source).insert(MemberOf(target));
+            commands.entity(source).insert(MemberOf { team: target });
         }
 
         let (db, _container) = setup();

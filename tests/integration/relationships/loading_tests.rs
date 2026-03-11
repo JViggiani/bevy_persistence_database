@@ -125,7 +125,9 @@ mod many_relationship_edges {
     #[db_matrix_test]
     fn test_persistent_query_schedule_load_loads_relationships() {
         #[derive(Resource, Default)]
-        struct Triggered(bool);
+        struct Triggered {
+            triggered: bool,
+        }
 
         let (db, _container) = setup();
         seed_friendship(&db, 0.6, "ff_a", "ff_b");
@@ -137,11 +139,11 @@ mod many_relationship_edges {
         reader_app.add_systems(
             Update,
             |mut triggered: ResMut<Triggered>, query: PersistentQuery<&Health>| {
-                if !triggered.0 {
+                if !triggered.triggered {
                     query
                         .with_relationship_depth::<Friendship>(1)
                         .schedule_load();
-                    triggered.0 = true;
+                    triggered.triggered = true;
                 }
             },
         );
@@ -203,7 +205,7 @@ mod bevy_native {
 
         // Insert relationship immediately — dirty tracking fires on the next update.
         // Both entities and the edge are committed in a single call.
-        app.world_mut().entity_mut(src).insert(MemberOf(tgt));
+        app.world_mut().entity_mut(src).insert(MemberOf { team: tgt });
         app.update();
         commit_sync(&mut app, db.clone(), TEST_STORE).expect("seed commit failed");
     }
@@ -255,7 +257,7 @@ mod bevy_native {
             .expect("source entity should have MemberOf component after loading");
 
         assert_eq!(
-            member_of.0, tgt_entity,
+            member_of.team, tgt_entity,
             "MemberOf should point to the correctly loaded target entity"
         );
     }
@@ -267,7 +269,9 @@ mod bevy_native {
     #[db_matrix_test]
     fn test_persistent_query_schedule_load_loads_native_relationships() {
         #[derive(Resource, Default)]
-        struct Triggered(bool);
+        struct Triggered {
+            triggered: bool,
+        }
 
         let (db, _container) = setup();
         seed_member_of(&db, "sched_src", "sched_tgt");
@@ -282,9 +286,9 @@ mod bevy_native {
         reader_app.add_systems(
             Update,
             |mut triggered: ResMut<Triggered>, query: PersistentQuery<&Health>| {
-                if !triggered.0 {
+                if !triggered.triggered {
                     query.with_relationship_depth::<MemberOf>(1).schedule_load();
-                    triggered.0 = true;
+                    triggered.triggered = true;
                 }
             },
         );
@@ -312,7 +316,7 @@ mod bevy_native {
             .expect("source entity should have MemberOf after schedule_load");
 
         assert_eq!(
-            member_of.0, tgt_entity,
+            member_of.team, tgt_entity,
             "schedule_load should eventually materialise the native relationship"
         );
     }}

@@ -8,11 +8,10 @@ use crate::core::db::connection::{
 };
 use crate::core::persist::Persist;
 use crate::core::versioning::version_manager::{VersionKey, VersionManager};
-use bevy::prelude::{Component, Entity, Resource, World, info};
-use rayon::ThreadPoolBuilder;
+use bevy::prelude::{Component, Entity, Resource, World, debug};
 use rayon::prelude::*;
-#[cfg(feature = "bevy_many_relationship_edges")]
-use serde::de::DeserializeOwned;
+use rayon::ThreadPool;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use std::{
     any::TypeId,
@@ -194,7 +193,18 @@ impl PersistenceSession {
     /// This method sets up both serialization and deserialization for any
     /// component that implements the `Persist` marker trait.
     pub fn register_component<T: Component + Persist>(&mut self) {
-        let ser_key = T::name();
+        self.register_component_named::<T>(T::name());
+    }
+
+    /// Registers a component type for persistence using an explicit collection name.
+    ///
+    /// Unlike `register_component`, this does not require `T: Persist`.
+    /// The `name` parameter is used as the collection/field key in the database.
+    pub fn register_component_named<T: Component + Serialize + DeserializeOwned + Send + Sync + 'static>(
+        &mut self,
+        name: &'static str,
+    ) {
+        let ser_key = name;
         let type_id = TypeId::of::<T>();
         self.components.type_id_to_name.insert(type_id, ser_key);
         // reverse lookup
@@ -213,9 +223,6 @@ impl PersistenceSession {
                     if let Some(c) = world.get::<T>(entity) {
                         let v = serde_json::to_value(c)
                             .map_err(|_| PersistenceError::new("Serialization failed"))?;
-                        if v.is_null() {
-                            return Err(PersistenceError::new("Could not serialize"));
-                        }
                         Ok(Some((ser_key.to_string(), v)))
                     } else {
                         Ok(None)
@@ -224,7 +231,7 @@ impl PersistenceSession {
             ),
         );
 
-        let de_key = T::name();
+        let de_key = name;
         self.components.deserializers.insert(
             de_key.to_string(),
             Box::new(|world, entity, json_val| {
@@ -241,7 +248,18 @@ impl PersistenceSession {
     /// This method sets up both serialization and deserialization for any
     /// resource that implements the `Persist` marker trait.
     pub fn register_resource<R: Resource + Persist>(&mut self) {
-        let ser_key = R::name();
+        self.register_resource_named::<R>(R::name());
+    }
+
+    /// Registers a resource type for persistence using an explicit collection name.
+    ///
+    /// Unlike `register_resource`, this does not require `R: Persist`.
+    /// The `name` parameter is used as the key in the database.
+    pub fn register_resource_named<R: Resource + Serialize + DeserializeOwned + Send + Sync + 'static>(
+        &mut self,
+        name: &'static str,
+    ) {
+        let ser_key = name;
         let type_id = std::any::TypeId::of::<R>();
         self.resources.type_id_to_name.insert(type_id, ser_key);
         self.resources.presence.insert(
@@ -256,9 +274,6 @@ impl PersistenceSession {
                 if let Some(r) = world.get_resource::<R>() {
                     let v = serde_json::to_value(r)
                         .map_err(|e| PersistenceError::new(e.to_string()))?;
-                    if v.is_null() {
-                        return Err(PersistenceError::new("Could not serialize"));
-                    }
                     Ok(Some((ser_key.to_string(), v)))
                 } else {
                     Ok(None)
@@ -266,7 +281,7 @@ impl PersistenceSession {
             }),
         );
 
-        let de_key = R::name();
+        let de_key = name;
         self.resources.deserializers.insert(
             de_key.to_string(),
             Box::new(|world, json_val| {
@@ -279,7 +294,7 @@ impl PersistenceSession {
         self.resources
             .name_to_type_id
             .insert(de_key.to_string(), type_id);
-        
+
         // Register remover function
         self.resources.removers.insert(
             type_id,
@@ -290,12 +305,12 @@ impl PersistenceSession {
     }
 
     /// Manually mark a resource as needing persistence.
-    pub fn mark_resource_dirty<R: Resource + Persist>(&mut self) {
+    pub fn mark_resource_dirty<R: Resource>(&mut self) {
         self.tracking.dirty_resources.insert(TypeId::of::<R>());
     }
 
     /// Manually mark a persisted resource as having been removed.
-    pub fn mark_resource_despawned<R: Resource + Persist>(&mut self) {
+    pub fn mark_resource_despawned<R: Resource>(&mut self) {
         self.tracking.despawned_resources.insert(TypeId::of::<R>());
     }
 
@@ -778,7 +793,7 @@ impl PersistenceSession {
     }
 
     /// Prepare all operations (deletions, creations, updates of entities and resources)
-    /// using a Rayon pool of `thread_count` threads.
+    /// using Rayon parallel iterators.
     ///
     /// **Client-side GUID generation**: new entities that don't yet have a cached
     /// key are assigned a UUID v4 *before* the CreateDocument is built, and the
@@ -791,7 +806,7 @@ impl PersistenceSession {
         dirty_resources: &HashSet<TypeId>,
         despawned_resources: &HashSet<TypeId>,
         dirty_relationship_entities: &HashSet<Entity>,
-        thread_count: usize,
+        thread_pool: Option<&ThreadPool>,
         key_field: &str,
         store: &str,
     ) -> Result<CommitData, PersistenceError> {
@@ -864,81 +879,84 @@ impl PersistenceSession {
             });
         }
 
-        // Build a Rayon pool
-        let pool = ThreadPoolBuilder::new()
-            .num_threads(thread_count)
-            .build()
-            .map_err(|e| PersistenceError::new(format!("ThreadPool error: {}", e)))?;
+        let serialize_entity = |(&entity, dirty_components): (&Entity, &HashSet<TypeId>)| {
+                let mut data_map = serde_json::Map::new();
+
+                let component_type_ids: Vec<TypeId> =
+                    dirty_components.iter().copied().collect();
+
+                for component_type_id in component_type_ids {
+                    let Some(serializer) = session
+                        .components
+                        .serializers
+                        .get(&component_type_id)
+                    else {
+                        continue;
+                    };
+                    if let Some((field_name, value)) = serializer(entity, world)? {
+                        data_map.insert(field_name, value);
+                    }
+                }
+                if data_map.is_empty() {
+                    return Ok(None);
+                }
+                if let Some(key) = session.cache.entity_keys.get(&entity) {
+                    // update existing
+                    let version_key = VersionKey::Entity(key.clone());
+                    let current_version = session
+                        .cache
+                        .version_manager
+                        .get_version(&version_key)
+                        .ok_or_else(|| PersistenceError::new("Missing version for update"))?;
+                    let next_version = current_version + 1;
+                    insert_meta(&mut data_map, DocumentKind::Entity, next_version);
+                    Ok(Some((
+                        TransactionOperation::UpdateDocument {
+                            store: store.to_string(),
+                            kind: DocumentKind::Entity,
+                            key: key.clone(),
+                            expected_current_version: current_version,
+                            patch: Value::Object(data_map),
+                        },
+                        None,
+                    )))
+                } else if let Some(key) = preassigned_keys.get(&entity) {
+                    // create new document with client-side GUID
+                    data_map.insert(key_field.to_string(), Value::String(key.clone()));
+                    insert_meta(&mut data_map, DocumentKind::Entity, 1);
+                    let document = Value::Object(data_map);
+                    Ok(Some((
+                        TransactionOperation::CreateDocument {
+                            store: store.to_string(),
+                            kind: DocumentKind::Entity,
+                            data: document,
+                        },
+                        Some(entity),
+                    )))
+                } else {
+                    Err(PersistenceError::new(format!(
+                        "Entity {:?} has no cached key and no preassigned key",
+                        entity
+                    )))
+                }
+            };
 
         // 2) Creations & Updates (entities)
-        let entity_ops_result: Result<Vec<_>, PersistenceError> = pool.install(|| {
+        let entity_ops_result: Result<Vec<_>, PersistenceError> = if let Some(pool) = thread_pool {
+            pool.install(|| {
+                dirty_entity_components
+                    .par_iter()
+                    .map(&serialize_entity)
+                    .filter_map(|res| res.transpose())
+                    .collect::<Result<Vec<(TransactionOperation, Option<Entity>)>, PersistenceError>>()
+            })
+        } else {
             dirty_entity_components
-                .par_iter()
-                .map(|(&entity, dirty_components)| {
-                    let mut data_map = serde_json::Map::new();
-
-                    let component_type_ids: Vec<TypeId> =
-                        dirty_components.iter().copied().collect();
-
-                    for component_type_id in component_type_ids {
-                        let Some(serializer) = session
-                            .components
-                            .serializers
-                            .get(&component_type_id)
-                        else {
-                            continue;
-                        };
-                        if let Some((field_name, value)) = serializer(entity, world)? {
-                            data_map.insert(field_name, value);
-                        }
-                    }
-                    if data_map.is_empty() {
-                        return Ok(None);
-                    }
-                    if let Some(key) = session.cache.entity_keys.get(&entity) {
-                        // update existing
-                        let version_key = VersionKey::Entity(key.clone());
-                        let current_version = session
-                            .cache
-                            .version_manager
-                            .get_version(&version_key)
-                            .ok_or_else(|| PersistenceError::new("Missing version for update"))?;
-                        let next_version = current_version + 1;
-                        insert_meta(&mut data_map, DocumentKind::Entity, next_version);
-                        Ok(Some((
-                            TransactionOperation::UpdateDocument {
-                                store: store.to_string(),
-                                kind: DocumentKind::Entity,
-                                key: key.clone(),
-                                expected_current_version: current_version,
-                                patch: Value::Object(data_map),
-                            },
-                            None,
-                        )))
-                    } else if let Some(key) = preassigned_keys.get(&entity) {
-                        // create new document with client-side GUID
-                        data_map.insert(key_field.to_string(), Value::String(key.clone()));
-                        insert_meta(&mut data_map, DocumentKind::Entity, 1);
-                        let document = Value::Object(data_map);
-                        Ok(Some((
-                            TransactionOperation::CreateDocument {
-                                store: store.to_string(),
-                                kind: DocumentKind::Entity,
-                                data: document,
-                            },
-                            Some(entity),
-                        )))
-                    } else {
-                        // Shouldn't happen - entity should have a cached key or preassigned key
-                        Err(PersistenceError::new(format!(
-                            "Entity {:?} has no cached key and no preassigned key",
-                            entity
-                        )))
-                    }
-                })
+                .iter()
+                .map(&serialize_entity)
                 .filter_map(|res| res.transpose())
                 .collect::<Result<Vec<(TransactionOperation, Option<Entity>)>, PersistenceError>>()
-        });
+        };
 
         let (entity_ops, created): (Vec<TransactionOperation>, Vec<Option<Entity>>) =
             match entity_ops_result {
@@ -949,57 +967,49 @@ impl PersistenceSession {
         operations.extend(entity_ops);
         let newly_created_entities: Vec<Entity> = created.into_iter().flatten().collect();
 
-        // 3) Resources (in parallel)
-        let resource_ops_result: Result<Vec<_>, PersistenceError> = pool.install(|| {
-            let mut resource_ops = Vec::new();
-
-            for &resource_type_id in dirty_resources {
-                if despawned_resources.contains(&resource_type_id) {
-                    continue;
-                }
-                if let Some(serializer) = session.resources.serializers.get(&resource_type_id) {
-                    match serializer(world, session) {
-                        Ok(Some((name, mut value))) => {
-                            let version_key = VersionKey::Resource(resource_type_id);
-                            if let Some(current_version) =
-                                session.cache.version_manager.get_version(&version_key)
-                            {
-                                // update existing resource
-                                let next_version = current_version + 1;
-                                if let Some(obj) = value.as_object_mut() {
-                                    insert_meta(obj, DocumentKind::Resource, next_version);
-                                }
-                                resource_ops.push(TransactionOperation::UpdateDocument {
-                                    store: store.to_string(),
-                                    kind: DocumentKind::Resource,
-                                    key: name,
-                                    expected_current_version: current_version,
-                                    patch: value,
-                                });
-                            } else {
-                                // create new resource
-                                if let Some(obj) = value.as_object_mut() {
-                                    // Use backend-specific key field instead of hardcoding "_key"
-                                    obj.insert(key_field.to_string(), Value::String(name.clone()));
-                                    insert_meta(obj, DocumentKind::Resource, 1);
-                                }
-                                resource_ops.push(TransactionOperation::CreateDocument {
-                                    store: store.to_string(),
-                                    kind: DocumentKind::Resource,
-                                    data: value,
-                                });
+        // 3) Resources (serial)
+        let mut resource_ops = Vec::new();
+        for &resource_type_id in dirty_resources {
+            if despawned_resources.contains(&resource_type_id) {
+                continue;
+            }
+            if let Some(serializer) = session.resources.serializers.get(&resource_type_id) {
+                match serializer(world, session) {
+                    Ok(Some((name, mut value))) => {
+                        let version_key = VersionKey::Resource(resource_type_id);
+                        if let Some(current_version) =
+                            session.cache.version_manager.get_version(&version_key)
+                        {
+                            // update existing resource
+                            let next_version = current_version + 1;
+                            if let Some(obj) = value.as_object_mut() {
+                                insert_meta(obj, DocumentKind::Resource, next_version);
                             }
+                            resource_ops.push(TransactionOperation::UpdateDocument {
+                                store: store.to_string(),
+                                kind: DocumentKind::Resource,
+                                key: name,
+                                expected_current_version: current_version,
+                                patch: value,
+                            });
+                        } else {
+                            // create new resource
+                            if let Some(obj) = value.as_object_mut() {
+                                obj.insert(key_field.to_string(), Value::String(name.clone()));
+                                insert_meta(obj, DocumentKind::Resource, 1);
+                            }
+                            resource_ops.push(TransactionOperation::CreateDocument {
+                                store: store.to_string(),
+                                kind: DocumentKind::Resource,
+                                data: value,
+                            });
                         }
-                        Ok(None) => {} // Nothing to do if serializer returns None
-                        Err(e) => return Err(e),
                     }
+                    Ok(None) => {}
+                    Err(e) => return Err(e),
                 }
             }
-
-            Ok(resource_ops)
-        });
-
-        let resource_ops = resource_ops_result?;
+        }
         operations.extend(resource_ops);
 
         // 4) Relationship edge operations (diff-based)
@@ -1055,7 +1065,7 @@ impl PersistenceSession {
             new_edge_snapshot = current_keys;
         }
 
-        info!(
+        debug!(
             "[_prepare_commit] Prepared {} operations.",
             operations.len()
         );
@@ -1074,16 +1084,14 @@ mod arango_session {
     use super::*;
     use crate::core::persist::Persist;
     use crate::core::db::connection::EdgeDocument;
-    use crate::bevy::registration::COMPONENT_REGISTRY;
     use bevy::prelude::World;
     use bevy_persistence_database_derive::persist;
     use serde_json::json;
     use std::any::TypeId;
 
     fn setup() {
-        // Clear the global registry to avoid test pollution from other modules
-        let mut registry = COMPONENT_REGISTRY.lock().unwrap();
-        registry.clear();
+        // No-op: with the linkme-based registry, entries are immutable static data
+        // resolved at link time and do not accumulate across test runs.
     }
 
     #[persist(resource)]
@@ -1160,7 +1168,7 @@ mod arango_session {
             &dirty_resources,
             &despawned_resources,
             &dirty_relationship_entities,
-            1,
+            None,
             "_key",
             "store",
         )
@@ -1204,7 +1212,7 @@ mod arango_session {
             &HashSet::new(),
             &HashSet::new(),
             &HashSet::new(),
-            1,
+            None,
             "_key",
             "store",
         )
@@ -1257,7 +1265,7 @@ mod arango_session {
             &HashSet::new(),
             &HashSet::new(),
             &HashSet::new(),
-            1,
+            None,
             "_key",
             "store",
         )
@@ -1323,7 +1331,7 @@ mod arango_session {
             &HashSet::new(),
             &HashSet::new(),
             &dirty_relationship_entities,
-            1,
+            None,
             "_key",
             "store",
         )
@@ -1380,7 +1388,7 @@ mod arango_session {
             &HashSet::new(),
             &HashSet::new(),
             &dirty_relationship_entities,
-            1,
+            None,
             "_key",
             "store",
         )
@@ -1442,7 +1450,7 @@ mod arango_session {
             &HashSet::new(),
             &HashSet::new(),
             &HashSet::new(), // no dirty relationships
-            1,
+            None,
             "_key",
             "store",
         )
@@ -1457,5 +1465,49 @@ mod arango_session {
                 TransactionOperation::UpsertEdges { .. }
                     | TransactionOperation::DeleteEdges { .. }
             )));
+    }
+
+    /// Unit structs (marker components with no fields) must serialize to JSON
+    /// `null` and deserialize back to the unit struct value. This ensures that
+    /// `#[persist(component)]` on a marker like `PlayerCharacter` round-trips
+    /// correctly through the persistence layer.
+    #[test]
+    fn unit_struct_persist_serde_roundtrip() {
+        #[persist(component)]
+        #[derive(Debug, Clone, PartialEq)]
+        struct MarkerComponent;
+
+        let serialized = serde_json::to_value(&MarkerComponent).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::Value::Null,
+            "unit struct should serialize to null"
+        );
+        let deserialized: MarkerComponent = serde_json::from_value(serialized).unwrap();
+        assert_eq!(deserialized, MarkerComponent);
+    }
+
+    /// Unit struct components should be deserializable from the persistence
+    /// session's component deserializer, enabling them to be hydrated from the DB.
+    #[test]
+    fn unit_struct_component_deserializer_works() {
+        #[persist(component)]
+        #[derive(Debug, Clone, PartialEq)]
+        struct MarkerComp;
+
+        let mut world = World::new();
+        let entity = world.spawn_empty().id();
+
+        let mut session = PersistenceSession::new();
+        session.register_component::<MarkerComp>();
+
+        let deserializer = session.component_deserializer(MarkerComp::name()).unwrap();
+        // null is the canonical serialized form of a unit struct
+        deserializer(&mut world, entity, serde_json::Value::Null).unwrap();
+
+        assert!(
+            world.get::<MarkerComp>(entity).is_some(),
+            "MarkerComp should be present after deserialization"
+        );
     }
 }

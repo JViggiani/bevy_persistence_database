@@ -1,11 +1,12 @@
 use crate::bevy::components::Guid;
+#[cfg(test)]
 use crate::core::persist::Persist;
 use crate::core::session::PersistenceSession;
 use bevy::prelude::*;
 use std::any::TypeId;
 
 /// Automatically marks entities with added/changed components as dirty.
-pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
+pub fn auto_dirty_tracking_entity_system<T: Component + 'static>(
     mut session: ResMut<PersistenceSession>,
     query: Query<Entity, Or<(Added<T>, Changed<T>)>>,
 ) {
@@ -20,7 +21,7 @@ pub fn auto_dirty_tracking_entity_system<T: Component + Persist>(
 }
 
 /// Automatically marks changed resources as dirty.
-pub fn auto_dirty_tracking_resource_system<T: Resource + Persist>(
+pub fn auto_dirty_tracking_resource_system<T: Resource + 'static>(
     mut session: ResMut<PersistenceSession>,
     resource: Option<Res<T>>,
 ) {

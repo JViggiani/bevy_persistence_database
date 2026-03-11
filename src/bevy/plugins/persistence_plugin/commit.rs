@@ -1,5 +1,5 @@
 use super::listeners::take_commit_listener;
-use super::plugin::PersistencePluginConfig;
+use super::plugin::{PersistencePluginConfig, PersistenceThreadPool};
 use super::runtime::TokioRuntime;
 use crate::bevy::components::Guid;
 use crate::core::db::{DatabaseConnection, PersistenceError, TransactionOperation};
@@ -94,12 +94,14 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
 
             match *status {
                 CommitStatus::Idle => {
-                    bevy::log::info!("[handle_commit_trigger] TriggerCommit received while Idle");
+                    bevy::log::debug!(
+                        "[handle_commit_trigger] TriggerCommit received while Idle"
+                    );
                     should_commit = true;
                     correlation_id = first_trigger.correlation_id;
                 }
                 CommitStatus::InProgress => {
-                    bevy::log::info!(
+                    bevy::log::debug!(
                         "[handle_commit_trigger] TriggerCommit received while busy; queueing"
                     );
                     *status = CommitStatus::InProgressAndDirty;
@@ -168,7 +170,7 @@ pub(super) fn handle_commit_trigger(ecs: &mut World) {
         &dirty_resources,
         &despawned_resources,
         &dirty_relationship_entities,
-        plugin_config.thread_count,
+        ecs.get_resource::<PersistenceThreadPool>().map(|p| p.get()),
         connection.document_key_field(),
         &store,
     ) {

@@ -6,6 +6,11 @@ pub trait QueryDataToComponents {
     fn push_names(acc: &mut Vec<&'static str>);
 }
 
+// Empty query — contributes no component names.
+impl QueryDataToComponents for () {
+    fn push_names(_acc: &mut Vec<&'static str>) {}
+}
+
 // &T
 impl<T: bevy::prelude::Component + Persist> QueryDataToComponents for &T {
     fn push_names(acc: &mut Vec<&'static str>) {

@@ -1,5 +1,4 @@
 #![allow(non_snake_case)]
-extern crate ctor;
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
@@ -34,20 +33,29 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             s.attrs.push(syn::parse_quote!(
                 #[derive(::bevy::prelude::Component, ::serde::Serialize, ::serde::Deserialize)]
             ));
-            // Add `#[serde(transparent)]` to single-field tuple structs
-            if let syn::Fields::Unnamed(fields) = &s.fields {
-                if fields.unnamed.len() == 1 {
+            // Add `#[serde(transparent)]` to any single-field struct (tuple or named).
+            // This keeps newtype wrappers stable on the wire / in persistence.
+            match &s.fields {
+                syn::Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                     s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
                 }
+                syn::Fields::Named(fields) if fields.named.len() == 1 => {
+                    s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
+                }
+                _ => {}
             }
         } else if is_res {
             s.attrs.push(syn::parse_quote!(
                 #[derive(::bevy::prelude::Resource, ::serde::Serialize, ::serde::Deserialize)]
             ));
-            if let syn::Fields::Unnamed(fields) = &s.fields {
-                if fields.unnamed.len() == 1 {
+            match &s.fields {
+                syn::Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                     s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
                 }
+                syn::Fields::Named(fields) if fields.named.len() == 1 => {
+                    s.attrs.push(syn::parse_quote!(#[serde(transparent)]));
+                }
+                _ => {}
             }
         } else {
             // Relationship: Serialize/Deserialize only needed for the bevy_many_relationship_edges
@@ -56,13 +64,19 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
             s.attrs.push(syn::parse_quote!(
                 #[cfg_attr(feature = "bevy_many_relationship_edges", derive(::serde::Serialize, ::serde::Deserialize))]
             ));
-            // #[serde(transparent)] is likewise only valid in the payload path
-            if let syn::Fields::Unnamed(fields) = &s.fields {
-                if fields.unnamed.len() == 1 {
+            // #[serde(transparent)] is likewise only valid in the payload path.
+            match &s.fields {
+                syn::Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
                     s.attrs.push(syn::parse_quote!(
                         #[cfg_attr(feature = "bevy_many_relationship_edges", serde(transparent))]
                     ));
                 }
+                syn::Fields::Named(fields) if fields.named.len() == 1 => {
+                    s.attrs.push(syn::parse_quote!(
+                        #[cfg_attr(feature = "bevy_many_relationship_edges", serde(transparent))]
+                    ));
+                }
+                _ => {}
             }
         }
     } else if let Item::Enum(e) = &mut ast {
@@ -83,106 +97,7 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         Item::Enum(e) => &e.ident,
         _ => unreachable!(),
     };
-    let register_fn = format_ident!("__persist_register_{}", name);
-    let ctor_fn = format_ident!("__persist_ctor_{}", name);
     let crate_path = get_crate_path();
-
-    let registration = if is_comp {
-        quote! {
-            #[allow(non_snake_case)]
-            fn #register_fn(app: &mut bevy::app::App) {
-                use bevy::prelude::IntoScheduleConfigs;
-                let type_id = std::any::TypeId::of::<#name>();
-                let mut registered = app
-                    .world_mut()
-                    .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
-                if registered.types.insert(type_id) {
-                    app.world_mut()
-                        .resource_mut::<#crate_path::core::session::PersistenceSession>()
-                        .register_component::<#name>();
-                    app.add_systems(
-                        bevy::app::PostUpdate,
-                        #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_entity_system::<#name>
-                            .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
-                    );
-                }
-            }
-        }
-    } else if is_res {
-        quote! {
-            #[allow(non_snake_case)]
-            fn #register_fn(app: &mut bevy::app::App) {
-                use bevy::prelude::IntoScheduleConfigs;
-                let type_id = std::any::TypeId::of::<#name>();
-                let mut registered = app
-                    .world_mut()
-                    .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
-                if registered.types.insert(type_id) {
-                    app.world_mut()
-                        .resource_mut::<#crate_path::core::session::PersistenceSession>()
-                        .register_resource::<#name>();
-                    app.add_systems(
-                        bevy::app::PostUpdate,
-                        #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_resource_system::<#name>
-                            .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
-                    );
-                }
-            }
-        }
-    } else {
-        quote! {
-            #[allow(non_snake_case)]
-            fn #register_fn(app: &mut bevy::app::App) {
-                #[cfg(feature = "bevy_many_relationship_edges")]
-                {
-                    use bevy::prelude::IntoScheduleConfigs;
-                    let type_id = std::any::TypeId::of::<#name>();
-                    let mut registered = app
-                        .world_mut()
-                        .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
-                    if registered.types.insert(type_id) {
-                        app.world_mut()
-                            .resource_mut::<#crate_path::core::session::PersistenceSession>()
-                            .register_many_relationship::<#name>(stringify!(#name));
-                        app.add_systems(
-                            bevy::app::PostUpdate,
-                            #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_relationship_system::<#name>
-                                .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
-                        );
-                    }
-                }
-                #[cfg(not(feature = "bevy_many_relationship_edges"))]
-                {
-                    use bevy::prelude::IntoScheduleConfigs;
-                    let type_id = std::any::TypeId::of::<#name>();
-                    let mut registered = app
-                        .world_mut()
-                        .resource_mut::<#crate_path::bevy::plugins::persistence_plugin::RegisteredPersistTypes>();
-                    if registered.types.insert(type_id) {
-                        app.world_mut()
-                            .resource_mut::<#crate_path::core::session::PersistenceSession>()
-                            .register_bevy_relationship::<#name>(stringify!(#name));
-                        app.add_systems(
-                            bevy::app::PostUpdate,
-                            #crate_path::bevy::plugins::persistence_plugin::auto_dirty_tracking_bevy_relationship_system::<#name>
-                                .in_set(#crate_path::bevy::plugins::persistence_plugin::PersistenceSystemSet::ChangeDetection),
-                        );
-                    }
-                }
-            }
-        }
-    };
-
-    let ctor_registration = quote! {
-        #[ctor::ctor]
-        #[allow(non_snake_case)]
-        fn #ctor_fn() {
-            #crate_path::bevy::registration::COMPONENT_REGISTRY
-                .lock()
-                .unwrap()
-                .push(#register_fn);
-        }
-    };
 
     // Implement the Persist trait, providing the name() method.
     // For native Bevy relationships (non-feature path), the struct contains Entity and cannot
@@ -232,13 +147,51 @@ pub fn persist(attr: TokenStream, item: TokenStream) -> TokenStream {
         };
     }
 
+    // Generate ctor-based auto-registration for component, resource, and relationship types.
+    let auto_registration = if is_comp || is_res || is_rel {
+        let register_fn = format_ident!("__persist_register_{}", name);
+        let ctor_fn = format_ident!("__persist_ctor_{}", name);
+
+        let register_call = if is_comp {
+            quote! { #crate_path::bevy::registration::register_persist_component::<#name>(app); }
+        } else if is_res {
+            quote! { #crate_path::bevy::registration::register_persist_resource::<#name>(app); }
+        } else {
+            // Relationships use one of two functions depending on the feature flag.
+            quote! {
+                #[cfg(not(feature = "bevy_many_relationship_edges"))]
+                #crate_path::bevy::registration::register_persist_bevy_relationship::<#name>(app);
+                #[cfg(feature = "bevy_many_relationship_edges")]
+                #crate_path::bevy::registration::register_persist_many_relationship::<#name>(app);
+            }
+        };
+
+        quote! {
+            #[allow(non_snake_case)]
+            fn #register_fn(app: &mut ::bevy::app::App) {
+                #register_call
+            }
+
+            #[allow(non_snake_case)]
+            #[::ctor::ctor]
+            fn #ctor_fn() {
+                #crate_path::bevy::registration::COMPONENT_REGISTRY
+                    .lock()
+                    .unwrap()
+                    .push(#register_fn);
+            }
+        }
+    // We return early above when none of the flags are set, so this is unreachable.
+    } else {
+        unreachable!()
+    };
+
     // Combine all generated code
     TokenStream::from(quote! {
         #ast
-        #registration
-        #ctor_registration
         #impl_persist
         #field_methods
+        #auto_registration
     })
 }
 

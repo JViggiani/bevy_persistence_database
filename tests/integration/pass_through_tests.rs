@@ -121,13 +121,15 @@ fn test_deref_forwards_bevy_query_methods() {
 
     // Frame 2: use Bevy Query methods via Deref
     #[derive(Resource)]
-    struct Ent(Entity);
-    app.insert_resource(Ent(e));
+    struct Ent {
+        entity: Entity,
+    }
+    app.insert_resource(Ent { entity: e });
     fn verify(pq: PersistentQuery<(&Health, &Position)>, ent: Res<Ent>) {
         // contains
-        assert!(pq.contains(ent.0));
+        assert!(pq.contains(ent.entity));
         // get
-        let (_e, (h, p)) = pq.get(ent.0).unwrap();
+        let (_e, (h, p)) = pq.get(ent.entity).unwrap();
         assert_eq!(h.value, 5);
         assert_eq!(p.x, 1.0);
         // iter and collect
@@ -136,7 +138,7 @@ fn test_deref_forwards_bevy_query_methods() {
         // combinations
         assert_eq!(pq.iter_combinations::<1>().count(), 1);
         // get_many on same entity twice just to hit the API shape
-        let _ = pq.get_many([ent.0]).unwrap();
+        let _ = pq.get_many([ent.entity]).unwrap();
     }
     app.add_systems(Update, verify);
     app.update();
@@ -239,7 +241,9 @@ fn test_query_contains_method() {
 
     // First system loads the entity
     #[derive(Resource, Default)]
-    struct LoadedEntity(Option<Entity>);
+    struct LoadedEntity {
+        entity: Option<Entity>,
+    }
 
     app.insert_resource(LoadedEntity::default());
 
@@ -249,13 +253,15 @@ fn test_query_contains_method() {
 
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
-            res.0 = Some(e);
+            res.entity = Some(e);
         }
     }
 
     // Second system tests contains()
     #[derive(Resource, Default)]
-    struct TestResult(bool);
+    struct TestResult {
+        ok: bool,
+    }
 
     app.insert_resource(TestResult::default());
 
@@ -264,8 +270,8 @@ fn test_query_contains_method() {
         entity: Res<LoadedEntity>,
         mut result: ResMut<TestResult>,
     ) {
-        if let Some(e) = entity.0 {
-            result.0 = pq.contains(e);
+        if let Some(e) = entity.entity {
+            result.ok = pq.contains(e);
         }
     }
 
@@ -277,7 +283,7 @@ fn test_query_contains_method() {
     app.update();
 
     // Verify the result
-    let contains_result = app.world().resource::<TestResult>().0;
+    let contains_result = app.world().resource::<TestResult>().ok;
     assert!(
         contains_result,
         "contains() should return true for a loaded entity"
@@ -300,7 +306,9 @@ fn test_query_get_method() {
 
     // First system loads the entity
     #[derive(Resource, Default)]
-    struct LoadedEntity(Option<Entity>);
+    struct LoadedEntity {
+        entity: Option<Entity>,
+    }
 
     app.insert_resource(LoadedEntity::default());
 
@@ -310,13 +318,15 @@ fn test_query_get_method() {
 
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
-            res.0 = Some(e);
+            res.entity = Some(e);
         }
     }
 
     // Second system tests get()
     #[derive(Resource, Default)]
-    struct TestResult(bool);
+    struct TestResult {
+        ok: bool,
+    }
 
     app.insert_resource(TestResult::default());
 
@@ -325,8 +335,8 @@ fn test_query_get_method() {
         entity: Res<LoadedEntity>,
         mut result: ResMut<TestResult>,
     ) {
-        if let Some(e) = entity.0 {
-            result.0 = pq.get(e).is_ok();
+        if let Some(e) = entity.entity {
+            result.ok = pq.get(e).is_ok();
         }
     }
 
@@ -338,7 +348,7 @@ fn test_query_get_method() {
     app.update();
 
     // Verify the result
-    let get_result = app.world().resource::<TestResult>().0;
+    let get_result = app.world().resource::<TestResult>().ok;
     assert!(get_result, "get() should succeed for a loaded entity");
 }
 
@@ -358,7 +368,9 @@ fn test_query_get_mut_method() {
 
     // First system loads the entity
     #[derive(Resource, Default)]
-    struct LoadedEntity(Option<Entity>);
+    struct LoadedEntity {
+        entity: Option<Entity>,
+    }
 
     app.insert_resource(LoadedEntity::default());
 
@@ -368,13 +380,15 @@ fn test_query_get_mut_method() {
 
         // Capture the first entity
         if let Some((e, _)) = pq.iter().next() {
-            res.0 = Some(e);
+            res.entity = Some(e);
         }
     }
 
     // Second system tests get_mut()
     #[derive(Resource, Default)]
-    struct TestResult(bool);
+    struct TestResult {
+        ok: bool,
+    }
 
     app.insert_resource(TestResult::default());
 
@@ -383,8 +397,8 @@ fn test_query_get_mut_method() {
         entity: Res<LoadedEntity>,
         mut result: ResMut<TestResult>,
     ) {
-        if let Some(e) = entity.0 {
-            result.0 = pq.get_mut(e).is_ok();
+        if let Some(e) = entity.entity {
+            result.ok = pq.get_mut(e).is_ok();
         }
     }
 
@@ -396,7 +410,7 @@ fn test_query_get_mut_method() {
     app.update();
 
     // Verify the result
-    let get_mut_result = app.world().resource::<TestResult>().0;
+    let get_mut_result = app.world().resource::<TestResult>().ok;
     assert!(
         get_mut_result,
         "get_mut() should succeed for a loaded entity"
@@ -420,7 +434,9 @@ fn test_query_get_many_method() {
 
     // Resource to store entities
     #[derive(Resource, Default)]
-    struct LoadedEntities(Vec<Entity>);
+    struct LoadedEntities {
+        entities: Vec<Entity>,
+    }
 
     app.insert_resource(LoadedEntities::default());
 
@@ -430,13 +446,15 @@ fn test_query_get_many_method() {
 
         // Capture entities
         for (e, _) in pq.iter() {
-            res.0.push(e);
+            res.entities.push(e);
         }
     }
 
     // Second system tests get_many()
     #[derive(Resource, Default)]
-    struct TestResult(bool);
+    struct TestResult {
+        ok: bool,
+    }
 
     app.insert_resource(TestResult::default());
 
@@ -445,12 +463,12 @@ fn test_query_get_many_method() {
         entities: Res<LoadedEntities>,
         mut result: ResMut<TestResult>,
     ) {
-        if entities.0.len() < 2 {
+        if entities.entities.len() < 2 {
             return;
         }
 
-        let get_result = pq.get_many([entities.0[0], entities.0[1]]);
-        result.0 = get_result.is_ok();
+        let get_result = pq.get_many([entities.entities[0], entities.entities[1]]);
+        result.ok = get_result.is_ok();
     }
 
     // Run the systems in sequence
@@ -461,7 +479,7 @@ fn test_query_get_many_method() {
     app.update();
 
     // Verify the result
-    let get_many_result = app.world().resource::<TestResult>().0;
+    let get_many_result = app.world().resource::<TestResult>().ok;
     assert!(
         get_many_result,
         "get_many() should succeed for loaded entities"

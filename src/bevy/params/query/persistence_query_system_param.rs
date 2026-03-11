@@ -5,7 +5,7 @@ use bevy::ecs::query::{QueryData, QueryFilter, QueryState};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::{Entity, Query, Res, World};
 
-use crate::bevy::plugins::persistence_plugin::{PersistencePluginConfig, TokioRuntime};
+use crate::bevy::plugins::persistence_plugin::{PersistencePluginConfig, PersistenceThreadPool, TokioRuntime};
 use crate::bevy::world_access::{DeferredWorldOperations, ImmediateWorldPtr};
 use crate::core::db::connection::DatabaseConnectionResource;
 use crate::core::query::FilterExpression;
@@ -42,6 +42,8 @@ pub struct PersistentQueryParam<'w, 's, Q: QueryData + 'static, F: QueryFilter +
     pub(crate) world_ptr: Option<Res<'w, ImmediateWorldPtr>>,
     /// Plugin configuration for defaults such as store
     pub(crate) config: Res<'w, PersistencePluginConfig>,
+    /// Optional scoped thread pool for parallel document loading
+    pub(crate) thread_pool: Option<Res<'w, PersistenceThreadPool>>,
 }
 
 /// Convenient alias mirroring Bevy's `Query<'w, 's, ...>` shape so lifetime
