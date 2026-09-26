@@ -5,7 +5,7 @@ use crate::core::db::DatabaseConnection;
 use crate::core::db::connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
     BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DocumentKind, EdgeDocument, PersistenceError,
-    TransactionOperation, read_kind, read_version,
+    StoreContents, TransactionOperation, normalize_stored_document, read_kind, read_version,
 };
 use crate::core::db::shared::{
     EnsuredStores, GroupedOperations, OperationType, build_arango_edge_bfs_aql,
@@ -16,8 +16,8 @@ use crate::core::query::{
 };
 use arangors::{
     AqlQuery, ClientError, Connection, Database,
-    client::reqwest::ReqwestClient,
-    transaction::{TransactionCollections, TransactionSettings},
+    client::{ClientExt, reqwest::ReqwestClient},
+    transaction::{Transaction, TransactionCollections, TransactionSettings},
 };
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -41,7 +41,6 @@ fn extract_version(doc: &Value, key: &str) -> Result<u64, PersistenceError> {
 const JSON_KEY_FIELD: &str = "key";
 const AQL_BIND_DOCS: &str = "docs";
 const AQL_BIND_PATCHES: &str = "patches";
-const AQL_BIND_DELETES: &str = "deletes";
 const AQL_BIND_STORE: &str = "store";
 const AQL_BIND_KIND: &str = "kind";
 
@@ -379,7 +378,7 @@ impl ArangoDbConnection {
 
         bind_vars.insert(
             AQL_BIND_KIND.into(),
-            Value::String(spec.kind.as_str().to_string()),
+            Value::String(spec.kind.as_ref().to_string()),
         );
         filters.push(format!(
             "doc.`{meta}`.`{type_field}` == @{kind}",
@@ -454,24 +453,6 @@ impl ArangoDbConnection {
         }
     }
 
-    // Private helper to truncate any collection
-    fn clear_collection(&self, name: &str) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        let name = name.to_string();
-        self.with_reauth(move |db| {
-            let name = name.clone();
-            async move {
-                let col = db
-                    .collection(&name)
-                    .await
-                    .map_err(|e| PersistenceError::new(e.to_string()))?;
-                col.truncate()
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| PersistenceError::new(e.to_string()))
-            }
-        })
-    }
-
     // Private helper to fetch a full document + version
     fn fetch_with_version(
         &self,
@@ -514,6 +495,148 @@ impl ArangoDbConnection {
             }
         })
     }
+}
+
+fn bind_query<'a>(
+    aql: &'a str,
+    bind_vars: &'a HashMap<String, Value>,
+) -> AqlQuery<'a> {
+    AqlQuery::builder()
+        .query(aql)
+        .bind_vars(
+            bind_vars
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect(),
+        )
+        .build()
+}
+
+async fn aql_strings<C: ClientExt>(
+    trx: &Transaction<C>,
+    aql: &str,
+    bind_vars: HashMap<String, Value>,
+) -> Result<Vec<String>, PersistenceError> {
+    trx.aql_query(bind_query(aql, &bind_vars))
+        .await
+        .map_err(|e| PersistenceError::new(e.to_string()))
+}
+
+async fn aql_done<C: ClientExt>(
+    trx: &Transaction<C>,
+    aql: &str,
+    bind_vars: HashMap<String, Value>,
+) -> Result<(), PersistenceError> {
+    let _: Vec<Value> = trx
+        .aql_query(bind_query(aql, &bind_vars))
+        .await
+        .map_err(|e| PersistenceError::new(e.to_string()))?;
+    Ok(())
+}
+
+fn kind_mutation_aql(statement: &str) -> String {
+    format!(
+        "FOR p IN @{patches}
+       LET doc = DOCUMENT(@@{col}, p.{key})
+       LET kind_val = doc.{meta}.{type_field}
+       LET ver_val = doc.{meta}.{ver}
+       FILTER doc != null AND kind_val == @kind AND ver_val == p.expected
+       {statement}
+       RETURN p.{key}",
+        patches = AQL_BIND_PATCHES,
+        col = AQL_BIND_STORE,
+        key = JSON_KEY_FIELD,
+        ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
+        type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+        meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+        statement = statement,
+    )
+}
+
+fn update_statement() -> String {
+    format!(
+        "UPDATE doc WITH p.patch IN @@{col} OPTIONS {{ mergeObjects: false }}",
+        col = AQL_BIND_STORE,
+    )
+}
+
+fn replace_statement() -> String {
+    format!(
+        "REPLACE doc WITH p.document IN @@{col}",
+        col = AQL_BIND_STORE,
+    )
+}
+
+fn remove_statement() -> String {
+    format!("REMOVE doc IN @@{col}", col = AQL_BIND_STORE)
+}
+
+fn mutation_binds(rows: Vec<Value>, kind: DocumentKind, store: &str) -> HashMap<String, Value> {
+    let mut bind_vars = HashMap::new();
+    bind_vars.insert(AQL_BIND_PATCHES.into(), Value::Array(rows));
+    bind_vars.insert(
+        AQL_BIND_KIND.into(),
+        Value::String(kind.as_ref().to_string()),
+    );
+    insert_store_bind(&mut bind_vars, store);
+    bind_vars
+}
+
+async fn apply_kind_operations<C: ClientExt>(
+    trx: &Transaction<C>,
+    kind: DocumentKind,
+    ops: &mut crate::core::db::shared::DocumentOperations,
+    store: &str,
+) -> Result<(), PersistenceError> {
+    if !ops.creates.is_empty() {
+        let aql = format!(
+            "FOR d IN @{bind} INSERT d INTO @@{col} OPTIONS {{ overwriteMode: 'ignore' }}",
+            bind = AQL_BIND_DOCS,
+            col = AQL_BIND_STORE
+        );
+        let mut bind_vars = HashMap::new();
+        bind_vars.insert(
+            AQL_BIND_DOCS.into(),
+            Value::Array(std::mem::take(&mut ops.creates)),
+        );
+        insert_store_bind(&mut bind_vars, store);
+        aql_done(trx, &aql, bind_vars).await?;
+    }
+
+    if !ops.updates.is_empty() {
+        let requested = extract_keys(&ops.updates, JSON_KEY_FIELD);
+        let updated = aql_strings(
+            trx,
+            &kind_mutation_aql(&update_statement()),
+            mutation_binds(std::mem::take(&mut ops.updates), kind, store),
+        )
+        .await?;
+        check_operation_success(requested, updated, &OperationType::Update, store)?;
+    }
+
+    if !ops.replaces.is_empty() {
+        let requested = extract_keys(&ops.replaces, JSON_KEY_FIELD);
+        let replaced = aql_strings(
+            trx,
+            &kind_mutation_aql(&replace_statement()),
+            mutation_binds(std::mem::take(&mut ops.replaces), kind, store),
+        )
+        .await?;
+        check_operation_success(requested, replaced, &OperationType::Update, store)?;
+    }
+
+    if !ops.deletes.is_empty() {
+        let requested = extract_keys(&ops.deletes, JSON_KEY_FIELD);
+        let removed = aql_strings(
+            trx,
+            &kind_mutation_aql(&remove_statement()),
+            mutation_binds(std::mem::take(&mut ops.deletes), kind, store),
+        )
+        .await?;
+        check_operation_success(requested, removed, &OperationType::Delete, store)?;
+    }
+
+    Ok(())
 }
 
 // Shared multi-thread runtime for sync operations (avoid per-call runtimes)
@@ -705,9 +828,71 @@ impl DatabaseConnection for ArangoDbConnection {
     fn clear_store(
         &self,
         store: &str,
-        _kind: DocumentKind,
+        kind: DocumentKind,
     ) -> BoxFuture<'static, Result<(), PersistenceError>> {
-        self.clear_collection(store)
+        let name = store.to_string();
+        let kind = kind.as_ref().to_string();
+        let conn = self.clone();
+        self.with_reauth(move |db| {
+            let conn = conn.clone();
+            let name = name.clone();
+            let kind = kind.clone();
+            async move {
+                conn.ensure_collection_cached(&db, &name).await?;
+                let aql = format!(
+                    "FOR doc IN @@{col} FILTER doc.`{meta}`.`{type_field}` == @kind REMOVE doc IN @@{col}",
+                    col = AQL_BIND_STORE,
+                    meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
+                    type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+                );
+                let mut bind_vars = HashMap::new();
+                insert_store_bind(&mut bind_vars, &name);
+                bind_vars.insert(AQL_BIND_KIND.into(), Value::String(kind));
+                let _: Vec<Value> = db
+                    .aql_query(bind_query(&aql, &bind_vars))
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                Ok(())
+            }
+        })
+    }
+
+    fn read_store(
+        &self,
+        store: &str,
+    ) -> BoxFuture<'static, Result<StoreContents, PersistenceError>> {
+        let name = store.to_string();
+        let conn = self.clone();
+        self.with_reauth(move |db| {
+            let conn = conn.clone();
+            let name = name.clone();
+            async move {
+                conn.ensure_collection_cached(&db, &name).await?;
+                let docs_aql = format!("FOR doc IN @@{col} RETURN doc", col = AQL_BIND_STORE);
+                let mut bind_vars = HashMap::new();
+                insert_store_bind(&mut bind_vars, &name);
+                let docs: Vec<Value> = db
+                    .aql_query(bind_query(&docs_aql, &bind_vars))
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                let mut documents = Vec::with_capacity(docs.len());
+                for doc in docs {
+                    documents.push(normalize_stored_document(&doc, "_key")?);
+                }
+
+                let edge_collection = format!("{name}__edges");
+                conn.ensure_edge_collection_cached(&db, &edge_collection)
+                    .await?;
+                let edge_aql = "FOR e IN @@col RETURN { key: e._key, relationship_type: e.relationship_type, from_guid: e.from_guid, to_guid: e.to_guid, payload: e.payload }";
+                let mut edge_binds = HashMap::new();
+                edge_binds.insert("@col".into(), Value::String(edge_collection));
+                let edges: Vec<EdgeDocument> = db
+                    .aql_query(bind_query(edge_aql, &edge_binds))
+                    .await
+                    .map_err(|e| PersistenceError::new(e.to_string()))?;
+                Ok(StoreContents { documents, edges })
+            }
+        })
     }
 
     fn execute_transaction(
@@ -777,270 +962,10 @@ impl DatabaseConnection for ArangoDbConnection {
                 // "timeout waiting to lock key" on every subsequent commit and
                 // survives client restarts (the transaction lives in the DB).
                 let tx_result: Result<Vec<String>, PersistenceError> = async {
-                let new_keys: Vec<String> = Vec::new();
-
-                // 1) Entity creates
-                if !groups.entities.creates.is_empty() {
-                    let aql = format!(
-                        // overwriteMode 'ignore' makes this idempotent: if the engine
-                        // re-processes the same job after a crash the second INSERT is silently skipped rather than
-                        // failing with a duplicate-key error or clobbering data that
-                        // may have been mutated by subsequent jobs since first creation.
-                        "FOR d IN @{bind} INSERT d INTO @@{col} OPTIONS {{ overwriteMode: 'ignore' }}",
-                        bind = AQL_BIND_DOCS,
-                        col = AQL_BIND_STORE
-                    );
-                    let mut bind_vars: std::collections::HashMap<String, Value> =
-                        std::collections::HashMap::new();
-                    bind_vars.insert(
-                        AQL_BIND_DOCS.into(),
-                        Value::Array(std::mem::take(&mut groups.entities.creates)),
-                    );
-                    insert_store_bind(&mut bind_vars, &store);
-                    let query = AqlQuery::builder()
-                    .query(&aql)
-                    .bind_vars(
-                        bind_vars
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.clone()))
-                            .collect(),
-                    )
-                    .build();
-                    let _: Vec<Value> = trx
-                        .aql_query(query)
-                        .await
-                        .map_err(|e| PersistenceError::new(e.to_string()))?;
+                for (kind, ops) in &mut groups.kinds {
+                    apply_kind_operations(&trx, *kind, ops, store.as_str()).await?;
                 }
 
-                // 2) Entity updates
-                if !groups.entities.updates.is_empty() {
-                    let requested = extract_keys(&groups.entities.updates, JSON_KEY_FIELD);
-                    let aql = format!(
-                        "FOR p IN @{patches}
-                       LET doc = DOCUMENT(@@{col}, p.{key})
-                       LET kind_val = doc.{meta}.{type_field}
-                       LET ver_val = doc.{meta}.{ver}
-                       FILTER doc != null AND kind_val == @kind AND ver_val == p.expected
-                       UPDATE doc WITH p.patch IN @@{col} OPTIONS {{ mergeObjects: true }}
-                       RETURN p.{key}",
-                        patches = AQL_BIND_PATCHES,
-                        col = AQL_BIND_STORE,
-                        key = JSON_KEY_FIELD,
-                        ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
-                        type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
-                        meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-                    );
-                    let mut bind_vars: std::collections::HashMap<String, Value> =
-                        std::collections::HashMap::new();
-                    bind_vars.insert(
-                        AQL_BIND_PATCHES.into(),
-                        Value::Array(std::mem::take(&mut groups.entities.updates)),
-                    );
-                    bind_vars.insert(
-                        AQL_BIND_KIND.into(),
-                        Value::String(DocumentKind::Entity.as_str().to_string()),
-                    );
-                    insert_store_bind(&mut bind_vars, &store);
-                    let query = AqlQuery::builder()
-                    .query(&aql)
-                    .bind_vars(
-                        bind_vars
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.clone()))
-                            .collect(),
-                    )
-                    .build();
-                    let updated: Vec<String> = trx
-                        .aql_query(query)
-                        .await
-                        .map_err(|e| PersistenceError::new(e.to_string()))?;
-                    check_operation_success(
-                        requested,
-                        updated,
-                        &OperationType::Update,
-                        store.as_str(),
-                    )?;
-                }
-
-                // 3) Entity deletes
-                if !groups.entities.deletes.is_empty() {
-                    let requested = extract_keys(&groups.entities.deletes, JSON_KEY_FIELD);
-                    let aql = format!(
-                        "FOR p IN @{deletes}
-                       LET doc = DOCUMENT(@@{col}, p.{key})
-                       LET kind_val = doc.{meta}.{type_field}
-                       LET ver_val = doc.{meta}.{ver}
-                       FILTER doc != null AND kind_val == @kind AND ver_val == p.expected
-                       REMOVE doc IN @@{col}
-                       RETURN p.{key}",
-                        deletes = AQL_BIND_DELETES,
-                        col = AQL_BIND_STORE,
-                        key = JSON_KEY_FIELD,
-                        ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
-                        type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
-                        meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-                    );
-                    let mut bind_vars: std::collections::HashMap<String, Value> =
-                        std::collections::HashMap::new();
-                    bind_vars.insert(
-                        AQL_BIND_DELETES.into(),
-                        Value::Array(std::mem::take(&mut groups.entities.deletes)),
-                    );
-                    bind_vars.insert(
-                        AQL_BIND_KIND.into(),
-                        Value::String(DocumentKind::Entity.as_str().to_string()),
-                    );
-                    insert_store_bind(&mut bind_vars, &store);
-                    let query = AqlQuery::builder()
-                    .query(&aql)
-                    .bind_vars(
-                        bind_vars
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.clone()))
-                            .collect(),
-                    )
-                    .build();
-                    let removed: Vec<String> = trx
-                        .aql_query(query)
-                        .await
-                        .map_err(|e| PersistenceError::new(e.to_string()))?;
-                    check_operation_success(
-                        requested,
-                        removed,
-                        &OperationType::Delete,
-                        store.as_str(),
-                    )?;
-                }
-
-                // 4) Resource creates
-                if !groups.resources.creates.is_empty() {
-                    let aql = format!(
-                        // overwriteMode 'ignore' for the same idempotency reason as entity creates.
-                        "FOR d IN @{bind} INSERT d INTO @@{col} OPTIONS {{ overwriteMode: 'ignore' }}",
-                        bind = AQL_BIND_DOCS,
-                        col = AQL_BIND_STORE
-                    );
-                    let mut bind_vars: std::collections::HashMap<String, Value> =
-                        std::collections::HashMap::new();
-                    bind_vars.insert(
-                        AQL_BIND_DOCS.into(),
-                        Value::Array(std::mem::take(&mut groups.resources.creates)),
-                    );
-                    insert_store_bind(&mut bind_vars, &store);
-                    let query = AqlQuery::builder()
-                    .query(&aql)
-                    .bind_vars(
-                        bind_vars
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.clone()))
-                            .collect(),
-                    )
-                    .build();
-                    let _: Vec<Value> = trx
-                        .aql_query(query)
-                        .await
-                        .map_err(|e| PersistenceError::new(e.to_string()))?;
-                }
-
-                // 5) Resource updates
-                if !groups.resources.updates.is_empty() {
-                    let requested = extract_keys(&groups.resources.updates, JSON_KEY_FIELD);
-                    let aql = format!(
-                        "FOR p IN @{patches}
-                       LET doc = DOCUMENT(@@{col}, p.{key})
-                       LET kind_val = doc.{meta}.{type_field}
-                       LET ver_val = doc.{meta}.{ver}
-                       FILTER doc != null AND kind_val == @kind AND ver_val == p.expected
-                       UPDATE doc WITH p.patch IN @@{col} OPTIONS {{ mergeObjects: true }}
-                       RETURN p.{key}",
-                        patches = AQL_BIND_PATCHES,
-                        col = AQL_BIND_STORE,
-                        key = JSON_KEY_FIELD,
-                        ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
-                        type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
-                        meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-                    );
-                    let mut bind_vars: std::collections::HashMap<String, Value> =
-                        std::collections::HashMap::new();
-                    bind_vars.insert(
-                        AQL_BIND_PATCHES.into(),
-                        Value::Array(std::mem::take(&mut groups.resources.updates)),
-                    );
-                    bind_vars.insert(
-                        AQL_BIND_KIND.into(),
-                        Value::String(DocumentKind::Resource.as_str().to_string()),
-                    );
-                    insert_store_bind(&mut bind_vars, &store);
-                    let query = AqlQuery::builder()
-                    .query(&aql)
-                    .bind_vars(
-                        bind_vars
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.clone()))
-                            .collect(),
-                    )
-                    .build();
-                    let updated: Vec<String> = trx
-                        .aql_query(query)
-                        .await
-                        .map_err(|e| PersistenceError::new(e.to_string()))?;
-                    check_operation_success(
-                        requested,
-                        updated,
-                        &OperationType::Update,
-                        store.as_str(),
-                    )?;
-                }
-
-                // 6) Resource deletes
-                if !groups.resources.deletes.is_empty() {
-                    let requested = extract_keys(&groups.resources.deletes, JSON_KEY_FIELD);
-                    let aql = format!(
-                        "FOR p IN @{deletes}
-                       LET doc = DOCUMENT(@@{col}, p.{key})
-                       LET kind_val = doc.{meta}.{type_field}
-                       LET ver_val = doc.{meta}.{ver}
-                       FILTER doc != null AND kind_val == @kind AND ver_val == p.expected
-                       REMOVE doc IN @@{col}
-                       RETURN p.{key}",
-                        deletes = AQL_BIND_DELETES,
-                        col = AQL_BIND_STORE,
-                        key = JSON_KEY_FIELD,
-                        ver = BEVY_PERSISTENCE_DATABASE_VERSION_FIELD,
-                        type_field = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
-                        meta = BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-                    );
-                    let mut bind_vars: std::collections::HashMap<String, Value> =
-                        std::collections::HashMap::new();
-                    bind_vars.insert(
-                        AQL_BIND_DELETES.into(),
-                        Value::Array(std::mem::take(&mut groups.resources.deletes)),
-                    );
-                    bind_vars.insert(
-                        AQL_BIND_KIND.into(),
-                        Value::String(DocumentKind::Resource.as_str().to_string()),
-                    );
-                    insert_store_bind(&mut bind_vars, &store);
-                    let query = AqlQuery::builder()
-                    .query(&aql)
-                    .bind_vars(
-                        bind_vars
-                            .iter()
-                            .map(|(k, v)| (k.as_str(), v.clone()))
-                            .collect(),
-                    )
-                    .build();
-                    let removed: Vec<String> = trx
-                        .aql_query(query)
-                        .await
-                        .map_err(|e| PersistenceError::new(e.to_string()))?;
-                    check_operation_success(
-                        requested,
-                        removed,
-                        &OperationType::Delete,
-                        store.as_str(),
-                    )?;
-                }
 
                 // 7) Edge upserts
                 if !groups.edges.upserts.is_empty() {
@@ -1118,7 +1043,7 @@ impl DatabaseConnection for ArangoDbConnection {
                 trx.commit()
                     .await
                     .map_err(|e| PersistenceError::new(e.to_string()))?;
-                Ok(new_keys)
+                Ok(Vec::new())
                 }
                 .await;
 

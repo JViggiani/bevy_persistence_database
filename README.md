@@ -15,7 +15,7 @@ Persistence for Bevy ECS to ArangoDB or Postgres with an idiomatic Bevy Query AP
 | --- | --- |
 | 0.16 | 0.1.x |
 | 0.17 | 0.2.x - 0.5.x |
-| 0.18 | 0.6.x |
+| 0.18 | 0.6.x – 0.7.x |
 | 0.19 | 0.5.x (yanked) |
 
 ## Install
@@ -23,7 +23,7 @@ Persistence for Bevy ECS to ArangoDB or Postgres with an idiomatic Bevy Query AP
 ```toml
 [dependencies]
 bevy = { version = "0.18", default-features = false, features = ["bevy_log"] }
-bevy_persistence_database = { version = "0.6.0", features = ["arango", "postgres"] }
+bevy_persistence_database = { version = "0.7.0", features = ["arango", "postgres"] }
 ```
 
 Enable `arango` or `postgres` features based on your backend and supply an `Arc<dyn DatabaseConnection>` at startup.
@@ -158,7 +158,7 @@ app.add_plugins(PersistencePlugins::new(db.clone()).with_config(config));
 
 - `thread_count`: Rayon pool size used for parallel commit preparation (serialization).
 - `default_store`: fallback store when queries/commits don’t override `.store()`.
-- `compact_threshold_bytes`: auto-compact large JSON values (see `bevy_persistence_database::compact`).
+- `compact_threshold_bytes`: auto-compact large JSON values as MessagePack + zstd (`msgpack+zstd-v1`). An unknown envelope tag, including the previous postcard tag, is an error. See `bevy_persistence_database::compact`.
 
 Load-induced dirty flags are suppressed automatically during hydration ([`PersistenceSession::materialize_entity_document`], [`PersistenceSession::materialize_resource`], and related load APIs open a scope; PostUpdate [`PersistenceSystemSet::FinishHydration`] closes it after dirty tracking). Use [`PersistenceQuery::reconcile_versions`](crate::bevy::query::PersistenceQuery::reconcile_versions) manually after ops/migration if the in-memory version cache must be realigned to the database.
 
@@ -171,9 +171,40 @@ Load-induced dirty flags are suppressed automatically during hydration ([`Persis
 - Deferred world mutations from loads are applied in `PersistenceSystemSet::LoadApply`, before `TrackChanges`.
 - Commit pipeline runs in `PersistenceSystemSet::Commit`; readers that need fresh data should run after `PreCommit`.
 
+## Schema migrations
+
+Migrations are opt-in. An app that never builds a [`SchemaHistory`] behaves as before: the library does not read or write a schema document.
+
+```rust
+use bevy_persistence_database::{
+    MigrationMode, SchemaHistory, check_schema_lock, migrate_world,
+};
+
+struct RenameSpeed;
+impl bevy_persistence_database::MigrationStep for RenameSpeed {
+    fn from_version(&self) -> u32 { 1 }
+    fn id(&self) -> &'static str { "rename-speed" }
+    fn apply(&self, store: &mut bevy_persistence_database::StoreSnapshot) -> Result<(), bevy_persistence_database::MigrationError> {
+        Ok(())
+    }
+}
+
+let history = SchemaHistory::starting_at(1)
+    .lock(include_str!("../schema.lock"))
+    .step(RenameSpeed);
+
+migrate_world(world, &history, MigrationMode::OnOpen)?;
+```
+
+The current version is `starting_at` plus the number of steps. Steps are ordinary Rust over a [`StoreSnapshot`] of plain JSON: literal storage names, no helper vocabulary. Compact envelopes are expanded before the steps run and written back only for documents that changed. [`MigrationMode::RequireCurrent`] checks and does not write. `MigrateOptions::dry_run` runs the steps and validation, then writes nothing.
+
+Each store holds one library-owned schema document. A newer store fails. A non-empty store with no schema document is version 0 and needs a step from 0. The migration commits in one transaction; every replaced or deleted document, and the schema document, carries the optimistic-concurrency version it was read at, so a racing writer aborts the whole migration.
+
+`check_schema_lock` compares compiled types to the lock file and replays every released section through the real steps. `BEVY_PERSISTENCE_SCHEMA_LOCK=update` regenerates the open section and refuses to change a released one (`version N shipped: add a step from N`). `BEVY_PERSISTENCE_SCHEMA_LOCK=release` marks the current section released. Types that need `deserialize_any` (untagged enums, `flatten`, raw JSON values) fail the tracer by name.
+
 ## Error handling
 
-All public APIs return `Result<_, PersistenceError>`. Version conflicts, connection issues, and timeouts surface through that error type so you can decide whether to retry, fail the job, or surface an error to callers.
+Database operations and [`PersistenceQuery::run`], [`PersistenceQuery::fetch_into`], and [`PersistenceQuery::fetch_ids`] return `Result<_, PersistenceError>`. Fetch and deserialize failures name the document key and the component or resource. The session resource is restored when a load fails. Calling those methods without `with_db` / `store` (and without `run`, which fills them from the world) is a programming error and panics. Version conflicts, connection issues, and timeouts use the same error type. Schema migration returns [`MigrationError`].
 
 ## `bevy_many_relationship_edges` local development
 

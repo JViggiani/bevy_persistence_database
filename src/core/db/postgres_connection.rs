@@ -4,8 +4,9 @@
 use crate::core::db::connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
     BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DatabaseConnection, DocumentKind, EdgeDocument,
-    PersistenceError, TransactionOperation, read_version,
+    PersistenceError, StoreContents, StoredDocument, TransactionOperation, read_version,
 };
+use crate::core::db::shared::DocumentOperations;
 use crate::core::db::shared::{
     EnsuredStores, GroupedOperations, OperationType, check_operation_success, escape_sql_literal,
     extract_keys,
@@ -209,7 +210,7 @@ impl PostgresDbConnection {
         let mut params: Vec<SqlParam> = Vec::new();
 
         // constrain bevy_type to the requested document kind
-        params.push(SqlParam::Text(spec.kind.as_str().to_string()));
+        params.push(SqlParam::Text(spec.kind.as_ref().to_string()));
         clauses.push(format!(
             "({} = ${})",
             BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
@@ -513,7 +514,7 @@ impl PostgresDbConnection {
             );
             let c = conn.client().await?;
             let row_opt = c
-                .query_opt(&stmt, &[&key, &kind.as_str()])
+                .query_opt(&stmt, &[&key, &kind.as_ref()])
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg fetch failed: {}", e)))?;
             if let Some(row) = row_opt {
@@ -526,6 +527,228 @@ impl PostgresDbConnection {
         }
         .boxed()
     }
+}
+
+async fn pg_update(
+    tx: &tokio_postgres::Transaction<'_>,
+    values: &[Value],
+    kind: DocumentKind,
+    table: &str,
+    store: &str,
+) -> Result<Vec<String>, PersistenceError> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let upd_sql = format!(
+        r#"
+        WITH input AS (
+            SELECT (x->>'{k}')::text        AS {k},
+                   (x->>'expected')::bigint AS expected,
+                   (x->'patch')::jsonb      AS patch
+            FROM jsonb_array_elements($1::jsonb) AS x
+        ),
+        updated AS (
+            UPDATE {t} e
+            SET doc = e.doc || i.patch,
+                bevy_persistence_version = i.expected + 1
+            FROM input i
+            WHERE e.{k} = i.{k} AND e.bevy_type = $2 AND e.bevy_persistence_version = i.expected
+            RETURNING e.{k}
+        )
+        SELECT {k} FROM updated
+    "#,
+        k = KEY_COL,
+        t = table
+    );
+    let rows = tx
+        .query(
+            &upd_sql,
+            &[&Value::Array(values.to_vec()), &kind.as_ref()],
+        )
+        .await
+        .map_err(|e| PersistenceError::new(format!("pg batch update ({store}) failed: {e}")))?;
+    Ok(rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+}
+
+async fn pg_replace(
+    tx: &tokio_postgres::Transaction<'_>,
+    values: &[Value],
+    kind: DocumentKind,
+    table: &str,
+    store: &str,
+) -> Result<Vec<String>, PersistenceError> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        r#"
+        WITH input AS (
+            SELECT (x->>'{k}')::text        AS {k},
+                   (x->>'expected')::bigint AS expected,
+                   (x->'document')::jsonb   AS document
+            FROM jsonb_array_elements($1::jsonb) AS x
+        ),
+        replaced AS (
+            UPDATE {t} e
+            SET doc = i.document - '{k}',
+                bevy_persistence_version = i.expected + 1
+            FROM input i
+            WHERE e.{k} = i.{k} AND e.bevy_type = $2 AND e.bevy_persistence_version = i.expected
+            RETURNING e.{k}
+        )
+        SELECT {k} FROM replaced
+    "#,
+        k = KEY_COL,
+        t = table
+    );
+    let rows = tx
+        .query(&sql, &[&Value::Array(values.to_vec()), &kind.as_ref()])
+        .await
+        .map_err(|e| PersistenceError::new(format!("pg batch replace ({store}) failed: {e}")))?;
+    Ok(rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+}
+
+async fn pg_delete(
+    tx: &tokio_postgres::Transaction<'_>,
+    values: &[Value],
+    kind: DocumentKind,
+    table: &str,
+    store: &str,
+) -> Result<Vec<String>, PersistenceError> {
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let del_sql = format!(
+        r#"
+        WITH input AS (
+            SELECT (x->>'{k}')::text        AS {k},
+                   (x->>'expected')::bigint AS expected
+            FROM jsonb_array_elements($1::jsonb) AS x
+        ),
+        deleted AS (
+            DELETE FROM {t} e
+            USING input i
+            WHERE e.{k} = i.{k} AND e.bevy_type = $2 AND e.bevy_persistence_version = i.expected
+            RETURNING e.{k}
+        )
+        SELECT {k} FROM deleted
+    "#,
+        k = KEY_COL,
+        t = table
+    );
+    let rows = tx
+        .query(
+            &del_sql,
+            &[&Value::Array(values.to_vec()), &kind.as_ref()],
+        )
+        .await
+        .map_err(|e| PersistenceError::new(format!("pg batch delete ({store}) failed: {e}")))?;
+    Ok(rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+}
+
+async fn pg_create(
+    tx: &tokio_postgres::Transaction<'_>,
+    docs: &[Value],
+    kind: DocumentKind,
+    table: &str,
+    store: &str,
+    generate_missing_keys: bool,
+) -> Result<Vec<String>, PersistenceError> {
+    if docs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<String> = docs
+        .iter()
+        .map(|doc| {
+            let existing = doc
+                .get(KEY_COL)
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            match existing {
+                Some(id) => Ok(id),
+                None if generate_missing_keys => Ok(uuid::Uuid::new_v4().to_string()),
+                None => Err(PersistenceError::new(format!(
+                    "{kind:?} create is missing {KEY_COL}"
+                ))),
+            }
+        })
+        .collect::<Result<_, _>>()?;
+
+    let input_docs: Vec<Value> = docs
+        .iter()
+        .cloned()
+        .zip(ids.iter())
+        .map(|(mut doc, id)| {
+            if let Some(obj) = doc.as_object_mut() {
+                obj.remove(KEY_COL);
+            }
+            let ver = read_version(&doc).map(|version| version as i64).unwrap_or(1);
+            serde_json::json!({
+                "id": id,
+                "ver": ver,
+                "kind": kind.as_ref(),
+                "doc": doc
+            })
+        })
+        .collect();
+    let input_json = Value::Array(input_docs);
+    let sql = format!(
+        r#"
+        WITH input AS (
+            SELECT (x->>'{k}')::text      AS {k},
+                   (x->>'ver')::bigint    AS ver,
+                   (x->>'kind')::text     AS kind,
+                   (x->'doc')::jsonb      AS doc
+            FROM jsonb_array_elements($1::jsonb) AS x
+        ),
+        inserted AS (
+            INSERT INTO {t} ({k}, bevy_type, bevy_persistence_version, doc)
+            SELECT {k}, kind, ver, doc FROM input
+            RETURNING {k}
+        )
+        SELECT {k} FROM inserted
+    "#,
+        k = KEY_COL,
+        t = table
+    );
+    tx.query(&sql, &[&input_json])
+        .await
+        .map_err(|e| PersistenceError::new(format!("pg batch insert ({store}) failed: {e}")))?;
+    Ok(ids)
+}
+
+async fn apply_pg_kind(
+    tx: &tokio_postgres::Transaction<'_>,
+    kind: DocumentKind,
+    ops: &DocumentOperations,
+    table: &str,
+    store: &str,
+) -> Result<Vec<String>, PersistenceError> {
+    let created = pg_create(
+        tx,
+        &ops.creates,
+        kind,
+        table,
+        store,
+        kind == DocumentKind::Entity,
+    )
+    .await?;
+    if !ops.updates.is_empty() {
+        let requested = extract_keys(&ops.updates, KEY_COL);
+        let updated = pg_update(tx, &ops.updates, kind, table, store).await?;
+        check_operation_success(requested, updated, &OperationType::Update, store)?;
+    }
+    if !ops.replaces.is_empty() {
+        let requested = extract_keys(&ops.replaces, KEY_COL);
+        let replaced = pg_replace(tx, &ops.replaces, kind, table, store).await?;
+        check_operation_success(requested, replaced, &OperationType::Update, store)?;
+    }
+    if !ops.deletes.is_empty() {
+        let requested = extract_keys(&ops.deletes, KEY_COL);
+        let deleted = pg_delete(tx, &ops.deletes, kind, table, store).await?;
+        check_operation_success(requested, deleted, &OperationType::Delete, store)?;
+    }
+    Ok(created)
 }
 
 impl DatabaseConnection for PostgresDbConnection {
@@ -855,233 +1078,13 @@ impl DatabaseConnection for PostgresDbConnection {
                 .map_err(|e| PersistenceError::new(format!("pg START TRANSACTION failed: {}", e)))?;
             let mut new_entity_ids: Vec<String> = Vec::new();
 
-            async fn run_update(
-                tx: &tokio_postgres::Transaction<'_>,
-                values: &[serde_json::Value],
-                kind: DocumentKind,
-                table: &str,
-                store: &str,
-            ) -> Result<Vec<String>, PersistenceError> {
-                if values.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let upd_sql = format!(
-                    r#"
-                    WITH input AS (
-                        SELECT (x->>'{k}')::text        AS {k},
-                               (x->>'expected')::bigint AS expected,
-                               (x->'patch')::jsonb      AS patch
-                        FROM jsonb_array_elements($1::jsonb) AS x
-                    ),
-                    updated AS (
-                        UPDATE {t} e
-                        SET doc = e.doc || i.patch,
-                            bevy_persistence_version = i.expected + 1
-                        FROM input i
-                        WHERE e.{k} = i.{k} AND e.bevy_type = $2 AND e.bevy_persistence_version = i.expected
-                        RETURNING e.{k}
-                    )
-                    SELECT {k} FROM updated
-                "#,
-                    k = KEY_COL,
-                    t = table
-                );
-
-                let rows = tx
-                    .query(&upd_sql, &[&serde_json::Value::Array(values.to_vec()), &kind.as_str()])
-                    .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch update ({}) failed: {}", store, e)))?;
-                Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
-            }
-
-            async fn run_delete(
-                tx: &tokio_postgres::Transaction<'_>,
-                values: &[serde_json::Value],
-                kind: DocumentKind,
-                table: &str,
-                store: &str,
-            ) -> Result<Vec<String>, PersistenceError> {
-                if values.is_empty() {
-                    return Ok(Vec::new());
-                }
-                let del_sql = format!(
-                    r#"
-                    WITH input AS (
-                        SELECT (x->>'{k}')::text        AS {k},
-                               (x->>'expected')::bigint AS expected
-                        FROM jsonb_array_elements($1::jsonb) AS x
-                    ),
-                    deleted AS (
-                        DELETE FROM {t} e
-                        USING input i
-                        WHERE e.{k} = i.{k} AND e.bevy_type = $2 AND e.bevy_persistence_version = i.expected
-                        RETURNING e.{k}
-                    )
-                    SELECT {k} FROM deleted
-                "#,
-                    k = KEY_COL,
-                    t = table
-                );
-
-                let rows = tx
-                    .query(&del_sql, &[&serde_json::Value::Array(values.to_vec()), &kind.as_str()])
-                    .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch delete ({}) failed: {}", store, e)))?;
-                Ok(rows.into_iter().map(|r| r.get::<_, String>(0)).collect())
-            }
-
-            // Entity creates
-            if !groups.entities.creates.is_empty() {
-                // Extract client-side keys from the document data (pre-assigned by prepare_commit).
-                // Fall back to UUID v4 if a document is missing its key (shouldn't happen).
-                let ids: Vec<String> = groups
-                    .entities.creates
-                    .iter()
-                    .map(|doc| {
-                        doc.get(KEY_COL)
-                            .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
-                    })
-                    .collect();
-
-                let input_docs: Vec<serde_json::Value> = groups
-                    .entities.creates
-                    .iter()
-                    .cloned()
-                    .zip(ids.iter())
-                    .map(|(mut doc, id)| {
-                        // Strip the key from the doc JSONB — Postgres stores it
-                        // in a dedicated column, not inside the document.
-                        if let Some(obj) = doc.as_object_mut() {
-                            obj.remove(KEY_COL);
-                        }
-                        let ver = read_version(&doc).map(|v| v as i64).unwrap_or(1);
-                        serde_json::json!({
-                            "id": id,
-                            "ver": ver,
-                            "kind": DocumentKind::Entity.as_str(),
-                            "doc": doc
-                        })
-                    })
-                    .collect();
-                let input_json = serde_json::Value::Array(input_docs);
-
-                let sql = format!(
-                    r#"
-                    WITH input AS (
-                        SELECT (x->>'{k}')::text      AS {k},
-                               (x->>'ver')::bigint    AS ver,
-                               (x->>'kind')::text     AS kind,
-                               (x->'doc')::jsonb      AS doc
-                        FROM jsonb_array_elements($1::jsonb) AS x
-                    ),
-                    inserted AS (
-                        INSERT INTO {t} ({k}, bevy_type, bevy_persistence_version, doc)
-                        SELECT {k}, kind, ver, doc FROM input
-                        RETURNING {k}
-                    )
-                    SELECT {k} FROM inserted
-                "#,
-                    k = KEY_COL,
-                    t = table
-                );
-
-                tx.query(&sql, &[&input_json])
-                    .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch insert ({}) failed: {}", store, e)))?;
-
-                new_entity_ids = ids;
-            }
-
-            // Entity updates/deletes
-            if !groups.entities.updates.is_empty() {
-                let requested = extract_keys(&groups.entities.updates, KEY_COL);
-                let updated = run_update(&tx, &groups.entities.updates, DocumentKind::Entity, &table, &store).await?;
-                if let Err(e) = check_operation_success(requested, updated, &OperationType::Update, &store) {
-                    let _ = tx.rollback().await;
-                    return Err(e);
-                }
-            }
-            if !groups.entities.deletes.is_empty() {
-                let requested = extract_keys(&groups.entities.deletes, KEY_COL);
-                let deleted = run_delete(&tx, &groups.entities.deletes, DocumentKind::Entity, &table, &store).await?;
-                if let Err(e) = check_operation_success(requested, deleted, &OperationType::Delete, &store) {
-                    let _ = tx.rollback().await;
-                    return Err(e);
+            for (kind, ops) in &groups.kinds {
+                let created = apply_pg_kind(&tx, *kind, ops, &table, &store).await?;
+                if *kind == DocumentKind::Entity {
+                    new_entity_ids = created;
                 }
             }
 
-            // Resource creates
-            if !groups.resources.creates.is_empty() {
-                let input_docs: Vec<serde_json::Value> = groups
-                    .resources.creates
-                    .iter()
-                    .cloned()
-                    .map(|mut doc| {
-                        let id = doc
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .ok_or_else(|| PersistenceError::new("Resource create missing id"))?
-                            .to_string();
-                        // Strip the key from the doc — Postgres stores it in
-                        // a dedicated column, not inside the document.
-                        if let Some(obj) = doc.as_object_mut() {
-                            obj.remove(KEY_COL);
-                        }
-                        let ver = read_version(&doc).map(|v| v as i64).unwrap_or(1);
-                        Ok(serde_json::json!({
-                            "id": id,
-                            "ver": ver,
-                            "kind": DocumentKind::Resource.as_str(),
-                            "doc": doc
-                        }))
-                    })
-                    .collect::<Result<_, PersistenceError>>()?;
-                let input_json = serde_json::Value::Array(input_docs);
-
-                let sql = format!(
-                    r#"
-                    WITH input AS (
-                        SELECT (x->>'{k}')::text      AS {k},
-                               (x->>'ver')::bigint    AS ver,
-                               (x->>'kind')::text     AS kind,
-                               (x->'doc')::jsonb      AS doc
-                        FROM jsonb_array_elements($1::jsonb) AS x
-                    ),
-                    inserted AS (
-                        INSERT INTO {t} ({k}, bevy_type, bevy_persistence_version, doc)
-                        SELECT {k}, kind, ver, doc FROM input
-                        RETURNING {k}
-                    )
-                    SELECT {k} FROM inserted
-                "#,
-                    k = KEY_COL,
-                    t = table
-                );
-
-                tx.execute(&sql, &[&input_json])
-                    .await
-                    .map_err(|e| PersistenceError::new(format!("pg batch insert ({}) failed: {}", store, e)))?;
-            }
-
-            // Resource updates/deletes
-            if !groups.resources.updates.is_empty() {
-                let requested = extract_keys(&groups.resources.updates, KEY_COL);
-                let updated = run_update(&tx, &groups.resources.updates, DocumentKind::Resource, &table, &store).await?;
-                if let Err(e) = check_operation_success(requested, updated, &OperationType::Update, &store) {
-                    let _ = tx.rollback().await;
-                    return Err(e);
-                }
-            }
-            if !groups.resources.deletes.is_empty() {
-                let requested = extract_keys(&groups.resources.deletes, KEY_COL);
-                let deleted = run_delete(&tx, &groups.resources.deletes, DocumentKind::Resource, &table, &store).await?;
-                if let Err(e) = check_operation_success(requested, deleted, &OperationType::Delete, &store) {
-                    let _ = tx.rollback().await;
-                    return Err(e);
-                }
-            }
 
             // Edge upserts
             if !groups.edges.upserts.is_empty() {
@@ -1180,7 +1183,7 @@ impl DatabaseConnection for PostgresDbConnection {
             );
             let client = conn.client().await?;
             let row_opt = client
-                .query_opt(&stmt, &[&key, &comp, &DocumentKind::Entity.as_str()])
+                .query_opt(&stmt, &[&key, &comp, &DocumentKind::Entity.as_ref()])
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg fetch_component failed: {}", e)))?;
             if let Some(row) = row_opt {
@@ -1221,10 +1224,80 @@ impl DatabaseConnection for PostgresDbConnection {
             );
             let client = conn.client().await?;
             client
-                .execute(&stmt, &[&kind.as_str()])
+                .execute(&stmt, &[&kind.as_ref()])
                 .await
                 .map_err(|e| PersistenceError::new(format!("pg clear_store failed: {}", e)))?;
             Ok(())
+        }
+        .boxed()
+    }
+
+    fn read_store(
+        &self,
+        store: &str,
+    ) -> BoxFuture<'static, Result<StoreContents, PersistenceError>> {
+        let store_name = store.to_string();
+        let conn = self.clone();
+        async move {
+            let table = conn.ensure_store_table(&store_name).await?;
+            let sql = format!(
+                "SELECT {k}, {type_col}, bevy_persistence_version, doc FROM {table}",
+                k = KEY_COL,
+                type_col = BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD,
+            );
+            let client = conn.client().await?;
+            let rows = client
+                .query(&sql, &[])
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg read_store failed: {e}")))?;
+            let mut documents = Vec::with_capacity(rows.len());
+            for row in rows {
+                let key: String = row.get(0);
+                let kind_str: String = row.get(1);
+                let version: i64 = row.get(2);
+                let mut body: Value = row.get(3);
+                if let Some(obj) = body.as_object_mut() {
+                    obj.remove(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD);
+                    obj.remove(KEY_COL);
+                    obj.remove("_key");
+                    obj.remove("_id");
+                    obj.remove("_rev");
+                }
+                let kind = kind_str.parse::<DocumentKind>().map_err(|_| {
+                    PersistenceError::new(format!("document `{key}` has unknown kind `{kind_str}`"))
+                })?;
+                let version = u64::try_from(version).map_err(|_| {
+                    PersistenceError::new(format!(
+                        "document `{key}` has a negative optimistic-concurrency version"
+                    ))
+                })?;
+                documents.push(StoredDocument {
+                    kind,
+                    key,
+                    version,
+                    body,
+                });
+            }
+
+            let edge_table = conn.ensure_edge_table(&store_name).await?;
+            let edge_sql = format!(
+                "SELECT id, relationship_type, from_guid, to_guid, payload FROM {edge_table}"
+            );
+            let edge_rows = client
+                .query(&edge_sql, &[])
+                .await
+                .map_err(|e| PersistenceError::new(format!("pg read_store edges failed: {e}")))?;
+            let mut edges = Vec::with_capacity(edge_rows.len());
+            for row in edge_rows {
+                edges.push(EdgeDocument {
+                    key: row.get("id"),
+                    relationship_type: row.get("relationship_type"),
+                    from_guid: row.get("from_guid"),
+                    to_guid: row.get("to_guid"),
+                    payload: row.get("payload"),
+                });
+            }
+            Ok(StoreContents { documents, edges })
         }
         .boxed()
     }

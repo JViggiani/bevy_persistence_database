@@ -10,6 +10,7 @@ use crate::{
         world_access::DeferredWorldOperations,
     },
     core::{
+        compact::DEFAULT_COMPACT_THRESHOLD_BYTES,
         db::{DatabaseConnection, connection::DatabaseConnectionResource},
         session::PersistenceSession,
     },
@@ -71,7 +72,7 @@ pub struct PersistencePluginConfig {
     /// When `1`, prepare runs serially.
     pub thread_count: usize,
     pub default_store: String,
-    /// Postcard byte size above which component/resource serializers store a
+    /// MessagePack byte size above which component/resource serializers store a
     /// compact envelope instead of naive JSON. See
     /// [`crate::compact::DEFAULT_COMPACT_THRESHOLD_BYTES`].
     ///
@@ -85,7 +86,7 @@ impl Default for PersistencePluginConfig {
         Self {
             thread_count: 4,
             default_store: "default_store".to_string(),
-            compact_threshold_bytes: crate::core::compact::DEFAULT_COMPACT_THRESHOLD_BYTES,
+            compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
         }
     }
 }

@@ -10,16 +10,20 @@ mod many_relationship_edges {
     //! Tests for loading relationships via `PersistenceRelationshipHydrator`,
     //! `PersistentQuery`, and the async `schedule_load` variant.
 
-    use bevy::prelude::*;
-    use bevy_many_relationships::{ManyRelatedEntityCommands, ManyRelationshipsPlugin};
-    use bevy_persistence_database::bevy::components::Guid;
-    use bevy_persistence_database::bevy::params::query::PersistentQuery;
-    use bevy_persistence_database::core::db::DatabaseConnection;
-    use bevy_persistence_database::core::session::commit_sync;
     use std::sync::Arc;
 
-    use crate::common::*;
+    use bevy::prelude::*;
+    use bevy_many_relationships::{ManyRelatedEntityCommands, ManyRelationshipsPlugin};
+    use bevy_persistence_database::{
+        bevy::{
+            components::Guid,
+            params::{hydrator::PersistenceRelationshipHydrator, query::PersistentQuery},
+        },
+        core::{db::DatabaseConnection, session::commit_sync},
+    };
     use bevy_persistence_database_derive::db_matrix_test;
+
+    use crate::common::*;
 
     fn seed_friendship(
         db: &Arc<dyn DatabaseConnection>,
@@ -67,7 +71,7 @@ mod many_relationship_edges {
         reader_app.add_systems(
             Update,
             |query: Query<(Entity, &Health)>,
-             mut hydrator: bevy_persistence_database::bevy::params::hydrator::PersistenceRelationshipHydrator| {
+             mut hydrator: PersistenceRelationshipHydrator| {
                 hydrator.load_for_typed::<Friendship, &Health, ()>(&query, 1);
             },
         );

@@ -2,7 +2,7 @@
 
 use std::{
     any::TypeId,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
 };
 
 use bevy::prelude::{Component, Entity, Resource, World};
@@ -10,9 +10,15 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::core::compact::{from_persist_value, to_persist_value};
-use crate::core::db::connection::PersistenceError;
+use crate::core::db::connection::{EdgeDocument, PersistenceError};
 use crate::core::persist::Persist;
+use crate::core::schema::lock::trace::{SchemaFormat, trace_type};
+use crate::core::schema::metadata::SCHEMA_DOCUMENT_KEY;
 use crate::core::versioning::version_manager::VersionKey;
+
+pub(crate) type SchemaTracer =
+    Box<dyn Fn() -> Result<SchemaFormat, String> + Send + Sync>;
+pub(crate) type SchemaValidator = Box<dyn Fn(&Value) -> Result<(), String> + Send + Sync>;
 
 use super::PersistenceSession;
 
@@ -39,7 +45,7 @@ pub(super) type RelationshipSerializer = Box<
             &PersistenceSession,
             &HashMap<Entity, String>,
             &HashSet<Entity>,
-        ) -> Result<Vec<crate::core::db::connection::EdgeDocument>, PersistenceError>
+        ) -> Result<Vec<EdgeDocument>, PersistenceError>
         + Send
         + Sync,
 >;
@@ -56,6 +62,9 @@ pub(super) struct ComponentRegistry {
     pub(super) deserializers: HashMap<String, ComponentDeserializer>,
     pub(super) type_id_to_name: HashMap<TypeId, &'static str>,
     pub(super) name_to_type_id: HashMap<String, TypeId>,
+    name_owners: HashMap<String, (TypeId, &'static str)>,
+    pub(crate) tracers: HashMap<String, SchemaTracer>,
+    pub(crate) validators: HashMap<String, SchemaValidator>,
     pub(super) presence: HashMap<String, Box<dyn Fn(&World, Entity) -> bool + Send + Sync>>,
 }
 
@@ -65,6 +74,9 @@ pub(super) struct ResourceRegistry {
     pub(super) deserializers: HashMap<String, ResourceDeserializer>,
     pub(super) name_to_type_id: HashMap<String, TypeId>,
     pub(super) type_id_to_name: HashMap<TypeId, &'static str>,
+    name_owners: HashMap<String, (TypeId, &'static str)>,
+    pub(crate) tracers: HashMap<String, SchemaTracer>,
+    pub(crate) validators: HashMap<String, SchemaValidator>,
     pub(super) removers: HashMap<TypeId, ResourceRemover>,
     pub(super) presence: HashMap<TypeId, Box<dyn Fn(&World) -> bool + Send + Sync>>,
     pub(super) last_seen_present: HashMap<TypeId, bool>,
@@ -80,19 +92,72 @@ pub(super) struct RelationshipRegistry {
     pub(super) name_to_type_id: HashMap<String, TypeId>,
     /// Maps TypeId → relationship type name.
     pub(super) type_id_to_name: HashMap<TypeId, &'static str>,
+    name_owners: HashMap<String, (TypeId, &'static str)>,
+    pub(crate) payload_tracers: HashMap<String, SchemaTracer>,
+    pub(crate) payload_validators: HashMap<String, SchemaValidator>,
+}
+
+fn claim_storage_name(
+    owners: &mut HashMap<String, (TypeId, &'static str)>,
+    type_id_to_name: &mut HashMap<TypeId, &'static str>,
+    name_to_type_id: &mut HashMap<String, TypeId>,
+    type_id: TypeId,
+    storage_name: &'static str,
+    rust_name: &'static str,
+) {
+    if storage_name == SCHEMA_DOCUMENT_KEY {
+        panic!(
+            "storage name `{storage_name}` is reserved by bevy_persistence_database"
+        );
+    }
+    if let Some((owner_id, owner_name)) = owners.get(storage_name) {
+        if *owner_id != type_id {
+            panic!(
+                "storage name `{storage_name}` is already registered for `{owner_name}`; `{rust_name}` cannot use it"
+            );
+        }
+    }
+    owners.insert(storage_name.to_string(), (type_id, rust_name));
+    type_id_to_name.insert(type_id, storage_name);
+    name_to_type_id.insert(storage_name.to_string(), type_id);
 }
 
 impl ComponentRegistry {
-    fn insert_name_maps(&mut self, type_id: TypeId, name: &'static str) {
-        self.type_id_to_name.insert(type_id, name);
-        self.name_to_type_id.insert(name.to_string(), type_id);
+    fn insert_name_maps(&mut self, type_id: TypeId, name: &'static str, rust_name: &'static str) {
+        claim_storage_name(
+            &mut self.name_owners,
+            &mut self.type_id_to_name,
+            &mut self.name_to_type_id,
+            type_id,
+            name,
+            rust_name,
+        );
     }
 }
 
 impl ResourceRegistry {
-    fn insert_name_maps(&mut self, type_id: TypeId, name: &'static str) {
-        self.type_id_to_name.insert(type_id, name);
-        self.name_to_type_id.insert(name.to_string(), type_id);
+    fn insert_name_maps(&mut self, type_id: TypeId, name: &'static str, rust_name: &'static str) {
+        claim_storage_name(
+            &mut self.name_owners,
+            &mut self.type_id_to_name,
+            &mut self.name_to_type_id,
+            type_id,
+            name,
+            rust_name,
+        );
+    }
+}
+
+impl RelationshipRegistry {
+    fn insert_name_maps(&mut self, type_id: TypeId, name: &'static str, rust_name: &'static str) {
+        claim_storage_name(
+            &mut self.name_owners,
+            &mut self.type_id_to_name,
+            &mut self.name_to_type_id,
+            type_id,
+            name,
+            rust_name,
+        );
     }
 }
 
@@ -113,7 +178,8 @@ impl PersistenceSession {
     ) {
         let ser_key = name;
         let type_id = TypeId::of::<T>();
-        self.components.insert_name_maps(type_id, ser_key);
+        self.components
+            .insert_name_maps(type_id, ser_key, std::any::type_name::<T>());
         self.components.presence.insert(
             ser_key.to_string(),
             Box::new(|world: &World, entity: Entity| world.entity(entity).contains::<T>()),
@@ -144,6 +210,18 @@ impl PersistenceSession {
                 Ok(())
             }),
         );
+        self.components.tracers.insert(
+            name.to_string(),
+            Box::new(|| trace_type::<T>()),
+        );
+        self.components.validators.insert(
+            name.to_string(),
+            Box::new(|value| {
+                from_persist_value::<T>(value.clone())
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+        );
     }
 
     /// Registers a resource type for persistence.
@@ -166,7 +244,8 @@ impl PersistenceSession {
     ) {
         let ser_key = name;
         let type_id = std::any::TypeId::of::<R>();
-        self.resources.insert_name_maps(type_id, ser_key);
+        self.resources
+            .insert_name_maps(type_id, ser_key, std::any::type_name::<R>());
         self.resources.presence.insert(
             type_id,
             Box::new(|world: &World| world.get_resource::<R>().is_some()),
@@ -203,6 +282,17 @@ impl PersistenceSession {
                 world.remove_resource::<R>();
             }),
         );
+        self.resources
+            .tracers
+            .insert(name.to_string(), Box::new(|| trace_type::<R>()));
+        self.resources.validators.insert(
+            name.to_string(),
+            Box::new(|value| {
+                from_persist_value::<R>(value.clone())
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            }),
+        );
     }
 
     /// Register a relationship type for edge persistence.
@@ -211,12 +301,11 @@ impl PersistenceSession {
         &mut self,
         type_id: TypeId,
         name: &'static str,
+        rust_name: &'static str,
         serializer: RelationshipSerializer,
     ) {
-        self.relationships.type_id_to_name.insert(type_id, name);
         self.relationships
-            .name_to_type_id
-            .insert(name.to_string(), type_id);
+            .insert_name_maps(type_id, name, rust_name);
         self.relationships.serializers.insert(type_id, serializer);
     }
 
@@ -230,11 +319,11 @@ impl PersistenceSession {
         &mut self,
         name: &'static str,
     ) {
-        use crate::core::db::connection::EdgeDocument;
         let type_id = TypeId::of::<R>();
         self.register_relationship(
             type_id,
             name,
+            std::any::type_name::<R>(),
             Box::new(
                 move |world,
                       session,
@@ -314,11 +403,11 @@ impl PersistenceSession {
         &mut self,
         name: &'static str,
     ) {
-        use crate::core::db::connection::EdgeDocument;
         let type_id = TypeId::of::<R>();
         self.register_relationship(
             type_id,
             name,
+            std::any::type_name::<R>(),
             Box::new(
                 move |world,
                       session,
@@ -393,6 +482,18 @@ impl PersistenceSession {
                 }
 
                 Ok(())
+            }),
+        );
+        self.relationships.payload_tracers.insert(
+            name.to_string(),
+            Box::new(|| trace_type::<R>()),
+        );
+        self.relationships.payload_validators.insert(
+            name.to_string(),
+            Box::new(|value| {
+                serde_json::from_value::<R>(value.clone())
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
             }),
         );
     }
@@ -481,4 +582,56 @@ impl PersistenceSession {
         }
         Ok(())
     }
+
+    pub(crate) fn component_validator(&self, name: &str) -> Option<&SchemaValidator> {
+        self.components.validators.get(name)
+    }
+
+    pub(crate) fn resource_validator(&self, name: &str) -> Option<&SchemaValidator> {
+        self.resources.validators.get(name)
+    }
+
+    pub(crate) fn relationship_names(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.relationships.type_id_to_name.values().copied()
+    }
+
+    pub(crate) fn relationship_payload_tracer(&self, name: &str) -> Option<&SchemaTracer> {
+        self.relationships.payload_tracers.get(name)
+    }
+
+    pub(crate) fn relationship_payload_validator(&self, name: &str) -> Option<&SchemaValidator> {
+        self.relationships.payload_validators.get(name)
+    }
+
+    pub(crate) fn traced_components(&self) -> Result<BTreeMap<String, SchemaFormat>, String> {
+        trace_registered(&self.components.tracers)
+    }
+
+    pub(crate) fn traced_resources(&self) -> Result<BTreeMap<String, SchemaFormat>, String> {
+        trace_registered(&self.resources.tracers)
+    }
+
+    pub(crate) fn traced_relationship_payloads(
+        &self,
+    ) -> Result<BTreeMap<String, Option<SchemaFormat>>, String> {
+        let mut payloads = BTreeMap::new();
+        for name in self.relationship_names() {
+            let payload = match self.relationship_payload_tracer(name) {
+                Some(tracer) => Some(tracer()?),
+                None => None,
+            };
+            payloads.insert(name.to_string(), payload);
+        }
+        Ok(payloads)
+    }
+}
+
+fn trace_registered(
+    tracers: &HashMap<String, SchemaTracer>,
+) -> Result<BTreeMap<String, SchemaFormat>, String> {
+    let mut formats = BTreeMap::new();
+    for (name, tracer) in tracers {
+        formats.insert(name.clone(), tracer()?);
+    }
+    Ok(formats)
 }

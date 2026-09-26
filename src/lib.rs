@@ -15,9 +15,17 @@ pub use crate::bevy::registration::{
 pub use crate::bevy::spawn::{PersistSpawnCommandsExt, PersistSpawnWorldExt};
 
 /// Compact encoding helpers. Session serializers apply these automatically when
-/// postcard size exceeds [`PersistencePluginConfig::compact_threshold_bytes`].
+/// MessagePack size exceeds [`PersistencePluginConfig::compact_threshold_bytes`].
 /// Manual `serde(with)` / [`compact::CompactJson`] remain available as force-compact.
 pub use crate::core::compact;
+
+pub use crate::bevy::schema::{check_schema_lock, migrate_world};
+pub use crate::core::schema::{
+    error::MigrationError,
+    history::{MigrationStep, SchemaHistory},
+    runner::{MigrateOptions, MigrationMode, MigrationReport, migrate_store},
+    snapshot::StoreSnapshot,
+};
 
 pub mod bevy;
 pub mod core;

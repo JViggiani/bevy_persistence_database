@@ -9,10 +9,16 @@ use bevy::prelude::{Entity, World};
 use bevy_persistence_database_derive::persist;
 use serde_json::json;
 
-use crate::bevy::components::Guid;
-use crate::core::db::connection::{DocumentKind, EdgeDocument, TransactionOperation};
-use crate::core::persist::Persist;
-use crate::core::versioning::version_manager::VersionKey;
+use crate::{
+    bevy::components::Guid,
+    core::{
+        compact::is_compact_envelope,
+        db::connection::{DocumentKind, EdgeDocument, TransactionOperation},
+        persist::Persist,
+        schema::metadata::SCHEMA_DOCUMENT_KEY,
+        versioning::version_manager::VersionKey,
+    },
+};
 
 use super::*;
 
@@ -36,9 +42,10 @@ struct MyComp {
 // THEN dirty and despawned sets are empty
 fn new_session_is_empty() {
     setup();
-    let session = PersistenceSession::new_mocked();
-    assert!(session.is_dirty_entity_components_empty());
-    assert!(session.is_despawned_entities_empty());
+    let mut session = PersistenceSession::new();
+    let state = session.take_dirty_state();
+    assert!(state.dirty_entity_components.is_empty());
+    assert!(state.despawned_entities.is_empty());
 }
 
 #[test]
@@ -78,7 +85,7 @@ fn deserializer_inserts_resource() {
     assert_eq!(world.resource::<MyRes>().value, 5);
 }
 
-// GIVEN a resource whose postcard size exceeds the session compact threshold
+// GIVEN a resource whose MessagePack size exceeds the session compact threshold
 // WHEN the registered serializer runs
 // THEN the stored value is a compact envelope that deserializes back
 #[test]
@@ -106,7 +113,7 @@ fn resource_serializer_compacts_when_over_threshold() {
     .unwrap()
     .expect("serialized");
 
-    assert!(crate::core::compact::is_compact_envelope(&value));
+    assert!(is_compact_envelope(&value));
 
     let mut loaded = World::new();
     session
@@ -290,8 +297,8 @@ fn prepare_commit_edge_diff_adds_new_edges() {
     session.register_relationship(
         tid,
         "TestRel",
+        std::any::type_name::<MyComp>(),
         Box::new(|_world, _session, _preassigned, _scan_sources| {
-            use crate::core::db::connection::EdgeDocument;
             Ok(vec![
                 EdgeDocument {
                     key: EdgeDocument::make_key("TestRel", "guid_a", "guid_b"),
@@ -368,6 +375,7 @@ fn prepare_commit_edge_diff_deletes_removed_edges() {
     session.register_relationship(
         tid,
         "TestRel",
+        std::any::type_name::<MyComp>(),
         Box::new(|_world, _session, _preassigned, _scan_sources| Ok(vec![])),
     );
 
@@ -415,7 +423,6 @@ fn prepare_commit_edge_diff_deletes_removed_edges() {
 // WHEN EdgeDocument::make_key is called twice
 // THEN both results are identical
 fn edge_document_make_key_is_deterministic() {
-    use crate::core::db::connection::EdgeDocument;
     let k1 = EdgeDocument::make_key("ChildOf", "aaa", "bbb");
     let k2 = EdgeDocument::make_key("ChildOf", "aaa", "bbb");
     assert_eq!(k1, k2);
@@ -435,8 +442,8 @@ fn no_edge_ops_when_relationships_not_dirty() {
     session.register_relationship(
         tid,
         "TestRel",
+        std::any::type_name::<MyComp>(),
         Box::new(|_world, _session, _preassigned, _scan_sources| {
-            use crate::core::db::connection::EdgeDocument;
             Ok(vec![EdgeDocument {
                 key: EdgeDocument::make_key("TestRel", "a", "b"),
                 relationship_type: "TestRel".to_string(),
@@ -493,9 +500,9 @@ fn unit_struct_persist_serde_roundtrip() {
 }
 
 // GIVEN a single-field #[persist(resource)] whose field type is imported by short name
-// WHEN it is serialized and deserialized (object shape and legacy bare scalar)
-// THEN the value round-trips
-//   AND the type compiles (nested serde helper mods used to break short imports)
+// WHEN it is serialized and deserialized
+// THEN the value round-trips as `{ "0": ... }`
+// AND a bare inner object without that key is rejected
 #[test]
 fn single_field_persist_accepts_short_imported_field_type() {
     mod inner {
@@ -518,8 +525,7 @@ fn single_field_persist_accepts_short_imported_field_type() {
     let back: Wrapped = serde_json::from_value(json).unwrap();
     assert_eq!(back, value);
 
-    let legacy: Wrapped = serde_json::from_value(serde_json::json!({"n": 7})).unwrap();
-    assert_eq!(legacy, value);
+    assert!(serde_json::from_value::<Wrapped>(serde_json::json!({"n": 7})).is_err());
 }
 
 /// Unit struct components should be deserializable from the persistence
@@ -552,4 +558,35 @@ fn unit_struct_component_deserializer_works() {
         world.get::<MarkerComp>(entity).is_some(),
         "MarkerComp should be present after deserialization"
     );
+}
+
+#[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
+struct NameClashA {
+    value: i32,
+}
+
+#[derive(bevy::prelude::Component, serde::Serialize, serde::Deserialize)]
+struct NameClashB {
+    value: i32,
+}
+
+// GIVEN two different component types
+// WHEN both are registered under the same storage name
+// THEN registration panics and names both Rust types
+#[test]
+#[should_panic(expected = "already registered")]
+fn duplicate_storage_name_panics() {
+    let mut session = PersistenceSession::new();
+    session.register_component_named::<NameClashA>("SharedName");
+    session.register_component_named::<NameClashB>("SharedName");
+}
+
+// GIVEN the reserved schema document key
+// WHEN a component tries to use it as its storage name
+// THEN registration panics
+#[test]
+#[should_panic(expected = "reserved")]
+fn reserved_storage_name_panics() {
+    let mut session = PersistenceSession::new();
+    session.register_component_named::<NameClashA>(SCHEMA_DOCUMENT_KEY);
 }

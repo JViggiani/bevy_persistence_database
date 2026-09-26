@@ -301,7 +301,8 @@ fn test_conflict_strategy_three_way_merge() {
             .with::<Position>()
             .filter(Guid::key_field().eq(&key))
             .fetch_into(app.world_mut()),
-    );
+    )
+    .expect("reload");
     assert_eq!(loaded.len(), 1);
     let reloaded_entity = loaded[0];
 

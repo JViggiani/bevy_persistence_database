@@ -13,7 +13,8 @@ use serde_json::Value;
 use crate::bevy::components::Guid;
 use crate::core::db::connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
-    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DocumentKind, PersistenceError, TransactionOperation,
+    BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DocumentKind, EdgeDocument, PersistenceError,
+    TransactionOperation,
 };
 use crate::core::db::shared::edge_source_guid;
 use crate::core::versioning::version_manager::VersionKey;
@@ -42,7 +43,7 @@ fn insert_meta(data: &mut serde_json::Map<String, Value>, kind: DocumentKind, ve
     );
     meta.insert(
         BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD.to_string(),
-        serde_json::json!(kind.as_str()),
+        serde_json::json!(kind.as_ref()),
     );
     data.insert(
         BEVY_PERSISTENCE_DATABASE_METADATA_FIELD.to_string(),
@@ -270,8 +271,6 @@ impl PersistenceSession {
         let mut new_edge_snapshot: HashSet<String> = session.cache.edge_snapshot.clone();
 
         if has_relationships && has_dirty_rels {
-            use crate::core::db::connection::EdgeDocument;
-
             let mut scan_sources: HashSet<Entity> =
                 dirty_relationship_entities.iter().copied().collect();
             scan_sources.extend(despawned_entities.iter().copied());

@@ -3,6 +3,8 @@
 use bevy::prelude::Component;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::core::query::FilterExpression;
+
 /// A globally-unique identifier for an entity, used to link the Bevy `Entity`
 /// to its corresponding document in the database. This is typically the document key.
 /// The inner value is private to prevent manual modification.
@@ -48,7 +50,7 @@ impl Guid {
     }
 
     /// Creates a value-expression for the document key field
-    pub fn key_field() -> crate::core::query::FilterExpression {
-        crate::core::query::FilterExpression::DocumentKey
+    pub fn key_field() -> FilterExpression {
+        FilterExpression::DocumentKey
     }
 }

@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::core::persist::Persist;
 use crate::core::session::PersistenceSession;
 use bevy::prelude::*;
 use std::any::TypeId;
@@ -94,9 +92,13 @@ pub fn auto_dirty_tracking_relationship_system<R: Send + Sync + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde::{Deserialize, Serialize};
     use serde_json::json;
+
+    use crate::core::persist::Persist;
+
+    use super::super::{ecs_plumbing::finish_hydration, plugin::PersistenceSystemSet};
+    use super::*;
 
     #[derive(Component, Debug, Clone, PartialEq, Serialize, Deserialize)]
     struct TestHealth {
@@ -107,6 +109,19 @@ mod tests {
         fn name() -> &'static str {
             "TestHealth"
         }
+    }
+
+    fn entity_component_dirty(session: &mut PersistenceSession, entity: Entity) -> bool {
+        let state = session.take_dirty_state();
+        let dirty = state.dirty_entity_components.contains_key(&entity);
+        session.restore_dirty_state(state);
+        dirty
+    }
+
+    fn clear_entity_component_dirty(session: &mut PersistenceSession) {
+        let mut state = session.take_dirty_state();
+        state.dirty_entity_components.clear();
+        session.restore_dirty_state(state);
     }
 
     #[test]
@@ -124,7 +139,7 @@ mod tests {
 
         {
             let mut session = app.world_mut().resource_mut::<PersistenceSession>();
-            session.clear_dirty_entity_components();
+            clear_entity_component_dirty(&mut session);
         }
 
         {
@@ -135,9 +150,9 @@ mod tests {
         app.update();
 
         {
-            let session = app.world().resource::<PersistenceSession>();
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
             assert!(
-                !session.is_entity_dirty(entity),
+                !entity_component_dirty(&mut session, entity),
                 "Entity was incorrectly marked dirty after read-only access"
             );
         }
@@ -150,9 +165,9 @@ mod tests {
         app.update();
 
         {
-            let session = app.world().resource::<PersistenceSession>();
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
             assert!(
-                session.is_entity_dirty(entity),
+                entity_component_dirty(&mut session, entity),
                 "Entity should be marked dirty after modification"
             );
         }
@@ -160,9 +175,6 @@ mod tests {
 
     #[test]
     fn hydration_scope_suppresses_added_dirt() {
-        use super::super::ecs_plumbing::finish_hydration;
-        use super::super::plugin::PersistenceSystemSet;
-
         let mut app = App::new();
         app.add_plugins(bevy::prelude::MinimalPlugins);
         app.configure_sets(
@@ -198,13 +210,15 @@ mod tests {
 
         app.update();
 
-        let session = app.world().resource::<PersistenceSession>();
+        {
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
+            assert!(
+                !entity_component_dirty(&mut session, entity),
+                "components inserted under hydration scope must not mark dirty"
+            );
+        }
         assert!(
-            !session.is_entity_dirty(entity),
-            "components inserted under hydration scope must not mark dirty"
-        );
-        assert!(
-            !session.is_hydrating(),
+            !app.world().resource::<PersistenceSession>().is_hydrating(),
             "hydration scope should end after finish_hydration"
         );
     }
@@ -233,9 +247,9 @@ mod tests {
         app.update();
 
         {
-            let session = app.world().resource::<PersistenceSession>();
+            let mut session = app.world_mut().resource_mut::<PersistenceSession>();
             assert!(
-                session.is_entity_dirty(entity),
+                entity_component_dirty(&mut session, entity),
                 "post-load user mutation must mark dirty"
             );
         }

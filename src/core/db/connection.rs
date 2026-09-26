@@ -4,6 +4,7 @@ use crate::core::query::{EdgeQuerySpecification, PersistenceQuerySpecification};
 use bevy::prelude::Resource;
 use futures::future::BoxFuture;
 use serde_json::Value;
+use strum::{AsRefStr, EnumIter, EnumString};
 use std::fmt;
 use std::sync::Arc;
 
@@ -17,27 +18,71 @@ pub const BEVY_PERSISTENCE_DATABASE_VERSION_FIELD: &str = "bevy_persistence_vers
 pub const BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: &str = "bevy_type";
 
 /// Logical discriminator for persisted documents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// Declaration order is the transaction order: entities, then resources, then
+/// the schema document. Stored text is the snake_case variant name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, EnumIter, EnumString, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum DocumentKind {
     Entity,
     Resource,
+    /// Library-owned schema document. Not a component or a resource.
+    Schema,
 }
 
-impl DocumentKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            DocumentKind::Entity => "entity",
-            DocumentKind::Resource => "resource",
-        }
-    }
+/// One document read back from a store, with backend system fields removed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredDocument {
+    pub kind: DocumentKind,
+    pub key: String,
+    /// Optimistic-concurrency version stored beside the document.
+    pub version: u64,
+    /// Component fields, resource body, or schema body. Metadata is not included.
+    pub body: Value,
+}
 
-    pub fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "entity" => Some(DocumentKind::Entity),
-            "resource" => Some(DocumentKind::Resource),
-            _ => None,
-        }
-    }
+/// A whole store: documents of every kind, plus relationship edges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoreContents {
+    pub documents: Vec<StoredDocument>,
+    pub edges: Vec<EdgeDocument>,
+}
+
+/// Build a [`StoredDocument`] from a backend JSON document.
+///
+/// `key_field` is `_key` on Arango and `id` on Postgres. System fields (`_id`,
+/// `_rev`, `_key`) and the persistence metadata object are removed from `body`.
+pub fn normalize_stored_document(
+    doc: &Value,
+    key_field: &str,
+) -> Result<StoredDocument, PersistenceError> {
+    let key = doc
+        .get(key_field)
+        .and_then(Value::as_str)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| PersistenceError::new(format!("document is missing key `{key_field}`")))?
+        .to_string();
+    let kind = read_kind(doc).ok_or_else(|| {
+        PersistenceError::new(format!("document `{key}` is missing a document kind"))
+    })?;
+    let version = read_version(doc).ok_or_else(|| {
+        PersistenceError::new(format!("document `{key}` is missing an optimistic-concurrency version"))
+    })?;
+    let mut body = doc
+        .as_object()
+        .cloned()
+        .ok_or_else(|| PersistenceError::new(format!("document `{key}` is not a JSON object")))?;
+    body.remove(key_field);
+    body.remove(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD);
+    body.remove("_key");
+    body.remove("_id");
+    body.remove("_rev");
+    Ok(StoredDocument {
+        kind,
+        key,
+        version,
+        body: Value::Object(body),
+    })
 }
 
 pub fn read_version(doc: &Value) -> Option<u64> {
@@ -50,7 +95,7 @@ pub fn read_kind(doc: &Value) -> Option<DocumentKind> {
     doc.get(BEVY_PERSISTENCE_DATABASE_METADATA_FIELD)
         .and_then(|meta| meta.get(BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD))
         .and_then(Value::as_str)
-        .and_then(DocumentKind::from_str)
+        .and_then(|value| value.parse().ok())
 }
 
 /// An error type for database operations.
@@ -101,6 +146,15 @@ pub enum TransactionOperation {
         key: String,
         expected_current_version: u64,
     },
+    /// Replace the whole document. Nested keys absent from `document` are removed
+    /// on both backends. `document` includes persistence metadata for the next version.
+    ReplaceDocument {
+        store: String,
+        kind: DocumentKind,
+        key: String,
+        expected_current_version: u64,
+        document: Value,
+    },
     /// Upsert a batch of edge documents into `{store}__edges`.
     /// Each edge has a deterministic key `{relationship_type}:{from_guid}:{to_guid}`.
     UpsertEdges {
@@ -112,7 +166,7 @@ pub enum TransactionOperation {
 }
 
 /// A single edge document for relationship persistence.
-#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, PartialEq)]
 pub struct EdgeDocument {
     /// Deterministic key: `{relationship_type}:{from_guid}:{to_guid}`
     pub key: String,
@@ -141,6 +195,7 @@ impl TransactionOperation {
             TransactionOperation::CreateDocument { store, .. }
             | TransactionOperation::UpdateDocument { store, .. }
             | TransactionOperation::DeleteDocument { store, .. }
+            | TransactionOperation::ReplaceDocument { store, .. }
             | TransactionOperation::UpsertEdges { store, .. }
             | TransactionOperation::DeleteEdges { store, .. } => store,
         }
@@ -208,6 +263,15 @@ pub trait DatabaseConnection: Send + Sync + std::fmt::Debug {
         store: &str,
         kind: DocumentKind,
     ) -> BoxFuture<'static, Result<(), PersistenceError>>;
+
+    /// Read every document and every relationship edge in `store`.
+    ///
+    /// Documents are normalized: backend system fields and persistence metadata are
+    /// removed from [`StoredDocument::body`]. An empty store returns empty lists.
+    fn read_store(
+        &self,
+        store: &str,
+    ) -> BoxFuture<'static, Result<StoreContents, PersistenceError>>;
 
     /// Count documents matching a specification without fetching them
     fn count_documents(

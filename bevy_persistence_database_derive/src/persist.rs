@@ -241,10 +241,7 @@ fn is_single_field_struct(s: &syn::ItemStruct) -> bool {
     }
 }
 
-/// Single-field persisted types always serialize as `{ "field": value }` so adding
-/// more fields later does not flip the on-disk shape from scalar to object.
-/// Deserialization also accepts the legacy bare scalar produced by the old
-/// `#[serde(transparent)]` representation for backward compatibility.
+/// Single-field persisted types serialize and deserialize as `{ "field": value }`.
 ///
 /// Serde impls are emitted in the **enclosing module** (not a nested `mod`). Nested
 /// helpers broke short field-type paths like `use foo::Bar; struct Wrap(pub Bar);`
@@ -274,6 +271,7 @@ fn single_field_serde_tokens(s: &syn::ItemStruct) -> Option<proc_macro2::TokenSt
 
     let struct_ident = &s.ident;
     let field_name_lit = syn::LitStr::new(&field_name, proc_macro2::Span::call_site());
+    let struct_name_lit = syn::LitStr::new(&struct_ident.to_string(), proc_macro2::Span::call_site());
 
     Some(quote! {
         impl ::serde::Serialize for #struct_ident {
@@ -293,36 +291,17 @@ fn single_field_serde_tokens(s: &syn::ItemStruct) -> Option<proc_macro2::TokenSt
             where
                 D: ::serde::Deserializer<'de>,
             {
-                use ::serde::de::Error as _;
                 use ::serde::Deserialize;
 
-                // Compact / postcard (and other non-JSON) backends are not human-readable
-                // and cannot round-trip through `serde_json::Value`. Use a normal struct
-                // shape there. JSON keeps the legacy bare-scalar / object dual path.
-                if !deserializer.is_human_readable() {
-                    #[derive(Deserialize)]
-                    struct __PersistHelper {
-                        #[serde(rename = #field_name_lit)]
-                        value: #field_ty,
-                    }
-                    let helper = __PersistHelper::deserialize(deserializer)?;
-                    return Ok(#struct_ident {
-                        #field_ident: helper.value,
-                    });
+                #[derive(Deserialize)]
+                #[serde(rename = #struct_name_lit)]
+                struct __PersistHelper {
+                    #[serde(rename = #field_name_lit)]
+                    value: #field_ty,
                 }
-
-                let raw = ::serde_json::Value::deserialize(deserializer)?;
-                let inner = if let Some(obj) = raw.as_object() {
-                    obj.get(#field_name_lit)
-                        .cloned()
-                        .unwrap_or(raw)
-                } else {
-                    raw
-                };
-                let field_value: #field_ty =
-                    ::serde_json::from_value(inner).map_err(D::Error::custom)?;
+                let helper = __PersistHelper::deserialize(deserializer)?;
                 Ok(#struct_ident {
-                    #field_ident: field_value,
+                    #field_ident: helper.value,
                 })
             }
         }

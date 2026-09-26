@@ -1,5 +1,7 @@
 //! Shared utilities for database connection implementations
 
+use strum::IntoEnumIterator;
+
 use crate::core::db::connection::{
     DocumentKind, EdgeDocument, PersistenceError, TransactionOperation,
 };
@@ -64,13 +66,26 @@ pub fn edge_source_guid(key: &str) -> Option<&str> {
     parts.next()
 }
 
-/// Document CRUD operations for a single document kind (entity or resource).
+/// Document CRUD operations for a single document kind.
 pub struct DocumentOperations {
     pub creates: Vec<Value>,
     /// `{ key_field: key, "expected": version, "patch": patch }`
     pub updates: Vec<Value>,
+    /// `{ key_field: key, "expected": version, "document": document }`
+    pub replaces: Vec<Value>,
     /// `{ key_field: key, "expected": version }`
     pub deletes: Vec<Value>,
+}
+
+impl DocumentOperations {
+    fn empty() -> Self {
+        Self {
+            creates: Vec::new(),
+            updates: Vec::new(),
+            replaces: Vec::new(),
+            deletes: Vec::new(),
+        }
+    }
 }
 
 /// Edge upserts and deletes extracted from a transaction's operations.
@@ -81,35 +96,40 @@ pub struct EdgeOperations {
 
 /// Transaction operations grouped by kind so each database backend can process
 /// them in whatever order / batching strategy it needs.
+///
+/// `kinds` follows [`DocumentKind`] declaration order, so a backend loop
+/// applies entities, then resources, then the schema document.
 pub struct GroupedOperations {
-    pub entities: DocumentOperations,
-    pub resources: DocumentOperations,
+    pub kinds: Vec<(DocumentKind, DocumentOperations)>,
     pub edges: EdgeOperations,
 }
 
 impl GroupedOperations {
     pub fn from_operations(operations: Vec<TransactionOperation>, key_field: &str) -> Self {
-        let mut entities = DocumentOperations {
-            creates: Vec::new(),
-            updates: Vec::new(),
-            deletes: Vec::new(),
-        };
-        let mut resources = DocumentOperations {
-            creates: Vec::new(),
-            updates: Vec::new(),
-            deletes: Vec::new(),
-        };
+        let mut kinds: Vec<(DocumentKind, DocumentOperations)> = DocumentKind::iter()
+            .map(|kind| (kind, DocumentOperations::empty()))
+            .collect();
         let mut edge_ops = EdgeOperations {
             upserts: Vec::new(),
             deletes: Vec::new(),
         };
 
+        fn ops_for(
+            kinds: &mut Vec<(DocumentKind, DocumentOperations)>,
+            kind: DocumentKind,
+        ) -> &mut DocumentOperations {
+            kinds
+                .iter_mut()
+                .find(|(candidate, _)| *candidate == kind)
+                .map(|(_, ops)| ops)
+                .expect("every document kind is seeded")
+        }
+
         for op in operations {
             match op {
-                TransactionOperation::CreateDocument { kind, data, .. } => match kind {
-                    DocumentKind::Entity => entities.creates.push(data),
-                    DocumentKind::Resource => resources.creates.push(data),
-                },
+                TransactionOperation::CreateDocument { kind, data, .. } => {
+                    ops_for(&mut kinds, kind).creates.push(data);
+                }
                 TransactionOperation::UpdateDocument {
                     kind,
                     key,
@@ -117,15 +137,24 @@ impl GroupedOperations {
                     patch,
                     ..
                 } => {
-                    let obj = serde_json::json!({
+                    ops_for(&mut kinds, kind).updates.push(serde_json::json!({
                         key_field: key,
                         "expected": expected_current_version,
                         "patch": patch
-                    });
-                    match kind {
-                        DocumentKind::Entity => entities.updates.push(obj),
-                        DocumentKind::Resource => resources.updates.push(obj),
-                    }
+                    }));
+                }
+                TransactionOperation::ReplaceDocument {
+                    kind,
+                    key,
+                    expected_current_version,
+                    document,
+                    ..
+                } => {
+                    ops_for(&mut kinds, kind).replaces.push(serde_json::json!({
+                        key_field: key,
+                        "expected": expected_current_version,
+                        "document": document
+                    }));
                 }
                 TransactionOperation::DeleteDocument {
                     kind,
@@ -133,14 +162,10 @@ impl GroupedOperations {
                     expected_current_version,
                     ..
                 } => {
-                    let obj = serde_json::json!({
+                    ops_for(&mut kinds, kind).deletes.push(serde_json::json!({
                         key_field: key,
                         "expected": expected_current_version,
-                    });
-                    match kind {
-                        DocumentKind::Entity => entities.deletes.push(obj),
-                        DocumentKind::Resource => resources.deletes.push(obj),
-                    }
+                    }));
                 }
                 TransactionOperation::UpsertEdges { edges, .. } => {
                     edge_ops.upserts.extend(edges);
@@ -152,8 +177,7 @@ impl GroupedOperations {
         }
 
         Self {
-            entities,
-            resources,
+            kinds,
             edges: edge_ops,
         }
     }

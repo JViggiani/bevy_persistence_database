@@ -8,7 +8,8 @@ pub(crate) mod shared;
 pub use connection::{
     BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD, BEVY_PERSISTENCE_DATABASE_METADATA_FIELD,
     BEVY_PERSISTENCE_DATABASE_VERSION_FIELD, DatabaseConnection, DocumentKind, PersistenceError,
-    TransactionOperation, read_kind, read_version,
+    StoreContents, StoredDocument, TransactionOperation, normalize_stored_document, read_kind,
+    read_version,
 };
 
 #[cfg(feature = "arango")]

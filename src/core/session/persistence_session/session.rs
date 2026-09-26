@@ -2,6 +2,8 @@
 
 use bevy::prelude::Resource;
 
+use crate::core::compact::DEFAULT_COMPACT_THRESHOLD_BYTES;
+
 use super::{
     cache::PersistenceCache,
     registries::{ComponentRegistry, RelationshipRegistry, ResourceRegistry},
@@ -23,17 +25,11 @@ pub struct PersistenceSession {
     /// [`Self::finish_all_hydration`] in PostUpdate after dirty tracking. While depth is
     /// non-zero, ECS change-detection entry points suppress spurious dirty flags.
     pub(super) hydration_depth: u32,
-    /// Postcard-size threshold for automatic compact encoding (copied from plugin config).
+    /// MessagePack-size threshold for automatic compact encoding (copied from plugin config).
     pub(super) compact_threshold_bytes: usize,
 }
 
 impl PersistenceSession {
-    /// Testing constructor w/ mock DB.
-    #[cfg(test)]
-    pub fn new_mocked() -> Self {
-        Self::new()
-    }
-
     /// Create a new session.
     pub fn new() -> Self {
         Self {
@@ -43,17 +39,17 @@ impl PersistenceSession {
             relationships: RelationshipRegistry::default(),
             cache: PersistenceCache::default(),
             hydration_depth: 0,
-            compact_threshold_bytes: crate::core::compact::DEFAULT_COMPACT_THRESHOLD_BYTES,
+            compact_threshold_bytes: DEFAULT_COMPACT_THRESHOLD_BYTES,
         }
     }
 
-    /// Override the postcard-size threshold used by component/resource serializers.
+    /// Override the MessagePack-size threshold used by component/resource serializers.
     pub fn with_compact_threshold(mut self, bytes: usize) -> Self {
         self.compact_threshold_bytes = bytes;
         self
     }
 
-    /// Postcard-size threshold for automatic compact encoding.
+    /// MessagePack-size threshold for automatic compact encoding.
     pub fn compact_threshold_bytes(&self) -> usize {
         self.compact_threshold_bytes
     }

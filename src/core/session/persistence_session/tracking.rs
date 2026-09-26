@@ -20,11 +20,11 @@ pub(super) struct ChangeTracking {
 }
 
 pub(crate) struct DirtyState {
-    pub(super) dirty_entity_components: HashMap<Entity, HashSet<TypeId>>,
-    pub(super) despawned_entities: HashSet<Entity>,
-    pub(super) dirty_resources: HashSet<TypeId>,
-    pub(super) despawned_resources: HashSet<TypeId>,
-    pub(super) dirty_relationship_entities: HashSet<Entity>,
+    pub(crate) dirty_entity_components: HashMap<Entity, HashSet<TypeId>>,
+    pub(crate) despawned_entities: HashSet<Entity>,
+    pub(crate) dirty_resources: HashSet<TypeId>,
+    pub(crate) despawned_resources: HashSet<TypeId>,
+    pub(crate) dirty_relationship_entities: HashSet<Entity>,
 }
 
 impl DirtyState {
@@ -159,29 +159,5 @@ impl PersistenceSession {
         self.tracking
             .dirty_relationship_entities
             .extend(state.dirty_relationship_entities);
-    }
-    #[cfg(test)]
-    pub(crate) fn clear_dirty_entity_components(&mut self) {
-        self.tracking.dirty_entity_components.clear();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_entity_dirty(&self, entity: Entity) -> bool {
-        self.tracking.dirty_entity_components.contains_key(&entity)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_dirty_entity_components_empty(&self) -> bool {
-        self.tracking.dirty_entity_components.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_despawned_entities_empty(&self) -> bool {
-        self.tracking.despawned_entities.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_resource_dirty(&self, type_id: TypeId) -> bool {
-        self.tracking.dirty_resources.contains(&type_id)
     }
 }

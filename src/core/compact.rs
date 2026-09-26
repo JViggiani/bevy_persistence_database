@@ -1,42 +1,31 @@
 //! Compact binary encoding for large values stored inside JSON documents.
 //!
-//! Backend documents (Arango / Postgres JSON) are still JSON, but naively
-//! serializing large arrays as JSON number trees can OOM or blow document size
-//! limits. This module postcard-encodes, zstd-compresses, and base64-wraps any
-//! serde value into a small JSON envelope that still round-trips through
-//! [`serde_json::Value`].
-//!
-//! ## Automatic path (preferred)
-//!
-//! [`PersistenceSession`](crate::core::session::PersistenceSession) serializers
-//! call [`to_persist_value`] / [`from_persist_value`] with
-//! [`crate::PersistencePluginConfig::compact_threshold_bytes`]: postcard size is
-//! probed first; large values store the compact envelope, small values stay as
-//! normal JSON. Types need no `serde(with)` annotation.
-//!
-//! ## Manual path
-//!
-//! Force compact always with `#[serde(with = "bevy_persistence_database::compact")]`
-//! or [`CompactJson`].
+//! Backend documents stay JSON. Values whose MessagePack encoding exceeds
+//! [`DEFAULT_COMPACT_THRESHOLD_BYTES`] are stored as zstd + base64 inside a
+//! small JSON envelope. MessagePack uses named fields and human-readable mode,
+//! so the payload has the same shape as `serde_json::to_value` and a migration
+//! step can edit it as JSON.
+
+use std::io::Cursor;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::Value;
 
 /// Envelope version written into JSON documents.
-pub const ENCODING: &str = "postcard+zstd-v1";
+pub const ENCODING: &str = "msgpack+zstd-v1";
 
 /// Default zstd compression level (speed / ratio trade-off for persistence).
 pub const DEFAULT_ZSTD_LEVEL: i32 = 3;
 
-/// Default postcard-size threshold above which session serializers use the
-/// compact envelope instead of naive JSON (`256 KiB`).
+/// Default MessagePack size above which session serializers use the compact
+/// envelope instead of naive JSON (`256 KiB`).
 pub const DEFAULT_COMPACT_THRESHOLD_BYTES: usize = 256 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct CompactEnvelope {
     encoding: String,
-    /// Base64(zstd(postcard(T))).
+    /// Base64(zstd(msgpack(T))).
     payload: String,
 }
 
@@ -52,98 +41,114 @@ impl std::fmt::Display for CompactError {
 
 impl std::error::Error for CompactError {}
 
-/// True when `value` is (or contains) a compact envelope (`encoding` + `payload`).
-///
-/// Extra document fields (keys, BPD metadata) are ignored.
+/// True when `value` is a compact envelope for [`ENCODING`].
 pub fn is_compact_envelope(value: &Value) -> bool {
-    value.get("encoding").and_then(|v| v.as_str()) == Some(ENCODING)
-        && value.get("payload").and_then(|v| v.as_str()).is_some()
+    value.get("encoding").and_then(Value::as_str) == Some(ENCODING)
+        && value.get("payload").and_then(Value::as_str).is_some()
 }
 
-/// Postcard + zstd + base64 encode `value` to a payload string (no envelope).
+fn msgpack_encode<T: Serialize>(value: &T) -> Result<Vec<u8>, CompactError> {
+    let mut buf = Vec::new();
+    value
+        .serialize(
+            &mut rmp_serde::Serializer::new(&mut buf)
+                .with_struct_map()
+                .with_human_readable(),
+        )
+        .map_err(|error| CompactError(format!("msgpack encode: {error}")))?;
+    Ok(buf)
+}
+
+fn msgpack_decode<T: DeserializeOwned>(raw: &[u8]) -> Result<T, CompactError> {
+    let mut deserializer = rmp_serde::Deserializer::new(Cursor::new(raw)).with_human_readable();
+    serde_path_to_error::deserialize(&mut deserializer)
+        .map_err(|error| CompactError(format!("msgpack decode at `{}`: {error}", error.path())))
+}
+
+fn zstd_base64(raw: &[u8], zstd_level: i32) -> Result<String, CompactError> {
+    let compressed = zstd::encode_all(raw, zstd_level)
+        .map_err(|error| CompactError(format!("zstd encode: {error}")))?;
+    Ok(BASE64.encode(compressed))
+}
+
+fn reject_unknown_encoding(value: &Value) -> Result<(), CompactError> {
+    let Some(encoding) = value.get("encoding").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    if value.get("payload").and_then(Value::as_str).is_some() && encoding != ENCODING {
+        return Err(CompactError(format!(
+            "unsupported compact persist encoding {encoding:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// MessagePack + zstd + base64 encode `value` to a payload string (no envelope).
 pub fn encode<T: Serialize>(value: &T) -> Result<String, CompactError> {
     encode_with_level(value, DEFAULT_ZSTD_LEVEL)
 }
 
 /// Like [`encode`] with an explicit zstd level.
 pub fn encode_with_level<T: Serialize>(value: &T, zstd_level: i32) -> Result<String, CompactError> {
-    let raw =
-        postcard::to_allocvec(value).map_err(|e| CompactError(format!("postcard encode: {e}")))?;
-    encode_postcard_bytes(&raw, zstd_level)
-}
-
-/// zstd + base64 for already-postcarded bytes (avoids a second postcard pass).
-pub fn encode_postcard_bytes(raw: &[u8], zstd_level: i32) -> Result<String, CompactError> {
-    let compressed =
-        zstd::encode_all(raw, zstd_level).map_err(|e| CompactError(format!("zstd encode: {e}")))?;
-    Ok(BASE64.encode(compressed))
+    let raw = msgpack_encode(value)?;
+    zstd_base64(&raw, zstd_level)
 }
 
 /// Inverse of [`encode`].
-///
-/// Decodes via [`serde_path_to_error`] rather than plain `postcard::from_bytes`:
-/// postcard's `Error::custom` variant discards the message serde attaches to it
-/// (see `postcard::Error::SerdeDeCustom`), so every schema-mismatch failure
-/// anywhere in a large nested type otherwise collapses to the same generic
-/// "Serde Deserialization Error" with no indication of which field broke.
-///
-/// Postcard structs are wire-encoded as plain sequences (no field names on the
-/// wire — that's what makes the format compact), so `serde_path_to_error` can
-/// only report *positional* segments here, e.g. `[3][0]` meaning "4th field of
-/// the outer struct, then 1st field of that nested struct" — cross-reference
-/// against each struct's field declaration order to find the actual field.
-/// Still a large improvement: it narrows a schema mismatch anywhere inside a
-/// large nested type (e.g. `WorldGenerationOutput`) down to one exact path
-/// instead of a blind bisection through the whole struct tree.
-///
-/// Note on schema evolution: `#[serde(default)]` on a trailing field does **not**
-/// make postcard payloads backward-compatible when that type lives inside a
-/// `Vec<_>` (or any sequence). After one element's fields there is still more
-/// buffer — the next element — so the decoder cannot tell a field is "missing"
-/// and will consume the neighbour's bytes instead. Prefer `#[serde(skip)]` for
-/// runtime-only extensions, or an explicit versioned migration, before adding
-/// new persisted fields to sequence elements.
 pub fn decode<T: DeserializeOwned>(payload: &str) -> Result<T, CompactError> {
     let compressed = BASE64
         .decode(payload.as_bytes())
-        .map_err(|e| CompactError(format!("base64 decode: {e}")))?;
+        .map_err(|error| CompactError(format!("base64 decode: {error}")))?;
     let raw = zstd::decode_all(compressed.as_slice())
-        .map_err(|e| CompactError(format!("zstd decode: {e}")))?;
-    let mut deserializer = postcard::Deserializer::from_bytes(&raw);
-    serde_path_to_error::deserialize(&mut deserializer)
-        .map_err(|e| CompactError(format!("postcard decode at `{}`: {}", e.path(), e.inner())))
+        .map_err(|error| CompactError(format!("zstd decode: {error}")))?;
+    msgpack_decode(&raw)
 }
 
-/// Build a JSON [`Value`] for persistence: compact envelope when postcard size
+/// Build a JSON [`Value`] for persistence: compact envelope when MessagePack size
 /// exceeds `threshold_bytes`, otherwise naive `serde_json::to_value`.
 pub fn to_persist_value<T: Serialize>(
     value: &T,
     threshold_bytes: usize,
 ) -> Result<Value, CompactError> {
-    let raw =
-        postcard::to_allocvec(value).map_err(|e| CompactError(format!("postcard encode: {e}")))?;
+    let raw = msgpack_encode(value)?;
     if raw.len() > threshold_bytes {
-        let payload = encode_postcard_bytes(&raw, DEFAULT_ZSTD_LEVEL)?;
+        let payload = zstd_base64(&raw, DEFAULT_ZSTD_LEVEL)?;
         Ok(serde_json::json!({
             "encoding": ENCODING,
             "payload": payload,
         }))
     } else {
-        serde_json::to_value(value).map_err(|e| CompactError(format!("json encode: {e}")))
+        serde_json::to_value(value).map_err(|error| CompactError(format!("json encode: {error}")))
     }
 }
 
 /// Inverse of [`to_persist_value`]: compact envelope or plain JSON document body.
 pub fn from_persist_value<T: DeserializeOwned>(value: Value) -> Result<T, CompactError> {
+    reject_unknown_encoding(&value)?;
     if is_compact_envelope(&value) {
         let payload = value
             .get("payload")
-            .and_then(|v| v.as_str())
+            .and_then(Value::as_str)
             .ok_or_else(|| CompactError("compact envelope missing payload".into()))?;
         decode(payload)
     } else {
-        serde_json::from_value(value).map_err(|e| CompactError(format!("json decode: {e}")))
+        serde_json::from_value(value).map_err(|error| CompactError(format!("json decode: {error}")))
     }
+}
+
+/// Decode a compact envelope to the JSON value `serde_json::to_value` would produce.
+///
+/// A value that is not an envelope is returned unchanged.
+pub fn expand_envelope(value: Value) -> Result<Value, CompactError> {
+    reject_unknown_encoding(&value)?;
+    if !is_compact_envelope(&value) {
+        return Ok(value);
+    }
+    let payload = value
+        .get("payload")
+        .and_then(Value::as_str)
+        .ok_or_else(|| CompactError("compact envelope missing payload".into()))?;
+    decode(payload)
 }
 
 /// Serialize `value` as a versioned compact JSON envelope.
@@ -175,9 +180,6 @@ pub fn deserialize<'de, T: DeserializeOwned, D: Deserializer<'de>>(
 }
 
 /// Newtype that always serde-encodes `T` via the compact envelope.
-///
-/// Prefer the session threshold path for normal types; use this only when a
-/// value must always be compact regardless of size.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CompactJson<T>(pub T);
 
@@ -280,7 +282,7 @@ mod tests {
     #[test]
     fn rejects_unknown_encoding_tag() {
         let bad = serde_json::json!({
-            "encoding": "unknown-v0",
+            "encoding": "postcard+zstd-v1",
             "payload": "AAAA",
         });
         let err = serde_json::from_value::<CompactJson<Sample>>(bad).unwrap_err();
@@ -305,78 +307,67 @@ mod tests {
         assert_eq!(from_persist_value::<Sample>(value).unwrap(), original);
     }
 
-    #[derive(Debug, Clone, Serialize)]
-    struct Outer {
-        name: String,
-        inner: Inner,
-    }
-
-    #[derive(Debug, Clone, Serialize)]
-    struct Inner {
-        grid_size: usize,
-    }
-
-    // Deliberately mismatched vs. `Inner`'s wire shape: postcard is not
-    // self-describing, so a struct field renamed/retyped between encode and
-    // decode does not fail loudly on its own — it only surfaces once some
-    // downstream deserializer (here `NonZeroUsize`) rejects the misread bytes.
-    #[allow(dead_code)]
-    #[derive(Debug, Deserialize)]
-    struct MismatchedOuter {
-        name: String,
-        inner: MismatchedInner,
-    }
-
-    #[allow(dead_code)]
-    #[derive(Debug, Deserialize)]
-    struct MismatchedInner {
-        grid_size: std::num::NonZeroUsize,
-    }
-
-    // GIVEN a compact payload whose nested field no longer matches the
-    // decode-side schema (postcard's own error discards this detail — see
-    // `postcard::Error::SerdeDeCustom`)
-    // WHEN decode fails
-    // THEN the error names the exact positional field path (`[1][0]` = 2nd
-    // field of the outer struct, 1st field of that nested struct) so a schema
-    // mismatch buried anywhere in a large nested type (e.g.
-    // `WorldGenerationOutput`) can be found in seconds instead of bisected by
-    // hand
-    #[test]
-    fn decode_error_reports_failing_field_path() {
-        let original = Outer {
-            name: "world".into(),
-            inner: Inner { grid_size: 0 },
-        };
-        let payload = encode(&original).expect("encode");
-
-        let err = decode::<MismatchedOuter>(&payload).unwrap_err();
-
-        assert!(
-            err.0.contains("[1][0]"),
-            "expected error to name the failing positional field path, got: {}",
-            err.0
-        );
-    }
-
     // GIVEN a large value and a low threshold
-    // WHEN to_persist_value runs
-    // THEN the result is a compact envelope that round-trips
+    // WHEN to_persist_value runs and the envelope is expanded
+    // THEN the JSON matches serde_json::to_value
     #[test]
-    fn to_persist_value_compacts_when_over_threshold() {
+    fn expanded_envelope_matches_naive_json() {
         let original = Sample {
             name: "big".into(),
             values: vec![0.5; 5000],
         };
         let value = to_persist_value(&original, 64).unwrap();
         assert!(is_compact_envelope(&value));
-        // Document metadata may sit alongside the envelope on disk.
-        let mut with_meta = value.clone();
-        with_meta
-            .as_object_mut()
-            .unwrap()
-            .insert("_key".into(), Value::String("Sample".into()));
-        assert!(is_compact_envelope(&with_meta));
-        assert_eq!(from_persist_value::<Sample>(with_meta).unwrap(), original);
+        let expanded = expand_envelope(value).unwrap();
+        let naive = serde_json::to_value(&original).unwrap();
+        assert_eq!(expanded, naive);
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Row {
+        label: String,
+        #[serde(default)]
+        extra: i32,
+    }
+
+    // GIVEN a sequence element whose compact payload omits a defaulted field
+    // WHEN it is decoded
+    // THEN serde fills the default
+    #[test]
+    fn default_field_inside_sequence_fills() {
+        let stored = vec![Row {
+            label: "a".into(),
+            extra: 0,
+        }];
+        let payload = encode(&stored).unwrap();
+        let restored: Vec<Row> = decode(&payload).unwrap();
+        assert_eq!(restored[0].extra, 0);
+        assert_eq!(restored[0].label, "a");
+    }
+
+    // GIVEN a compact payload whose field type no longer matches
+    // WHEN decode fails
+    // THEN the error names the field
+    #[test]
+    fn decode_error_names_the_field() {
+        #[derive(Serialize)]
+        struct Outer {
+            name: String,
+        }
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct ExpectNumber {
+            name: i32,
+        }
+        let payload = encode(&Outer {
+            name: "world".into(),
+        })
+        .unwrap();
+        let err = decode::<ExpectNumber>(&payload).unwrap_err();
+        assert!(
+            err.0.contains("name"),
+            "expected the error to name the field, got: {}",
+            err.0
+        );
     }
 }

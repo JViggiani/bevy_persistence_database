@@ -300,8 +300,14 @@ mod tests {
 
         app.update();
 
-        let session = app.world().get_resource::<PersistenceSession>().unwrap();
-        assert!(session.is_resource_dirty(std::any::TypeId::of::<TestResource>()));
+        let mut session = app.world_mut().resource_mut::<PersistenceSession>();
+        let state = session.take_dirty_state();
+        assert!(
+            state
+                .dirty_resources
+                .contains(&std::any::TypeId::of::<TestResource>())
+        );
+        session.restore_dirty_state(state);
     }
 
     #[test]

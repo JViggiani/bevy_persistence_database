@@ -42,7 +42,9 @@ impl PersistenceSession {
         let Some(deser) = self.components.deserializers.get(comp_name) else {
             return Ok(());
         };
-        deser(world, entity, value)
+        deser(world, entity, value).map_err(|error| {
+            PersistenceError::new(format!("component `{comp_name}`: {error}"))
+        })
     }
 
     /// Deserialize one persisted resource during load.
@@ -56,7 +58,9 @@ impl PersistenceSession {
         let Some(deser) = self.resources.deserializers.get(res_name) else {
             return Ok(());
         };
-        deser(world, value)
+        deser(world, value).map_err(|error| {
+            PersistenceError::new(format!("resource `{res_name}`: {error}"))
+        })
     }
 
     fn cache_resource_version(&mut self, res_name: &str, version: u64) {

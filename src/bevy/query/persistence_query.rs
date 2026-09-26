@@ -1,7 +1,7 @@
 //! A manual builder for creating and executing database queries that load results into a Bevy `World`.
 
 use crate::bevy::plugins::persistence_plugin::{PersistencePluginConfig, TokioRuntime};
-use crate::core::db::connection::{DatabaseConnectionResource, DocumentKind};
+use crate::core::db::connection::{DatabaseConnectionResource, DocumentKind, PersistenceError};
 use crate::core::db::{DatabaseConnection, read_version};
 use crate::core::persist::Persist;
 use crate::core::query::{FilterExpression, PersistenceQuerySpecification};
@@ -111,7 +111,7 @@ impl PersistenceQuery {
     /// explicitly set via [`with_db`](Self::with_db) and [`store`](Self::store).
     ///
     /// Intended for use inside exclusive systems (`fn my_system(world: &mut World)`).
-    pub fn run(mut self, world: &mut World) -> Vec<Entity> {
+    pub fn run(mut self, world: &mut World) -> Result<Vec<Entity>, PersistenceError> {
         if self.db.is_none() {
             self.db = Some(
                 world
@@ -158,13 +158,6 @@ impl PersistenceQuery {
         self
     }
 
-    /// For component tests - internal use.
-    #[cfg(test)]
-    pub fn for_component<T: Component + Persist>(mut self) -> Self {
-        self.component_names.push(T::name());
-        self
-    }
-
     /// Build a backend-agnostic spec.
     pub fn build_spec(&self) -> PersistenceQuerySpecification {
         let mut fetch_only = self.component_names.clone();
@@ -202,17 +195,22 @@ impl PersistenceQuery {
     }
 
     /// Run the query for keys only.
-    pub async fn fetch_ids(&self) -> Vec<String> {
+    pub async fn fetch_ids(&self) -> Result<Vec<String>, PersistenceError> {
         let db = self
             .db
             .as_ref()
             .expect("PersistenceQuery: call with_db() before fetch_ids()");
         let spec = self.build_spec();
-        db.execute_keys(&spec).await.expect("query failed")
+        db.execute_keys(&spec).await
     }
 
     /// Load matching entities into the World.
-    pub async fn fetch_into(&self, world: &mut World) -> Vec<bevy::prelude::Entity> {
+    ///
+    /// On a fetch or deserialize error the [`PersistenceSession`] resource is put back.
+    pub async fn fetch_into(
+        &self,
+        world: &mut World,
+    ) -> Result<Vec<bevy::prelude::Entity>, PersistenceError> {
         let db = self
             .db
             .as_ref()
@@ -232,10 +230,13 @@ impl PersistenceQuery {
             "[builder] fetch_into issuing execute_documents (partial_projection={})",
             !spec.return_full_docs
         );
-        let documents = db
-            .execute_documents(&spec)
-            .await
-            .expect("Batch document fetch failed");
+        let documents = match db.execute_documents(&spec).await {
+            Ok(documents) => documents,
+            Err(error) => {
+                world.insert_resource(session);
+                return Err(error);
+            }
+        };
         bevy::log::debug!(
             "[builder] fetch_into: backend returned {} documents",
             documents.len()
@@ -266,26 +267,41 @@ impl PersistenceQuery {
                     explicit_components,
                     key
                 );
-                let entity = session
-                    .materialize_entity_document(world, &doc, key_field, &explicit_components, true)
-                    .expect("component deserialization failed")
-                    .expect("document key should be present");
+                let entity = match session.materialize_entity_document(
+                    world,
+                    &doc,
+                    key_field,
+                    &explicit_components,
+                    true,
+                ) {
+                    Ok(Some(entity)) => entity,
+                    Ok(None) => {
+                        world.insert_resource(session);
+                        return Err(PersistenceError::new(format!(
+                            "document `{key}` is missing its key"
+                        )));
+                    }
+                    Err(error) => {
+                        world.insert_resource(session);
+                        return Err(PersistenceError::new(format!("document `{key}`: {error}")));
+                    }
+                };
 
                 result.push(entity);
             }
         }
 
-        session
-            .fetch_and_insert_resources(&**db, store, world)
-            .await
-            .expect("resource deserialization failed");
+        if let Err(error) = session.fetch_and_insert_resources(&**db, store, world).await {
+            world.insert_resource(session);
+            return Err(error);
+        }
 
         world.insert_resource(session);
         bevy::log::debug!(
             "[builder] fetch_into: inserted {} entities into world",
             result.len()
         );
-        result
+        Ok(result)
     }
 
     /// Re-read persisted versions from the database into the in-memory version cache,
@@ -516,18 +532,18 @@ mod tests {
                         "_key":"k1",
                         BEVY_PERSISTENCE_DATABASE_METADATA_FIELD: {
                             BEVY_PERSISTENCE_DATABASE_VERSION_FIELD: 1,
-                            BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: DocumentKind::Entity.as_str(),
+                            BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: DocumentKind::Entity.as_ref(),
                         },
-                        "Health": 1,
+                        "Health": {"value": 1},
                         "Position": {"x": 1.0, "y": 2.0},
                     }),
                     json!({
                         "_key":"k2",
                         BEVY_PERSISTENCE_DATABASE_METADATA_FIELD: {
                             BEVY_PERSISTENCE_DATABASE_VERSION_FIELD: 1,
-                            BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: DocumentKind::Entity.as_str(),
+                            BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: DocumentKind::Entity.as_ref(),
                         },
-                        "Health": 3,
+                        "Health": {"value": 3},
                         "Position": {"x": 4.0, "y": 5.0},
                     }),
                 ])
@@ -556,7 +572,7 @@ mod tests {
             .with::<Position>();
         let loaded = query.fetch_into(app.world_mut()).await;
 
-        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.expect("fetch").len(), 2);
     }
 
     #[tokio::test]
@@ -580,7 +596,7 @@ mod tests {
         app.add_plugins(PersistencePluginCore::new(db.clone()));
 
         let query = PersistenceQuery::new().with_db(db).store(TEST_STORE);
-        let _ = query.fetch_into(app.world_mut()).await;
+        query.fetch_into(app.world_mut()).await.expect("fetch");
     }
 
     #[test]
@@ -592,7 +608,7 @@ mod tests {
         let query = PersistenceQuery::new()
             .with_db(db)
             .store(TEST_STORE)
-            .for_component::<Comp1>();
+            .with::<Comp1>();
         let spec = query.build_spec();
 
         assert!(!spec.presence_with.is_empty());
@@ -601,15 +617,18 @@ mod tests {
         assert_eq!(spec.fetch_only, vec!["Comp1"]);
     }
 
+    // GIVEN a key query whose database call fails
+    // WHEN fetch_ids runs
+    // THEN the database error is returned
     #[test]
-    #[should_panic(expected = "query failed")]
-    fn fetch_ids_panics_on_error() {
+    fn fetch_ids_returns_database_errors() {
         let mut mock_db = MockDatabaseConnection::new();
         mock_db.expect_execute_keys().returning(|_spec| {
             Box::pin(async { Err(PersistenceError::General("db error".into())) })
         });
         let db = Arc::new(mock_db);
         let query = PersistenceQuery::new().with_db(db).store(TEST_STORE);
-        block_on(query.fetch_ids());
+        let error = block_on(query.fetch_ids()).unwrap_err();
+        assert!(error.to_string().contains("db error"), "{error}");
     }
 }

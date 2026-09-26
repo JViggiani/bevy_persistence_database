@@ -5,9 +5,29 @@
 //! Call [`apply_registered_persist_types`] once after adding `PersistencePlugins`
 //! to drain the global registry into your `App`.
 
-use bevy::app::App;
+use std::{any::TypeId, sync::Mutex};
+
+use bevy::{
+    app::{App, PostUpdate},
+    prelude::{Component, IntoScheduleConfigs, Resource},
+};
+
+#[cfg(not(feature = "bevy_many_relationship_edges"))]
+use bevy::ecs::relationship::Relationship;
 use once_cell::sync::Lazy;
-use std::sync::Mutex;
+
+use crate::{
+    bevy::plugins::persistence_plugin::{
+        PersistenceSystemSet, RegisteredPersistTypes, auto_dirty_tracking_entity_system,
+        auto_dirty_tracking_resource_system,
+    },
+    core::session::PersistenceSession,
+};
+
+#[cfg(not(feature = "bevy_many_relationship_edges"))]
+use crate::bevy::plugins::persistence_plugin::auto_dirty_tracking_bevy_relationship_system;
+#[cfg(feature = "bevy_many_relationship_edges")]
+use crate::bevy::plugins::persistence_plugin::auto_dirty_tracking_relationship_system;
 
 /// Global registry of registration functions populated before `main()` by
 /// `#[ctor::ctor]`-annotated constructors generated for every `#[persist]` type.
@@ -48,20 +68,13 @@ fn collection_name<T: 'static>() -> &'static str {
 /// Calling this function a second time for the same type is idempotent.
 pub fn register_persist_component<T>(app: &mut App)
 where
-    T: ::bevy::prelude::Component
+    T: Component
         + ::serde::Serialize
         + ::serde::de::DeserializeOwned
         + Send
         + Sync
         + 'static,
 {
-    use crate::bevy::plugins::persistence_plugin::{
-        PersistenceSystemSet, RegisteredPersistTypes, auto_dirty_tracking_entity_system,
-    };
-    use crate::core::session::PersistenceSession;
-    use ::bevy::prelude::IntoScheduleConfigs;
-    use std::any::TypeId;
-
     let type_id = TypeId::of::<T>();
     let is_new = app
         .world_mut()
@@ -74,7 +87,7 @@ where
             .resource_mut::<PersistenceSession>()
             .register_component_named::<T>(name);
         app.add_systems(
-            ::bevy::app::PostUpdate,
+            PostUpdate,
             auto_dirty_tracking_entity_system::<T>.in_set(PersistenceSystemSet::TrackChanges),
         );
     }
@@ -88,20 +101,13 @@ where
 /// Calling this function a second time for the same type is idempotent.
 pub fn register_persist_resource<R>(app: &mut App)
 where
-    R: ::bevy::prelude::Resource
+    R: Resource
         + ::serde::Serialize
         + ::serde::de::DeserializeOwned
         + Send
         + Sync
         + 'static,
 {
-    use crate::bevy::plugins::persistence_plugin::{
-        PersistenceSystemSet, RegisteredPersistTypes, auto_dirty_tracking_resource_system,
-    };
-    use crate::core::session::PersistenceSession;
-    use ::bevy::prelude::IntoScheduleConfigs;
-    use std::any::TypeId;
-
     let type_id = TypeId::of::<R>();
     let is_new = app
         .world_mut()
@@ -114,7 +120,7 @@ where
             .resource_mut::<PersistenceSession>()
             .register_resource_named::<R>(name);
         app.add_systems(
-            ::bevy::app::PostUpdate,
+            PostUpdate,
             auto_dirty_tracking_resource_system::<R>.in_set(PersistenceSystemSet::TrackChanges),
         );
     }
@@ -134,15 +140,8 @@ where
 #[cfg(not(feature = "bevy_many_relationship_edges"))]
 pub fn register_persist_bevy_relationship<R>(app: &mut App)
 where
-    R: ::bevy::prelude::Component + ::bevy::ecs::relationship::Relationship + Send + Sync + 'static,
+    R: Component + Relationship + Send + Sync + 'static,
 {
-    use crate::bevy::plugins::persistence_plugin::{
-        PersistenceSystemSet, RegisteredPersistTypes, auto_dirty_tracking_bevy_relationship_system,
-    };
-    use crate::core::session::PersistenceSession;
-    use ::bevy::prelude::IntoScheduleConfigs;
-    use std::any::TypeId;
-
     let type_id = TypeId::of::<R>();
     let is_new = app
         .world_mut()
@@ -154,7 +153,7 @@ where
             .resource_mut::<PersistenceSession>()
             .register_bevy_relationship::<R>(collection_name::<R>());
         app.add_systems(
-            ::bevy::app::PostUpdate,
+            PostUpdate,
             auto_dirty_tracking_bevy_relationship_system::<R>
                 .in_set(PersistenceSystemSet::TrackChanges),
         );
@@ -173,13 +172,6 @@ pub fn register_persist_many_relationship<R>(app: &mut App)
 where
     R: ::serde::Serialize + ::serde::de::DeserializeOwned + Send + Sync + 'static,
 {
-    use crate::bevy::plugins::persistence_plugin::{
-        PersistenceSystemSet, RegisteredPersistTypes, auto_dirty_tracking_relationship_system,
-    };
-    use crate::core::session::PersistenceSession;
-    use ::bevy::prelude::IntoScheduleConfigs;
-    use std::any::TypeId;
-
     let type_id = TypeId::of::<R>();
     let is_new = app
         .world_mut()
@@ -191,7 +183,7 @@ where
             .resource_mut::<PersistenceSession>()
             .register_many_relationship::<R>(collection_name::<R>());
         app.add_systems(
-            ::bevy::app::PostUpdate,
+            PostUpdate,
             auto_dirty_tracking_relationship_system::<R>.in_set(PersistenceSystemSet::TrackChanges),
         );
     }

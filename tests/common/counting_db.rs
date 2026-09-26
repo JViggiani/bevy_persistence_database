@@ -1,6 +1,6 @@
 use bevy_persistence_database::core::db::connection::EdgeDocument;
 use bevy_persistence_database::core::db::{
-    DatabaseConnection, DocumentKind, PersistenceError, TransactionOperation,
+    DatabaseConnection, DocumentKind, PersistenceError, StoreContents, TransactionOperation,
 };
 use bevy_persistence_database::core::query::{
     EdgeQuerySpecification, PersistenceQuerySpecification,
@@ -109,5 +109,12 @@ impl DatabaseConnection for CountingDbConnection {
     ) -> BoxFuture<'static, Result<Vec<EdgeDocument>, PersistenceError>> {
         self.queries.fetch_add(1, Ordering::SeqCst);
         self.inner.query_edges(spec)
+    }
+
+    fn read_store(
+        &self,
+        store: &str,
+    ) -> BoxFuture<'static, Result<StoreContents, PersistenceError>> {
+        self.inner.read_store(store)
     }
 }
