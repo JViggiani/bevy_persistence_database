@@ -1,7 +1,9 @@
 //! `#[db_matrix_test]` attribute expansion.
 
 use proc_macro::TokenStream;
-use quote::{format_ident, quote};
+use quote::quote;
+#[cfg(not(feature = "ra-fallback"))]
+use quote::format_ident;
 use syn::{ItemFn, parse_macro_input, spanned::Spanned};
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {

@@ -31,11 +31,6 @@ impl EnsuredStores {
     }
 }
 
-/// Escape a SQL string literal embedded in a query fragment.
-pub fn escape_sql_literal(value: &str) -> String {
-    value.replace('\'', "''")
-}
-
 /// Build a single-query Arango BFS AQL that unrolls `depth` levels via LET bindings.
 pub fn build_arango_edge_bfs_aql(depth: usize) -> String {
     if depth == 0 {

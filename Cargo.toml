@@ -60,7 +60,7 @@ strum = { version = "0.27", features = ["derive"] }
 zstd = "0.13"
 
 [features]
-default = ["postgres", "arango"]
+default = ["arango"]
 arango = ["dep:arangors"]
 postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
 mock = ["dep:mockall"]

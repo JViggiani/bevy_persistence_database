@@ -1,7 +1,6 @@
 // Declare the sub-modules
 pub mod components;
 pub mod counting_db;
-pub mod db_matrix;
 pub mod resources;
 pub mod setup;
 

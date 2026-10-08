@@ -8,8 +8,7 @@ use crate::core::db::connection::{
 };
 use crate::core::db::shared::DocumentOperations;
 use crate::core::db::shared::{
-    EnsuredStores, GroupedOperations, OperationType, check_operation_success, escape_sql_literal,
-    extract_keys,
+    EnsuredStores, GroupedOperations, OperationType, check_operation_success, extract_keys,
 };
 use crate::core::query::{
     BinaryOperator, EdgeQuerySpecification, FilterExpression, PersistenceQuerySpecification,
@@ -26,6 +25,10 @@ use tokio_postgres::{Config, NoTls};
 
 // Local constants to avoid magic strings
 const KEY_COL: &str = "id";
+
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
+}
 
 // Typed parameter carrier for filter translation
 enum SqlParam {

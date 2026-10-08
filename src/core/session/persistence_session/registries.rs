@@ -514,10 +514,6 @@ impl PersistenceSession {
         self.resources.serializers.keys().copied()
     }
 
-    pub(crate) fn resource_name_for_type(&self, type_id: TypeId) -> Option<&'static str> {
-        self.resources.type_id_to_name.get(&type_id).copied()
-    }
-
     /// Returns the number of registered persisted resources.
     pub fn persisted_resource_count(&self) -> usize {
         self.resources.removers.len()

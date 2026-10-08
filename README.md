@@ -160,7 +160,7 @@ app.add_plugins(PersistencePlugins::new(db.clone()).with_config(config));
 - `default_store`: fallback store when queries/commits don’t override `.store()`.
 - `compact_threshold_bytes`: auto-compact large JSON values as MessagePack + zstd (`msgpack+zstd-v1`). An unknown envelope tag, including the previous postcard tag, is an error. See `bevy_persistence_database::compact`.
 
-Load-induced dirty flags are suppressed automatically during hydration ([`PersistenceSession::materialize_entity_document`], [`PersistenceSession::materialize_resource`], and related load APIs open a scope; PostUpdate [`PersistenceSystemSet::FinishHydration`] closes it after dirty tracking). Use [`PersistenceQuery::reconcile_versions`](crate::bevy::query::PersistenceQuery::reconcile_versions) manually after ops/migration if the in-memory version cache must be realigned to the database.
+Load-induced dirty flags are suppressed automatically during hydration ([`PersistenceSession::materialize_entity_document`], [`PersistenceSession::materialize_resource`], and related load APIs open a scope; PostUpdate [`PersistenceSystemSet::FinishHydration`] closes it after dirty tracking).
 
 ### Commit scheduling helper
 

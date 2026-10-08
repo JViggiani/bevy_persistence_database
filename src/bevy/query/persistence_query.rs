@@ -2,11 +2,10 @@
 
 use crate::bevy::plugins::persistence_plugin::{PersistencePluginConfig, TokioRuntime};
 use crate::core::db::connection::{DatabaseConnectionResource, DocumentKind, PersistenceError};
-use crate::core::db::{DatabaseConnection, read_version};
+use crate::core::db::DatabaseConnection;
 use crate::core::persist::Persist;
 use crate::core::query::{FilterExpression, PersistenceQuerySpecification};
 use crate::core::session::PersistenceSession;
-use crate::core::versioning::version_manager::VersionKey;
 use bevy::prelude::{Component, Entity, World};
 use std::sync::Arc;
 
@@ -304,99 +303,6 @@ impl PersistenceQuery {
         Ok(result)
     }
 
-    /// Re-read persisted versions from the database into the in-memory version cache,
-    /// without spawning entities or deserializing components.
-    ///
-    /// **Not for routine gameplay.** In a single-writer setup, an optimistic-concurrency
-    /// conflict during normal commits indicates a pipeline bug (version cache drift, load
-    /// dirt, etc.) and should be investigated — not silently papered over.
-    ///
-    /// Use this explicitly when the database was changed outside the running app (ops,
-    /// migration, manual repair, restore) and the in-memory version map must be realigned
-    /// to match. Live ECS state is left untouched; only the OCC version map is refreshed.
-    /// Returns the number of entity/resource versions updated.
-    ///
-    /// Intended for use inside exclusive systems (`fn my_system(world: &mut World)`).
-    pub fn reconcile_versions(mut self, world: &mut World) -> usize {
-        if self.db.is_none() {
-            self.db = Some(
-                world
-                    .resource::<DatabaseConnectionResource>()
-                    .connection
-                    .clone(),
-            );
-        }
-        if self.store.is_none() {
-            self.store = Some(
-                world
-                    .resource::<PersistencePluginConfig>()
-                    .default_store
-                    .clone(),
-            );
-        }
-        let runtime = world.resource::<TokioRuntime>().runtime.clone();
-        runtime.block_on(self.reconcile_versions_into(world))
-    }
-
-    async fn reconcile_versions_into(&self, world: &mut World) -> usize {
-        let db = self
-            .db
-            .as_ref()
-            .expect("PersistenceQuery: call with_db() or use run() before reconcile_versions()");
-
-        let mut query_with_full_docs = self.clone();
-        query_with_full_docs.force_full_docs = true;
-        let spec = query_with_full_docs.build_spec();
-
-        let documents = match db.execute_documents(&spec).await {
-            Ok(docs) => docs,
-            Err(e) => {
-                bevy::log::error!("version reconcile: document fetch failed: {e}");
-                return 0;
-            }
-        };
-
-        let mut session = world
-            .remove_resource::<PersistenceSession>()
-            .expect("PersistenceSession missing");
-
-        let key_field = db.document_key_field();
-        let store = self
-            .store
-            .as_deref()
-            .expect("PersistenceQuery: call store() or use run() before reconcile_versions()");
-        let mut realigned = 0usize;
-        for doc in &documents {
-            let key = doc[key_field].as_str().unwrap_or_default().to_string();
-            if key.is_empty() {
-                continue;
-            }
-            let version = read_version(doc).unwrap_or(1);
-            session
-                .version_manager_mut()
-                .set_version(VersionKey::Entity(key), version);
-            realigned += 1;
-        }
-
-        let resource_types: Vec<_> = session.persisted_resource_types().collect();
-        for type_id in resource_types {
-            let Some(res_name) = session.resource_name_for_type(type_id) else {
-                continue;
-            };
-            if let Ok(Some((_, version))) = db.fetch_resource(store, res_name).await {
-                session
-                    .version_manager_mut()
-                    .set_version(VersionKey::Resource(type_id), version);
-                realigned += 1;
-            }
-        }
-
-        world.insert_resource(session);
-        bevy::log::info!(
-            "version reconcile: realigned {realigned} entity/resource versions from the database"
-        );
-        realigned
-    }
 }
 
 impl Clone for PersistenceQuery {
