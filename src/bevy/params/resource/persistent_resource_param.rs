@@ -3,6 +3,7 @@
 //! apply; the resource is then visible to later systems and to this one on its next run.
 //! Mutations are marked dirty by Bevy change detection, like any persisted resource.
 
+use bevy::ecs::component::Mutable;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::{Commands, Local, Mut, Res, ResMut, Resource, World};
 
@@ -64,7 +65,7 @@ pub struct PersistentRes<'w, 's, T: Resource + Persist> {
 
 /// Mutable persisted resource accessor. Requests a load while the resource is absent.
 #[derive(SystemParam)]
-pub struct PersistentResMut<'w, 's, T: Resource + Persist> {
+pub struct PersistentResMut<'w, 's, T: Resource<Mutability = Mutable> + Persist> {
     resource: Option<ResMut<'w, T>>,
     commands: Commands<'w, 's>,
     config: Res<'w, PersistencePluginConfig>,
@@ -93,7 +94,7 @@ impl<'w, 's, T: Resource + Persist> PersistentRes<'w, 's, T> {
     }
 }
 
-impl<'w, 's, T: Resource + Persist> PersistentResMut<'w, 's, T> {
+impl<'w, 's, T: Resource<Mutability = Mutable> + Persist> PersistentResMut<'w, 's, T> {
     /// Override the store for the next load of this resource.
     pub fn store(mut self, store: impl Into<String>) -> Self {
         self.request.store = Some(store.into());

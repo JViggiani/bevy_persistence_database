@@ -1,6 +1,6 @@
 use std::any::type_name;
 
-use bevy::ecs::query::{QueryData, QueryFilter};
+use bevy::ecs::query::{QueryData, QueryFilter, SingleEntityQueryData};
 use bevy::ecs::system::QueryLens;
 use bevy::prelude::World;
 
@@ -28,7 +28,7 @@ where
     where
         Q2: QueryData<ReadOnly = Q2> + QueryDataToComponents,
         F2: QueryFilter + ToPresenceSpec + FilterSupported,
-        NewD: QueryData,
+        NewD: SingleEntityQueryData,
         NewF: QueryFilter,
     {
         let options = std::mem::take(&mut *self.options)

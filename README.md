@@ -17,14 +17,14 @@ Persistence for Bevy ECS to ArangoDB or Postgres with an idiomatic Bevy Query AP
 | 0.16 | 0.1.x |
 | 0.17 | 0.2.x - 0.5.x |
 | 0.18 | 0.6.x – 0.7.x |
-| 0.19 | 0.5.x (yanked) |
+| 0.19 | 0.8.x (0.5.x yanked) |
 
 ## Install
 
 ```toml
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = ["bevy_log"] }
-bevy_persistence_database = { version = "0.7.0", features = ["arango", "postgres"] }
+bevy = { version = "0.19", default-features = false, features = ["bevy_log"] }
+bevy_persistence_database = { version = "0.8.0", features = ["arango", "postgres"] }
 ```
 
 Enable `arango` or `postgres` features based on your backend and supply an `Arc<dyn DatabaseConnection>` at startup.
