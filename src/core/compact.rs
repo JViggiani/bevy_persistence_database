@@ -12,6 +12,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::DeserializeOwned};
 use serde_json::Value;
 
+use crate::core::integers::{tag_integers, untag_integers};
+
 /// Envelope version written into JSON documents.
 pub const ENCODING: &str = "msgpack+zstd-v1";
 
@@ -105,7 +107,8 @@ pub fn decode<T: DeserializeOwned>(payload: &str) -> Result<T, CompactError> {
 }
 
 /// Build a JSON [`Value`] for persistence: compact envelope when MessagePack size
-/// exceeds `threshold_bytes`, otherwise naive `serde_json::to_value`.
+/// exceeds `threshold_bytes`, otherwise naive `serde_json::to_value` with its
+/// integers past the signed 64-bit range tagged ([`crate::core::integers`]).
 pub fn to_persist_value<T: Serialize>(
     value: &T,
     threshold_bytes: usize,
@@ -118,11 +121,14 @@ pub fn to_persist_value<T: Serialize>(
             "payload": payload,
         }))
     } else {
-        serde_json::to_value(value).map_err(|error| CompactError(format!("json encode: {error}")))
+        serde_json::to_value(value)
+            .map(tag_integers)
+            .map_err(|error| CompactError(format!("json encode: {error}")))
     }
 }
 
-/// Inverse of [`to_persist_value`]: compact envelope or plain JSON document body.
+/// Inverse of [`to_persist_value`]: compact envelope or plain JSON document body,
+/// its tagged integers untagged.
 pub fn from_persist_value<T: DeserializeOwned>(value: Value) -> Result<T, CompactError> {
     reject_unknown_encoding(&value)?;
     if is_compact_envelope(&value) {
@@ -132,17 +138,17 @@ pub fn from_persist_value<T: DeserializeOwned>(value: Value) -> Result<T, Compac
             .ok_or_else(|| CompactError("compact envelope missing payload".into()))?;
         decode(payload)
     } else {
+        let value = untag_integers(value).map_err(|error| CompactError(format!("json decode: {error}")))?;
         serde_json::from_value(value).map_err(|error| CompactError(format!("json decode: {error}")))
     }
 }
 
-/// Decode a compact envelope to the JSON value `serde_json::to_value` would produce.
-///
-/// A value that is not an envelope is returned unchanged.
+/// Decode a stored value to the JSON value `serde_json::to_value` would produce:
+/// a compact envelope decoded, plain JSON with its tagged integers untagged.
 pub fn expand_envelope(value: Value) -> Result<Value, CompactError> {
     reject_unknown_encoding(&value)?;
     if !is_compact_envelope(&value) {
-        return Ok(value);
+        return untag_integers(value).map_err(|error| CompactError(format!("json decode: {error}")));
     }
     let payload = value
         .get("payload")

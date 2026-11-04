@@ -79,6 +79,8 @@ tracing-subscriber = "0.3.19"
 tracing = "0.1.40"
 mockall = { workspace = true }
 bevy_persistence_database_derive = { version = "0.7.0", path = "bevy_persistence_database_derive" }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
+rstest = { version = "0.28.0", default-features = false }
 
 [[test]]
 name = "integration_tests"

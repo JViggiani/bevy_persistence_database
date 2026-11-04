@@ -10,6 +10,8 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::core::compact::{from_persist_value, to_persist_value};
+#[cfg(feature = "bevy_many_relationship_edges")]
+use crate::core::integers::{tag_integers, untag_integers};
 use crate::core::db::connection::{EdgeDocument, PersistenceError};
 use crate::core::persist::Persist;
 use crate::core::schema::lock::trace::{SchemaFormat, trace_type};
@@ -436,7 +438,7 @@ impl PersistenceSession {
                                 else {
                                     continue;
                                 };
-                                let serialized_payload = serde_json::to_value(payload).ok();
+                                let serialized_payload = serde_json::to_value(payload).ok().map(tag_integers);
                                 edges.push(EdgeDocument {
                                     key: EdgeDocument::make_key(name, &from_guid, &to_guid),
                                     relationship_type: name.to_string(),
@@ -471,6 +473,8 @@ impl PersistenceSession {
                     let Some(payload_json) = payload_json else {
                         return Err(PersistenceError::new("Missing relationship payload"));
                     };
+                    let payload_json =
+                        untag_integers(payload_json).map_err(|e| PersistenceError::new(e.to_string()))?;
                     let payload: R = serde_json::from_value(payload_json)
                         .map_err(|e| PersistenceError::new(e.to_string()))?;
                     bevy_many_relationships::set_many_relationship::<R>(
@@ -491,9 +495,10 @@ impl PersistenceSession {
         self.relationships.payload_validators.insert(
             name.to_string(),
             Box::new(|value| {
-                serde_json::from_value::<R>(value.clone())
-                    .map(|_| ())
+                untag_integers(value.clone())
                     .map_err(|error| error.to_string())
+                    .and_then(|value| serde_json::from_value::<R>(value).map_err(|error| error.to_string()))
+                    .map(|_| ())
             }),
         );
     }

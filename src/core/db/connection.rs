@@ -17,6 +17,11 @@ pub const BEVY_PERSISTENCE_DATABASE_VERSION_FIELD: &str = "bevy_persistence_vers
 /// Field indicating whether a document represents an entity or a resource.
 pub const BEVY_PERSISTENCE_DATABASE_BEVY_TYPE_FIELD: &str = "bevy_type";
 
+/// Sole key of a tagged integer: one not every store keeps exactly, written
+/// as its decimal digits ([`crate::core::integers`]). Reserved: a stored
+/// object with this key alone is read as an integer.
+pub const BEVY_PERSISTENCE_DATABASE_INTEGER_FIELD: &str = "bevy_persistence_integer";
+
 /// Logical discriminator for persisted documents.
 ///
 /// Declaration order is the transaction order: entities, then resources, then

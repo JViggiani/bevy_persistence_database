@@ -72,3 +72,11 @@ impl From<bevy::prelude::Entity> for MemberOf {
 pub struct TeamMembers {
     members: Vec<Entity>,
 }
+
+/// A component at the 64-bit integer extremes.
+#[derive(Clone, Debug, PartialEq)]
+#[persist(component)]
+pub struct IntegerExtremes {
+    pub unsigned: u64,
+    pub signed: i64,
+}

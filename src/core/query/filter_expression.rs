@@ -1,7 +1,13 @@
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::core::integers::tag_integers;
+
 /// Backend-agnostic filter expression tree used to build database queries.
+///
+/// Literals are encoded as stored values are ([`crate::core::integers`]): an
+/// integer past the signed 64-bit range is tagged, so it matches its stored
+/// field by equality (`eq`, `ne`, `in_`) but not by order (`gt`, `lt`, ...).
 #[derive(Clone, Debug)]
 pub enum FilterExpression {
     Literal(Value),
@@ -59,7 +65,7 @@ impl FilterExpression {
             op: BinaryOperator::Eq,
             lhs: Box::new(self),
             rhs: Box::new(FilterExpression::Literal(
-                serde_json::to_value(value).unwrap(),
+                tag_integers(serde_json::to_value(value).unwrap()),
             )),
         }
     }
@@ -69,7 +75,7 @@ impl FilterExpression {
             op: BinaryOperator::Gt,
             lhs: Box::new(self),
             rhs: Box::new(FilterExpression::Literal(
-                serde_json::to_value(value).unwrap(),
+                tag_integers(serde_json::to_value(value).unwrap()),
             )),
         }
     }
@@ -79,7 +85,7 @@ impl FilterExpression {
             op: BinaryOperator::Gte,
             lhs: Box::new(self),
             rhs: Box::new(FilterExpression::Literal(
-                serde_json::to_value(value).unwrap(),
+                tag_integers(serde_json::to_value(value).unwrap()),
             )),
         }
     }
@@ -89,7 +95,7 @@ impl FilterExpression {
             op: BinaryOperator::Lt,
             lhs: Box::new(self),
             rhs: Box::new(FilterExpression::Literal(
-                serde_json::to_value(value).unwrap(),
+                tag_integers(serde_json::to_value(value).unwrap()),
             )),
         }
     }
@@ -99,7 +105,7 @@ impl FilterExpression {
             op: BinaryOperator::Lte,
             lhs: Box::new(self),
             rhs: Box::new(FilterExpression::Literal(
-                serde_json::to_value(value).unwrap(),
+                tag_integers(serde_json::to_value(value).unwrap()),
             )),
         }
     }
@@ -109,7 +115,7 @@ impl FilterExpression {
             op: BinaryOperator::In,
             lhs: Box::new(self),
             rhs: Box::new(FilterExpression::Literal(
-                serde_json::to_value(value).unwrap(),
+                tag_integers(serde_json::to_value(value).unwrap()),
             )),
         }
     }
