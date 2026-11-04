@@ -3,8 +3,9 @@
 Persistence for Bevy ECS to ArangoDB or Postgres with an idiomatic Bevy Query API, explicit load triggers, and manual commits you can await.
 
 ## Highlights
-- `PersistenceQuery` mirrors Bevy `Query`: use iter/get/single/get_many/iter_combinations after calling `ensure_loaded()`.
-- Smart caching and coalesced loads within a frame; `force_refresh()` bypasses cache when needed.
+- `PersistentQuery` is a Bevy `Query` that can request database loads: `load()` queues one, reads go through the inner `Query`.
+- Loads run as Bevy commands with exclusive world access: no raw world pointer, no aliasing.
+- Smart caching: a repeated load spec is skipped; `force_refresh()` bypasses the cache.
 - Presence/value filters: `With`, `Without`, `Or`, optionals, comparisons, and key filters via `Guid::key_field()`.
 - Resources persisted alongside components with `#[persist(resource)]`.
 - Batching + parallel commit execution; per-document versioning for optimistic concurrency.
@@ -63,49 +64,71 @@ fn main() {
 
 ## Loading data
 
+Loads are requests. `PersistentQuery::load()` queues a Bevy command; the command fetches from the database with exclusive world access when the system's commands apply. Systems ordered after the requester see the rows in the same frame; the requesting system sees them on its next run. Reads go through the inner Bevy `Query` (`iter`, `get`, `single`, …), so they never touch the database.
+
 ```rust
 use bevy::prelude::*;
-use bevy_persistence_database::{Guid, PersistenceQuery};
+use bevy_persistence_database::bevy::{components::Guid, params::query::PersistentQuery};
 
-fn system(mut pq: PersistenceQuery<(&Health, Option<&Position>)>) {
-    let count = pq
-        .store("example") // optional override of default_store
-        .where(Guid::key_field().eq("player-1"))
-        .ensure_loaded()
-        .iter()
-        .count();
-    info!("loaded {} entities", count);
+fn request_player(pq: PersistentQuery<(&Health, Option<&Position>)>) {
+    pq.store("example") // optional override of default_store
+        .filter(Guid::key_field().eq("player-1"))
+        .load();
+}
+
+fn read_player(pq: PersistentQuery<(&Health, Option<&Position>)>) {
+    for (_entity, (health, position)) in pq.iter() {
+        info!("health {} at {:?}", health.value, position.map(|p| p.x));
+    }
+}
+
+app.add_systems(Update, (request_player, read_player).chain());
+```
+
+A load spec already loaded is skipped (cache); `force_refresh()` reloads. `paginated_load(n)` fetches in pages of `n` documents. `with_relationship_depth::<R>(d)` / `with_all_relationship_depth(d)` follow relationship edges, and `PersistenceRelationshipHydrator` requests edges for entities already in the world.
+
+Code that must load and read in one step uses the exclusive API:
+
+```rust
+use bevy_persistence_database::bevy::query::PersistenceQuery;
+
+fn load_now(world: &mut World) -> Result {
+    let entities = PersistenceQuery::new().with::<Health>().run(world)?;
+    info!("loaded {} entities", entities.len());
+    Ok(())
 }
 ```
 
-After `ensure_loaded()`, `PersistenceQuery` derefs to a regular Bevy `Query` for pass-through reads without additional DB I/O. Use `force_refresh()` to bypass cache.
+Resources: `PersistentRes<T>` / `PersistentResMut<T>` return the resource as the world holds it and, while it is absent, ask once for a load (same timing as above). Mutations are marked dirty by Bevy change detection, like any persisted resource.
 
 ## Joins and transmute
 
 ```rust
 use bevy::prelude::*;
-use bevy_persistence_database::{PersistenceQuery, query::join::Join, query::QueryDataToComponents};
+use bevy::ecs::system::QueryLens;
+use bevy_persistence_database::bevy::params::query::PersistentQuery;
 
 fn join_example(
-    mut common: PersistenceQuery<(&Health, &Position)>,
-    mut names: PersistenceQuery<&PlayerName>,
+    mut common: PersistentQuery<(&Health, &Position)>,
+    mut names: PersistentQuery<&PlayerName>,
 ) {
-    let joined = names.join_filtered(&mut common).ensure_loaded();
-    for (_e, (health, position, name)) in joined.iter() {
+    // Requests one load of the intersection; the lens views what the world holds now.
+    let mut joined: QueryLens<(&Health, &Position, &PlayerName)> =
+        names.join_filtered(&mut common);
+    for (health, position, name) in joined.query().iter() {
         info!("{} @ ({}, {})", name.name, position.x, position.y);
     }
 }
 
-fn transmute_example(mut pq: PersistenceQuery<&Health>) {
-    pq.ensure_loaded();
-    let comps = pq.transmute::<(&Health, Option<&Position>)>();
-    for (_e, (h, pos)) in comps.iter() {
-        let _ = (h.value, pos.map(|p| p.x));
+fn transmute_example(mut pq: PersistentQuery<(&Health, &Position)>) {
+    let mut lens = pq.transmute_lens::<&Health>();
+    for health in lens.query().iter() {
+        let _ = health.value;
     }
 }
 ```
 
-Use `join_filtered` to correlate data across multiple queries without reloading, and `transmute` to widen the component view for reuse in systems or for table-style assertions in tests.
+Use `join_filtered` to correlate data across two queries with one database load, and `transmute_lens` (Bevy's, through the inner `Query`) to narrow the component view.
 
 ## Committing changes
 
@@ -167,8 +190,7 @@ Load-induced dirty flags are suppressed automatically during hydration ([`Persis
 `persistence_plugin::commit_in_flight` is a run-condition that is `true` while a commit is in progress or queued. Gate a periodic commit-trigger system with `.run_if(not(commit_in_flight))` to avoid preparing a redundant trigger (and its bookkeeping) while one is still running.
 
 ## Scheduling notes
-- Loads can run in `Update` or `PostUpdate`.
-- Deferred world mutations from loads are applied in `PersistenceSystemSet::LoadApply`, before `TrackChanges`.
+- Request loads in `Update` (or in `PostUpdate` before `TrackChanges`): a load applies with its system's commands, and must land before dirty tracking so hydration is not mistaken for gameplay change.
 - Commit pipeline runs in `PersistenceSystemSet::Commit`; readers that need fresh data should run after `PreCommit`.
 
 ## Schema migrations

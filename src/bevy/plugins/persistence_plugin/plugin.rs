@@ -5,10 +5,7 @@ use std::{any::TypeId, collections::HashSet, sync::Arc};
 use bevy::{app::PluginGroupBuilder, prelude::*};
 
 use crate::{
-    bevy::{
-        params::query::{InFlightQueries, PersistenceQueryCache},
-        world_access::DeferredWorldOperations,
-    },
+    bevy::params::query::PersistenceQueryCache,
     core::{
         compact::DEFAULT_COMPACT_THRESHOLD_BYTES,
         db::{DatabaseConnection, connection::DatabaseConnectionResource},
@@ -22,10 +19,7 @@ use super::{
         handle_commit_trigger,
     },
     despawn_tracking::{auto_despawn_tracking_resource_system, auto_despawn_tracking_system},
-    ecs_plumbing::{
-        apply_deferred_world_ops, finish_hydration, insert_initial_immediate_world_ptr,
-        publish_immediate_world_ptr,
-    },
+    ecs_plumbing::finish_hydration,
     listeners::{commit_event_listener, init_commit_listeners},
     runtime::{TokioRuntime, ensure_task_pools},
 };
@@ -33,8 +27,6 @@ use super::{
 /// A Bevy `SystemSet` for grouping the core persistence systems into ordered phases.
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PersistenceSystemSet {
-    /// Apply deferred load operations (must run before dirty tracking).
-    LoadApply,
     /// ECS change detection for persistence dirty sets.
     TrackChanges,
     /// Close hydration scopes opened during load (must run after dirty tracking).
@@ -49,7 +41,7 @@ pub enum PersistenceSystemSet {
 ///
 /// Stored as a Bevy resource so it does not interfere with the global Rayon
 /// pool used by Bevy or other libraries. Only inserted when `thread_count > 1`;
-/// when absent, commit preparation and document loading run serially.
+/// when absent, commit preparation runs serially.
 #[derive(Resource)]
 pub struct PersistenceThreadPool(rayon::ThreadPool);
 
@@ -136,17 +128,13 @@ impl Plugin for PersistencePluginCore {
             .add_message::<CommitCompleted>()
             .init_resource::<CommitStatus>()
             .insert_resource(TokioRuntime::shared())
-            .init_resource::<PersistenceQueryCache>()
-            .init_resource::<InFlightQueries>()
-            .init_resource::<DeferredWorldOperations>();
+            .init_resource::<PersistenceQueryCache>();
 
         init_commit_listeners(app.world_mut());
-        insert_initial_immediate_world_ptr(app);
 
         app.configure_sets(
             PostUpdate,
             (
-                PersistenceSystemSet::LoadApply,
                 PersistenceSystemSet::TrackChanges,
                 PersistenceSystemSet::FinishHydration,
                 PersistenceSystemSet::PreCommit,
@@ -155,15 +143,9 @@ impl Plugin for PersistencePluginCore {
                 .chain(),
         );
 
-        // Publish the pointer before any Startup systems and at the start of each frame.
-        app.add_systems(Startup, publish_immediate_world_ptr)
-            .add_systems(First, publish_immediate_world_ptr);
-
         app.add_systems(
             PostUpdate,
             (
-                (apply_deferred_world_ops, publish_immediate_world_ptr)
-                    .in_set(PersistenceSystemSet::LoadApply),
                 (
                     auto_despawn_tracking_system,
                     auto_despawn_tracking_resource_system,

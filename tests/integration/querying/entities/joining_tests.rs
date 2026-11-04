@@ -1,11 +1,9 @@
 use crate::common::*;
-use bevy::ecs::query::QueryState;
 use bevy::ecs::system::QueryLens;
 use bevy::prelude::IntoScheduleConfigs;
 use bevy::prelude::*;
 use bevy_persistence_database::bevy::params::query::PersistentQuery;
 use bevy_persistence_database::bevy::plugins::persistence_plugin::PersistenceSystemSet;
-use bevy_persistence_database::bevy::world_access::ImmediateWorldPtr;
 use bevy_persistence_database::core::session::commit_sync;
 use bevy_persistence_database_derive::db_matrix_test;
 
@@ -52,18 +50,11 @@ fn test_query_lens_join_filtered_world_only() {
         mut common: PersistentQuery<(&Health, &Position)>,
         mut names: Query<&PlayerName>,
         mut st: ResMut<JoinState>,
-        wp: Res<ImmediateWorldPtr>,
     ) {
-        // Trigger lens build to load DB where needed (world-only join is fine here)
-        let _: QueryLens<(&Health, &Position, &PlayerName), ()> = names.join_filtered(&mut *common);
-
-        // Count results using a fresh QueryState over the current World state
-        let world: &World = wp.as_world();
-        if let Some(mut qs) = QueryState::<(&Health, &Position, &PlayerName), ()>::try_new(world) {
-            st.joined_count = qs.iter(world).count();
-        } else {
-            st.joined_count = 0;
-        }
+        // World-only join over what the Update load materialized
+        let mut lens: QueryLens<(&Health, &Position, &PlayerName), ()> =
+            names.join_filtered(&mut *common);
+        st.joined_count = lens.query().iter().count();
     }
     app.add_systems(PostUpdate, sys_join.after(PersistenceSystemSet::PreCommit));
 
@@ -108,27 +99,23 @@ fn test_join_between_two_persistent_queries_loaded_inline() {
     }
     app.insert_resource(JoinState::default());
 
-    // Single system: smart-join (DB load under the hood) and compute count via lens in the same frame.
+    // The smart join requests one DB load of the intersection
     fn sys_join(
         mut common: PersistentQuery<(&Health, &Position)>,
         mut names: PersistentQuery<&PlayerName>,
-        mut st: ResMut<JoinState>,
-        wp: Res<ImmediateWorldPtr>,
     ) {
-        // Trigger the smart-join DB load inline (immediate materialization path)
         let _: QueryLens<(&Health, &Position, &PlayerName), ()> = names.join_filtered(&mut common);
-
-        // Count intersection immediately via a fresh QueryState
-        let world: &World = wp.as_world();
-        if let Some(mut qs) = QueryState::<(&Health, &Position, &PlayerName), ()>::try_new(world) {
-            st.joined_count = qs.iter(world).count();
-        } else {
-            st.joined_count = 0;
-        }
     }
 
-    // Run after PreCommit so deferred ops from the smart join are applied in this frame.
-    app.add_systems(PostUpdate, sys_join.after(PersistenceSystemSet::PreCommit));
+    // Ordered after the join, so its load has applied by the time this counts
+    fn sys_count(
+        joined: Query<(&Health, &Position, &PlayerName)>,
+        mut st: ResMut<JoinState>,
+    ) {
+        st.joined_count = joined.iter().count();
+    }
+
+    app.add_systems(Update, (sys_join, sys_count).chain());
     app.update();
 
     // Verify only the intersection was materialized (no stragglers):

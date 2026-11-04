@@ -7,8 +7,8 @@
 
 #[cfg(feature = "bevy_many_relationship_edges")]
 mod many_relationship_edges {
-    //! Tests for loading relationships via `PersistenceRelationshipHydrator`,
-    //! `PersistentQuery`, and the async `schedule_load` variant.
+    //! Tests for loading relationships via `PersistenceRelationshipHydrator`
+    //! and `PersistentQuery`.
 
     use std::sync::Arc;
 
@@ -129,53 +129,6 @@ mod many_relationship_edges {
             .expect("source should have outgoing relationships");
         assert!(outgoing.contains(loaded_b));
     }
-
-    /// `PersistentQuery::schedule_load` triggers a non-blocking load; by the second
-    /// update the relationships should be materialised on ECS entities.
-    #[db_matrix_test]
-    fn test_persistent_query_schedule_load_loads_relationships() {
-        #[derive(Resource, Default)]
-        struct Triggered {
-            triggered: bool,
-        }
-
-        let (db, _container) = setup();
-        seed_friendship(&db, 0.6, "ff_a", "ff_b");
-
-        let mut reader_app = setup_test_app(db.clone(), None);
-        reader_app.add_plugins(ManyRelationshipsPlugin);
-        reader_app.init_resource::<Triggered>();
-
-        reader_app.add_systems(
-            Update,
-            |mut triggered: ResMut<Triggered>, query: PersistentQuery<&Health>| {
-                if !triggered.triggered {
-                    query
-                        .with_relationship_depth::<Friendship>(1)
-                        .schedule_load();
-                    triggered.triggered = true;
-                }
-            },
-        );
-
-        reader_app.update();
-        reader_app.update();
-
-        let mut found = false;
-        let mut q = reader_app
-            .world_mut()
-            .query::<&bevy_many_relationships::OutgoingRelationships<Friendship>>();
-        for outgoing in q.iter(reader_app.world()) {
-            if outgoing.len() > 0 {
-                found = true;
-                break;
-            }
-        }
-        assert!(
-            found,
-            "schedule_load should eventually materialize relationships"
-        );
-    }
 }
 
 // ── Bevy-native relationship path ────────────────────────────────────────────
@@ -283,65 +236,6 @@ mod bevy_native {
         assert_eq!(
             member_of.team, tgt_entity,
             "MemberOf should point to the correctly loaded target entity"
-        );
-    }
-
-    /// `PersistentQuery::schedule_load` triggers a non-blocking load; by the second
-    /// update the Bevy-native relationship should be materialised on ECS entities.
-    /// Mirrors `test_persistent_query_schedule_load_loads_relationships` from the
-    /// `bevy_many_relationships` loading tests.
-    #[db_matrix_test]
-    fn test_persistent_query_schedule_load_loads_native_relationships() {
-        #[derive(Resource, Default)]
-        struct Triggered {
-            triggered: bool,
-        }
-
-        let (db, _container) = setup();
-        seed_member_of(&db, "sched_src", "sched_tgt");
-
-        let mut reader_app = setup_test_app(db.clone(), None);
-        reader_app
-            .world_mut()
-            .resource_mut::<PersistenceSession>()
-            .register_bevy_relationship_loader::<MemberOf>("MemberOf");
-        reader_app.init_resource::<Triggered>();
-
-        reader_app.add_systems(
-            Update,
-            |mut triggered: ResMut<Triggered>, query: PersistentQuery<&Health>| {
-                if !triggered.triggered {
-                    query.with_relationship_depth::<MemberOf>(1).schedule_load();
-                    triggered.triggered = true;
-                }
-            },
-        );
-
-        reader_app.update();
-        reader_app.update();
-
-        let src_entity = {
-            let mut q = reader_app.world_mut().query::<(Entity, &Guid)>();
-            q.iter(reader_app.world())
-                .find_map(|(e, g)| if g.id() == "sched_src" { Some(e) } else { None })
-                .expect("source entity should be loaded after schedule_load")
-        };
-
-        let tgt_entity = {
-            let mut q = reader_app.world_mut().query::<(Entity, &Guid)>();
-            q.iter(reader_app.world())
-                .find_map(|(e, g)| if g.id() == "sched_tgt" { Some(e) } else { None })
-                .expect("target entity should be loaded after schedule_load")
-        };
-
-        let member_of = reader_app
-            .world()
-            .get::<MemberOf>(src_entity)
-            .expect("source entity should have MemberOf after schedule_load");
-
-        assert_eq!(
-            member_of.team, tgt_entity,
-            "schedule_load should eventually materialise the native relationship"
         );
     }
 }

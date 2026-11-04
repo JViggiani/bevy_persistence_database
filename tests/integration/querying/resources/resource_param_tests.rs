@@ -1,7 +1,10 @@
+use std::sync::Arc;
+
 use crate::common::*;
 use bevy::prelude::*;
 use bevy_persistence_database::bevy::params::query::PersistentQuery;
 use bevy_persistence_database::bevy::params::resource::{PersistentRes, PersistentResMut};
+use bevy_persistence_database::core::db::DatabaseConnection;
 use bevy_persistence_database::core::session::{PersistenceSession, commit_sync};
 use bevy_persistence_database_derive::db_matrix_test;
 
@@ -27,30 +30,39 @@ struct ReadCapture {
     second: Option<String>,
 }
 
-#[db_matrix_test]
-fn loads_resource_on_first_access() {
-    let (db, _container) = setup();
-
-    // Seed: commit GameSettings to the store
+fn seed_settings(db: &Arc<dyn DatabaseConnection>, store: &str, settings: GameSettings) {
     let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.42,
-        map_name: "mystic".into(),
-    });
+    seed.insert_resource(settings);
     seed.update();
-    commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
+    commit_sync(&mut seed, db.clone(), store).expect("seed commit failed");
+}
 
-    // App under test
+fn capture(mut res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
+    if let Some(s) = res.get() {
+        cap.loaded = true;
+        cap.settings = Some(s.clone());
+    }
+}
+
+// GIVEN GameSettings committed to the store and absent from a fresh app
+// WHEN a system reads it through PersistentRes on two frames
+// THEN the first frame requests the load and the second reads the stored value
+#[db_matrix_test]
+fn loads_resource_after_first_request() {
+    let (db, _container) = setup();
+    seed_settings(
+        &db,
+        TEST_STORE,
+        GameSettings {
+            difficulty: 0.42,
+            map_name: "mystic".into(),
+        },
+    );
+
     let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
-
-    fn sys(mut res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
-        if let Some(s) = res.get() {
-            cap.loaded = true;
-            cap.settings = Some(s.clone());
-        }
-    }
-    app.add_systems(Update, sys);
+    app.add_systems(Update, capture);
+    app.update();
     app.update();
 
     let cap = app.world().resource::<CaptureSettings>();
@@ -60,34 +72,29 @@ fn loads_resource_on_first_access() {
     assert_eq!(settings.map_name, "mystic");
 }
 
+// GIVEN GameSettings in the store and a different local GameSettings in the world
+// WHEN a system reads it through PersistentRes
+// THEN the local value is returned and not overwritten
 #[db_matrix_test]
 fn respects_existing_resource() {
     let (db, _container) = setup();
+    seed_settings(
+        &db,
+        TEST_STORE,
+        GameSettings {
+            difficulty: 0.1,
+            map_name: "persisted".into(),
+        },
+    );
 
-    // Persist a different value in the store.
-    let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.1,
-        map_name: "persisted".into(),
-    });
-    seed.update();
-    commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
-
-    // App under test already has a local resource that should not be overwritten.
     let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
     app.insert_resource(GameSettings {
         difficulty: 0.9,
         map_name: "local".into(),
     });
-
-    fn sys(mut res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
-        if let Some(s) = res.get() {
-            cap.loaded = true;
-            cap.settings = Some(s.clone());
-        }
-    }
-    app.add_systems(Update, sys);
+    app.add_systems(Update, capture);
+    app.update();
     app.update();
 
     let cap = app.world().resource::<CaptureSettings>();
@@ -100,20 +107,21 @@ fn respects_existing_resource() {
     assert_eq!(settings.difficulty, 0.9);
 }
 
+// GIVEN GameSettings loaded from the store
+// WHEN a system mutates it locally and another PersistentRes reader reads it after
+// THEN the first read saw the stored value and the second sees the local mutation
 #[db_matrix_test]
 fn second_read_uses_local_after_mutation() {
     let (db, _container) = setup();
+    seed_settings(
+        &db,
+        TEST_STORE,
+        GameSettings {
+            difficulty: 0.1,
+            map_name: "persisted".into(),
+        },
+    );
 
-    // Persist initial value in the store
-    let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.1,
-        map_name: "persisted".into(),
-    });
-    seed.update();
-    commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
-
-    // App under test
     let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(ReadCapture::default());
 
@@ -125,12 +133,14 @@ fn second_read_uses_local_after_mutation() {
         }
     }
 
-    fn mutate_local(mut gs: ResMut<GameSettings>) {
-        gs.map_name = "local".into();
+    fn mutate_local(gs: Option<ResMut<GameSettings>>, cap: Res<ReadCapture>) {
+        if let (Some(mut gs), Some(_)) = (gs, cap.first.as_ref()) {
+            gs.map_name = "local".into();
+        }
     }
 
     fn second_load(mut res: PersistentRes<GameSettings>, mut cap: ResMut<ReadCapture>) {
-        if cap.second.is_none() {
+        if cap.first.is_some() && cap.second.is_none() {
             if let Some(gs) = res.get() {
                 cap.second = Some(gs.map_name.clone());
             }
@@ -139,27 +149,29 @@ fn second_read_uses_local_after_mutation() {
 
     app.add_systems(Update, (first_load, mutate_local, second_load).chain());
     app.update();
+    app.update();
 
     let cap = app.world().resource::<ReadCapture>();
     assert_eq!(cap.first.as_deref(), Some("persisted"));
     assert_eq!(cap.second.as_deref(), Some("local"));
 }
 
+// GIVEN GameSettings committed only to an alternate store
+// WHEN PersistentRes requests it with that store override
+// THEN the value from the alternate store loads
 #[db_matrix_test]
 fn store_override_is_used() {
     let (db, _container) = setup();
     let alt_store = "alt_store";
+    seed_settings(
+        &db,
+        alt_store,
+        GameSettings {
+            difficulty: 0.7,
+            map_name: "alt".into(),
+        },
+    );
 
-    // Seed alt store with a resource
-    let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.7,
-        map_name: "alt".into(),
-    });
-    seed.update();
-    commit_sync(&mut seed, db.clone(), alt_store).expect("seed commit failed");
-
-    // App under test uses default store unless overridden
     let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(CaptureSettings::default());
 
@@ -172,6 +184,7 @@ fn store_override_is_used() {
     }
     app.add_systems(Update, sys);
     app.update();
+    app.update();
 
     let cap = app.world().resource::<CaptureSettings>();
     assert!(cap.loaded, "resource should load from overridden store");
@@ -180,6 +193,9 @@ fn store_override_is_used() {
     assert_eq!(settings.difficulty, 0.7);
 }
 
+// GIVEN an empty store
+// WHEN a system reads GameSettings through Option<PersistentRes> on two frames
+// THEN nothing loads and the resource stays absent
 #[db_matrix_test]
 fn optional_res_none_when_absent() {
     let (db, _container) = setup();
@@ -188,18 +204,16 @@ fn optional_res_none_when_absent() {
     app.insert_resource(CaptureSettings::default());
 
     fn sys(res: Option<PersistentRes<GameSettings>>, mut cap: ResMut<CaptureSettings>) {
+        cap.loaded = false;
         if let Some(mut res) = res {
             if let Some(s) = res.get() {
                 cap.loaded = true;
                 cap.settings = Some(s.clone());
-            } else {
-                cap.loaded = false;
             }
-        } else {
-            cap.loaded = false;
         }
     }
     app.add_systems(Update, sys);
+    app.update();
     app.update();
 
     let cap = app.world().resource::<CaptureSettings>();
@@ -210,6 +224,9 @@ fn optional_res_none_when_absent() {
     assert!(cap.settings.is_none());
 }
 
+// GIVEN an empty store
+// WHEN a system tries to mutate GameSettings through Option<PersistentResMut> on two frames
+// THEN no mutation happens and the resource stays absent
 #[db_matrix_test]
 fn optional_resmut_none_when_absent() {
     let (db, _container) = setup();
@@ -227,28 +244,29 @@ fn optional_resmut_none_when_absent() {
     }
     app.add_systems(Update, sys);
     app.update();
+    app.update();
 
     let dirty = app.world().resource::<DirtyFlag>();
     assert!(!dirty.dirty, "no mutation when resource absent");
     assert!(app.world().get_resource::<GameSettings>().is_none());
 }
 
+// GIVEN GameSettings committed to the store
+// WHEN an app loads it through PersistentResMut, mutates it and commits
+// THEN a fresh app loads the mutated value (change detection marked it dirty)
 #[db_matrix_test]
 fn commit_persists_mutation() {
     let (db, _container) = setup();
+    seed_settings(
+        &db,
+        TEST_STORE,
+        GameSettings {
+            difficulty: 0.5,
+            map_name: "before".into(),
+        },
+    );
 
-    // Seed
-    let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.5,
-        map_name: "before".into(),
-    });
-    seed.update();
-    commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
-
-    // Mutate via PersistentResMut and commit
     let mut app = setup_test_app(db.clone(), None);
-
     fn mutate(mut res: PersistentResMut<GameSettings>) {
         if let Some(mut r) = res.get_mut() {
             r.map_name = "after".into();
@@ -257,19 +275,13 @@ fn commit_persists_mutation() {
     }
     app.add_systems(Update, mutate);
     app.update();
+    app.update();
     commit_sync(&mut app, db.clone(), TEST_STORE).expect("commit failed");
 
-    // Load in a fresh app to verify persistence
     let mut verify = setup_test_app(db.clone(), None);
     verify.insert_resource(CaptureSettings::default());
-
-    fn load(mut res: PersistentRes<GameSettings>, mut cap: ResMut<CaptureSettings>) {
-        if let Some(s) = res.get() {
-            cap.loaded = true;
-            cap.settings = Some(s.clone());
-        }
-    }
-    verify.add_systems(Update, load);
+    verify.add_systems(Update, capture);
+    verify.update();
     verify.update();
 
     let cap = verify.world().resource::<CaptureSettings>();
@@ -279,21 +291,22 @@ fn commit_persists_mutation() {
     assert_eq!(settings.difficulty, 0.9);
 }
 
+// GIVEN GameSettings committed once (version 1)
+// WHEN PersistentRes requests it and the load applies
+// THEN the session records version 1 for the resource
 #[db_matrix_test]
 fn sets_version_on_load() {
     let (db, _container) = setup();
-
-    // Seed
-    let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.11,
-        map_name: "v1".into(),
-    });
-    seed.update();
-    commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
+    seed_settings(
+        &db,
+        TEST_STORE,
+        GameSettings {
+            difficulty: 0.11,
+            map_name: "v1".into(),
+        },
+    );
 
     let mut app = setup_test_app(db.clone(), None);
-
     fn sys(mut res: PersistentRes<GameSettings>) {
         let _ = res.get();
     }
@@ -305,77 +318,59 @@ fn sets_version_on_load() {
     assert_eq!(version, Some(1));
 }
 
+// GIVEN an app holding a locally mutated GameSettings
+// AND another app committing a new value to the store
+// WHEN the first app reads through PersistentRes with force_refresh
+// THEN the stored value overwrites the local one
 #[db_matrix_test]
 fn force_refresh_overwrites_local_state() {
     let (db, _container) = setup();
+    seed_settings(
+        &db,
+        TEST_STORE,
+        GameSettings {
+            difficulty: 0.2,
+            map_name: "initial".into(),
+        },
+    );
 
-    // Seed initial value in store
-    let mut seed = setup_test_app(db.clone(), None);
-    seed.insert_resource(GameSettings {
-        difficulty: 0.2,
-        map_name: "initial".into(),
-    });
-    seed.update();
-    commit_sync(&mut seed, db.clone(), TEST_STORE).expect("seed commit failed");
-
-    // App under test: mutate local copy without committing
     let mut app = setup_test_app(db.clone(), None);
     app.insert_resource(StepState::default());
+    app.insert_resource(CaptureSettings::default());
 
     fn mutate_local(mut res: PersistentResMut<GameSettings>, mut step: ResMut<StepState>) {
         if step.step == 0 {
             if let Some(mut r) = res.get_mut() {
                 r.map_name = "local".into();
+                step.step = 1;
             }
-            step.step = 1;
         }
     }
-
-    fn force_refresh(
-        res: PersistentRes<GameSettings>,
-        mut step: ResMut<StepState>,
-        mut cap: ResMut<CaptureSettings>,
-    ) {
-        if step.step == 1 {
-            let mut res = res.force_refresh();
-            if let Some(s) = res.get() {
-                cap.loaded = true;
-                cap.settings = Some(s.clone());
-            }
-            step.step = 2;
-        }
-    }
-
-    app.insert_resource(CaptureSettings::default());
-    app.add_systems(Update, (mutate_local, force_refresh));
-
-    // First update: mutate local copy
+    app.add_systems(Update, mutate_local);
     app.update();
+    app.update();
+    assert_eq!(app.world().resource::<GameSettings>().map_name, "local");
 
-    // Update store externally to a new value via a second app
-    #[derive(Resource, Default)]
-    struct UpdaterState {
-        done: bool,
-    }
-
+    // Commit a new value to the store from a second app
     let mut updater = setup_test_app(db.clone(), None);
-    updater.insert_resource(UpdaterState::default());
-
-    fn load_and_mutate(mut res: PersistentResMut<GameSettings>, mut state: ResMut<UpdaterState>) {
-        if !state.done {
-            if let Some(mut r) = res.get_mut() {
+    fn load_and_mutate(mut res: PersistentResMut<GameSettings>) {
+        if let Some(mut r) = res.get_mut() {
+            if r.map_name != "remote" {
                 r.map_name = "remote".into();
                 r.difficulty = 0.8;
             }
-            state.done = true;
         }
     }
-
     updater.add_systems(Update, load_and_mutate);
+    updater.update();
     updater.update();
     commit_sync(&mut updater, db.clone(), TEST_STORE).expect("update commit failed");
 
-    // Second update: force refresh should pull remote value and overwrite local
+    // Force refresh, then read once the reload has applied
+    fn force_refresh(res: PersistentRes<GameSettings>) {
+        let _ = res.force_refresh().get();
+    }
+    app.add_systems(Update, (force_refresh, capture).chain());
     app.update();
 
     let cap = app.world().resource::<CaptureSettings>();
@@ -385,11 +380,13 @@ fn force_refresh_overwrites_local_state() {
     assert_eq!(settings.difficulty, 0.8);
 }
 
+// GIVEN an entity and GameSettings committed to the store
+// WHEN one system requests both through PersistentRes and PersistentQuery on two frames
+// THEN the second frame sees the resource and the loaded entity
 #[db_matrix_test]
 fn mixed_query_and_resource_load() {
     let (db, _container) = setup();
 
-    // Seed entity + resource
     let mut seed = setup_test_app(db.clone(), None);
     seed.world_mut().spawn(Health { value: 7 });
     seed.insert_resource(GameSettings {
@@ -413,13 +410,14 @@ fn mixed_query_and_resource_load() {
         mut pq: PersistentQuery<&Health>,
         mut state: ResMut<MixedState>,
     ) {
-        if let Some(_s) = res.get() {
+        if res.get().is_some() {
             state.loaded_resource = true;
         }
         pq.load();
         state.loaded_entities = pq.iter().count();
     }
     app.add_systems(Update, sys);
+    app.update();
     app.update();
 
     let state = app.world().resource::<MixedState>();
