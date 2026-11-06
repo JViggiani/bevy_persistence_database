@@ -4,19 +4,17 @@ use bevy::prelude::*;
 
 use crate::{bevy::components::Guid, core::session::PersistenceSession};
 
-/// Detects removal of persisted resources and marks them for deletion.
-pub(crate) fn auto_despawn_tracking_resource_system(ecs: &mut World) {
-    let presence_snapshot = {
-        let session = ecs.resource::<PersistenceSession>();
-        session.resource_presence_snapshot(ecs)
-    };
-
-    let mut session = ecs.resource_mut::<PersistenceSession>();
-    for (type_id, is_present) in presence_snapshot {
-        let was_present = session.update_resource_presence(type_id, is_present);
-        if was_present && !is_present {
-            session.mark_resource_despawned_type_id(type_id);
-        }
+/// Marks a persisted resource for deletion when it leaves the world (an
+/// observer of `Remove`: resources are components since Bevy 0.19).
+///
+/// A resource removed before it was ever committed has no stored document;
+/// the commit skips it.
+pub(crate) fn mark_resource_removed<R: Resource>(
+    _: On<Remove<R>>,
+    session: Option<ResMut<PersistenceSession>>,
+) {
+    if let Some(mut session) = session {
+        session.mark_resource_despawned::<R>();
     }
 }
 

@@ -13,10 +13,15 @@ pub use dirty_tracking::auto_dirty_tracking_bevy_relationship_system;
 #[cfg(feature = "bevy_many_relationship_edges")]
 #[doc(hidden)]
 pub use dirty_tracking::auto_dirty_tracking_relationship_system;
-pub use dirty_tracking::{auto_dirty_tracking_entity_system, auto_dirty_tracking_resource_system};
+pub use dirty_tracking::auto_dirty_tracking_entity_system;
+pub(crate) use dirty_tracking::auto_dirty_tracking_resource_system;
+pub(crate) use despawn_tracking::mark_resource_removed;
 pub use listeners::{register_commit_listener, take_commit_listener};
 pub use plugin::{
     PersistencePluginConfig, PersistencePluginCore, PersistencePlugins, PersistenceSystemSet,
     PersistenceThreadPool, RegisteredPersistTypes,
 };
 pub use runtime::TokioRuntime;
+
+#[cfg(test)]
+mod despawn_tracking_tests;

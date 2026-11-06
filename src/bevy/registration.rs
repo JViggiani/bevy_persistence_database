@@ -9,7 +9,7 @@ use std::{any::TypeId, sync::Mutex};
 
 use bevy::{
     app::{App, PostUpdate},
-    prelude::{Component, IntoScheduleConfigs, Resource},
+    prelude::{Component, IntoScheduleConfigs, Resource, resource_exists_and_changed},
 };
 
 #[cfg(not(feature = "bevy_many_relationship_edges"))]
@@ -19,7 +19,7 @@ use once_cell::sync::Lazy;
 use crate::{
     bevy::plugins::persistence_plugin::{
         PersistenceSystemSet, RegisteredPersistTypes, auto_dirty_tracking_entity_system,
-        auto_dirty_tracking_resource_system,
+        auto_dirty_tracking_resource_system, mark_resource_removed,
     },
     core::session::PersistenceSession,
 };
@@ -121,8 +121,11 @@ where
             .register_resource_named::<R>(name);
         app.add_systems(
             PostUpdate,
-            auto_dirty_tracking_resource_system::<R>.in_set(PersistenceSystemSet::TrackChanges),
-        );
+            auto_dirty_tracking_resource_system::<R>
+                .run_if(resource_exists_and_changed::<R>)
+                .in_set(PersistenceSystemSet::TrackChanges),
+        )
+        .add_observer(mark_resource_removed::<R>);
     }
 }
 

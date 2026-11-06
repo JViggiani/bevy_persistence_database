@@ -8,7 +8,7 @@
 #[cfg(feature = "bevy_many_relationship_edges")]
 mod many_relationship_edges {
     use bevy::prelude::*;
-    use bevy_many_relationships::{ManyRelatedEntityCommands, ManyRelationshipsPlugin};
+    use bevy_many_relationships::ManyRelatedEntityCommands;
     use bevy_persistence_database::bevy::components::Guid;
     use bevy_persistence_database::core::session::commit_sync;
 
@@ -21,7 +21,6 @@ mod many_relationship_edges {
     fn test_relationship_persists_new_edge() {
         let (db, _container) = setup();
         let mut app = setup_test_app(db.clone(), None);
-        app.add_plugins(ManyRelationshipsPlugin);
 
         // Spawn WITHOUT explicit GUIDs — the library assigns them automatically during
         // the commit.  Both the entities and their relationship are committed together
@@ -83,7 +82,6 @@ mod many_relationship_edges {
     fn test_many_relationships_of_same_type_from_one_entity() {
         let (db, _container) = setup();
         let mut app = setup_test_app(db.clone(), None);
-        app.add_plugins(ManyRelationshipsPlugin);
 
         let a = app.world_mut().spawn(Health { value: 1 }).id();
         let b = app.world_mut().spawn(Health { value: 2 }).id();
@@ -198,7 +196,6 @@ mod many_relationship_edges {
 
         let (db, _container) = setup();
         let mut app = setup_test_app(db.clone(), None);
-        app.add_plugins(ManyRelationshipsPlugin);
         app.add_systems(
             Update,
             establish_friendship.run_if(resource_exists::<EntitiesReady>),
@@ -270,7 +267,6 @@ mod many_relationship_edges {
     fn test_relationship_removal_deletes_edge() {
         let (db, _container) = setup();
         let mut app = setup_test_app(db.clone(), None);
-        app.add_plugins(ManyRelationshipsPlugin);
 
         let a = app.world_mut().spawn(Health { value: 1 }).id();
         let b = app.world_mut().spawn(Health { value: 2 }).id();

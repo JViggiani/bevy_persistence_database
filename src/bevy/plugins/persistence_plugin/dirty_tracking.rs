@@ -25,16 +25,10 @@ pub fn auto_dirty_tracking_entity_system<T: Component + 'static>(
     }
 }
 
-/// Automatically marks changed resources as dirty.
-pub fn auto_dirty_tracking_resource_system<T: Resource + 'static>(
-    mut session: ResMut<PersistenceSession>,
-    resource: Option<Res<T>>,
-) {
-    if let Some(resource) = resource {
-        if resource.is_changed() {
-            session.track_resource_changed(TypeId::of::<T>());
-        }
-    }
+/// Marks a persisted resource dirty; registered with
+/// `run_if(resource_exists_and_changed::<T>)`, so it runs only on a change.
+pub(crate) fn auto_dirty_tracking_resource_system<T: Resource>(mut session: ResMut<PersistenceSession>) {
+    session.track_resource_changed(TypeId::of::<T>());
 }
 
 /// Automatically marks entities whose built-in Bevy relationship component changed as dirty.
@@ -44,7 +38,7 @@ pub fn auto_dirty_tracking_bevy_relationship_system<
     R: Component + bevy::ecs::relationship::Relationship,
 >(
     mut session: ResMut<PersistenceSession>,
-    changed_query: Query<Entity, Or<(Added<R>, Changed<R>)>>,
+    changed_query: Query<Entity, Changed<R>>,
     mut removed: RemovedComponents<R>,
 ) {
     for entity in changed_query.iter() {

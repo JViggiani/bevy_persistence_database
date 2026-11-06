@@ -73,10 +73,6 @@ impl PersistenceSession {
         self.tracking.despawned_resources.insert(TypeId::of::<R>());
     }
 
-    pub(crate) fn mark_resource_despawned_type_id(&mut self, type_id: TypeId) {
-        self.tracking.despawned_resources.insert(type_id);
-    }
-
     /// Mark a specific persisted component type as dirty for an entity.
     ///
     /// Prefer [`Self::track_component_changed`] from ECS change-detection systems so

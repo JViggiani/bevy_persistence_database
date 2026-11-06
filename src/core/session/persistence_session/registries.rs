@@ -80,8 +80,6 @@ pub(super) struct ResourceRegistry {
     pub(crate) tracers: HashMap<String, SchemaTracer>,
     pub(crate) validators: HashMap<String, SchemaValidator>,
     pub(super) removers: HashMap<TypeId, ResourceRemover>,
-    pub(super) presence: HashMap<TypeId, Box<dyn Fn(&World) -> bool + Send + Sync>>,
-    pub(super) last_seen_present: HashMap<TypeId, bool>,
 }
 
 #[derive(Default)]
@@ -248,10 +246,6 @@ impl PersistenceSession {
         let type_id = std::any::TypeId::of::<R>();
         self.resources
             .insert_name_maps(type_id, ser_key, std::any::type_name::<R>());
-        self.resources.presence.insert(
-            type_id,
-            Box::new(|world: &World| world.get_resource::<R>().is_some()),
-        );
         // Insert serializer into map keyed by TypeId
         self.resources.serializers.insert(
             type_id,
@@ -543,20 +537,6 @@ impl PersistenceSession {
         value: Value,
     ) -> Result<(), PersistenceError> {
         self.hydrate_resource(world, name, value)
-    }
-    pub(crate) fn resource_presence_snapshot(&self, world: &World) -> Vec<(TypeId, bool)> {
-        self.resources
-            .presence
-            .iter()
-            .map(|(type_id, presence_fn)| (*type_id, presence_fn(world)))
-            .collect()
-    }
-
-    pub(crate) fn update_resource_presence(&mut self, type_id: TypeId, is_present: bool) -> bool {
-        self.resources
-            .last_seen_present
-            .insert(type_id, is_present)
-            .unwrap_or(false)
     }
     pub(crate) fn relationship_type_name(&self, type_id: &TypeId) -> Option<&'static str> {
         self.relationships.type_id_to_name.get(type_id).copied()

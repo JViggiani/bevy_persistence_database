@@ -18,7 +18,7 @@ use super::{
         CommitCompleted, CommitStatus, TriggerCommit, handle_commit_completed,
         handle_commit_trigger,
     },
-    despawn_tracking::{auto_despawn_tracking_resource_system, auto_despawn_tracking_system},
+    despawn_tracking::auto_despawn_tracking_system,
     ecs_plumbing::finish_hydration,
     listeners::{commit_event_listener, init_commit_listeners},
     runtime::{TokioRuntime, ensure_task_pools},
@@ -146,11 +146,7 @@ impl Plugin for PersistencePluginCore {
         app.add_systems(
             PostUpdate,
             (
-                (
-                    auto_despawn_tracking_system,
-                    auto_despawn_tracking_resource_system,
-                )
-                    .in_set(PersistenceSystemSet::TrackChanges),
+                auto_despawn_tracking_system.in_set(PersistenceSystemSet::TrackChanges),
                 finish_hydration.in_set(PersistenceSystemSet::FinishHydration),
                 (commit_event_listener, handle_commit_trigger)
                     .in_set(PersistenceSystemSet::PreCommit),

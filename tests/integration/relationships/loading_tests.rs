@@ -13,7 +13,7 @@ mod many_relationship_edges {
     use std::sync::Arc;
 
     use bevy::prelude::*;
-    use bevy_many_relationships::{ManyRelatedEntityCommands, ManyRelationshipsPlugin};
+    use bevy_many_relationships::ManyRelatedEntityCommands;
     use bevy_persistence_database::{
         bevy::{
             components::Guid,
@@ -32,7 +32,6 @@ mod many_relationship_edges {
         guid_b: &str,
     ) {
         let mut app = setup_test_app(db.clone(), None);
-        app.add_plugins(ManyRelationshipsPlugin);
 
         let a = app
             .world_mut()
@@ -62,7 +61,6 @@ mod many_relationship_edges {
         seed_friendship(&db, 0.8, "hydr_a", "hydr_b");
 
         let mut reader_app = setup_test_app(db.clone(), None);
-        reader_app.add_plugins(ManyRelationshipsPlugin);
 
         reader_app.add_systems(Update, |mut query: PersistentQuery<&Health>| {
             query.load();
@@ -103,7 +101,6 @@ mod many_relationship_edges {
         seed_friendship(&db, 0.9, "load_a", "load_b");
 
         let mut reader_app = setup_test_app(db.clone(), None);
-        reader_app.add_plugins(ManyRelationshipsPlugin);
         reader_app.add_systems(Update, |query: PersistentQuery<&Health>| {
             query.with_relationship_depth::<Friendship>(1).load();
         });
