@@ -15,7 +15,11 @@ use std::sync::{
     Mutex, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
-use testcontainers::{ContainerAsync, GenericImage, ImageExt, core::WaitFor, runners::AsyncRunner};
+use testcontainers::{
+    ContainerAsync, GenericImage, ImageExt,
+    core::{IntoContainerPort, WaitFor},
+    runners::AsyncRunner,
+};
 use tokio::runtime::Runtime;
 
 // Global test runtime
@@ -61,6 +65,7 @@ pub const TEST_STORE: &str = "default_store";
 // Start Arango
 async fn start_container() -> (ContainerAsync<GenericImage>, String, String) {
     let container = GenericImage::new("arangodb", "3.12.5")
+        .with_exposed_port(8529.tcp())
         .with_wait_for(WaitFor::message_on_stdout("is ready for business"))
         .with_env_var("ARANGO_ROOT_PASSWORD", "password")
         .start()
@@ -144,6 +149,7 @@ impl Drop for ContainerGuard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TestBackend {
     Arango,
+    #[cfg(feature = "postgres")]
     Postgres,
 }
 
@@ -266,6 +272,7 @@ static PG_GLOBAL: OnceLock<PgGlobalContainerState> = OnceLock::new();
 #[cfg(feature = "postgres")]
 async fn start_postgres_container() -> (ContainerAsync<GenericImage>, String, u16, String) {
     let image = GenericImage::new("postgres", "16")
+        .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stderr(
             "database system is ready to accept connections",
         ))
@@ -394,8 +401,6 @@ pub fn setup_backend(backend: TestBackend) -> (Arc<dyn DatabaseConnection>, Cont
 
             (Arc::new(db), ContainerGuard { inner: None })
         }
-        #[cfg(not(feature = "postgres"))]
-        TestBackend::Postgres => panic!("postgres feature not enabled"),
     }
 }
 

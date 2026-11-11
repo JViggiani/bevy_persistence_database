@@ -145,8 +145,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         _ => quote! {},
     };
 
-    let register_fn = format_ident!("__persist_register_{}", name);
-    let ctor_fn = format_ident!("__persist_ctor_{}", name);
+    let snake_name = snake_case(&name.to_string());
+    let register_fn = format_ident!("__persist_register_{}", snake_name);
+    let ctor_fn = format_ident!("__persist_ctor_{}", snake_name);
     let register_call = match kind {
         PersistKind::Component => {
             quote! { #crate_path::bevy::registration::register_persist_component::<#name>(app); }
@@ -162,12 +163,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
         },
     };
     let auto_registration = quote! {
-        #[allow(non_snake_case)]
         fn #register_fn(app: &mut ::bevy::app::App) {
             #register_call
         }
 
-        #[allow(non_snake_case)]
         #[::ctor::ctor]
         fn #ctor_fn() {
             #crate_path::bevy::registration::COMPONENT_REGISTRY
@@ -223,6 +222,23 @@ fn parse_persist_kind(metas: &Punctuated<Meta, Comma>) -> syn::Result<PersistKin
             "`#[persist]` requires `component`, `resource`, or `relationship`",
         )
     })
+}
+
+/// A type name in snake case (`WalkSpeed` → `walk_speed`), for the generated
+/// registration functions' names.
+fn snake_case(type_name: &str) -> String {
+    let mut snake = String::with_capacity(type_name.len() + 4);
+    for (index, character) in type_name.chars().enumerate() {
+        if character.is_uppercase() {
+            if index > 0 {
+                snake.push('_');
+            }
+            snake.extend(character.to_lowercase());
+        } else {
+            snake.push(character);
+        }
+    }
+    snake
 }
 
 fn item_ident(item: &Item) -> Option<&syn::Ident> {

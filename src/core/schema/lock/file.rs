@@ -412,7 +412,6 @@ mod tests {
     }
 
     #[derive(Component, Serialize, Deserialize)]
-    #[allow(dead_code)]
     struct Health {
         value: i32,
     }

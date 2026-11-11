@@ -360,8 +360,7 @@ mod tests {
         struct Outer {
             name: String,
         }
-        #[derive(Debug, Deserialize)]
-        #[allow(dead_code)]
+        #[derive(Deserialize)]
         struct ExpectNumber {
             name: i32,
         }
@@ -369,7 +368,10 @@ mod tests {
             name: "world".into(),
         })
         .unwrap();
-        let err = decode::<ExpectNumber>(&payload).unwrap_err();
+        let err = match decode::<ExpectNumber>(&payload) {
+            Ok(decoded) => panic!("expected a type mismatch, decoded name {}", decoded.name),
+            Err(err) => err,
+        };
         assert!(
             err.0.contains("name"),
             "expected the error to name the field, got: {}",

@@ -53,13 +53,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
             #[test]
             #vis fn #orig_name() {
                 // Pick one backend that is enabled; prefer postgres if available
-                #[allow(unused_mut)]
-                let mut backend_opt = None;
                 #[cfg(feature = "postgres")]
-                { backend_opt = Some(crate::common::TestBackend::Postgres); }
+                let backend = crate::common::TestBackend::Postgres;
                 #[cfg(all(not(feature = "postgres"), feature = "arango"))]
-                { backend_opt = Some(crate::common::TestBackend::Arango); }
-                let backend = backend_opt.expect("No backend feature enabled");
+                let backend = crate::common::TestBackend::Arango;
                 let setup = || crate::common::setup_backend(backend);
                 #body
             }
